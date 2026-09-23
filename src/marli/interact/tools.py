@@ -5,11 +5,13 @@ roles list tool names (``RoleSpec.tools``). Environments contribute their own
 tools (``python``, ``bash``) through ``Env.tools(role)``.
 
 Tool calls in one turn run **in the order sampled**. A *control* tool
-(``submit``, ``end_session``, ``return_report``) ends the agent's turn: any
+(``submit``, ``end_session``, ``return_report``, ``spawn_workers``) ends the agent's turn: any
 later calls in the same turn receive an error result and are not executed.
 Tools with ``shared=True`` (anything touching the shared sandbox or workspace
 writes) run inside ``scheduler.tool_phase`` so lockstep ordering is
-deterministic; pure tools (reads) may run concurrently.
+deterministic; pure tools (reads) may run concurrently. A ``blocking=True``
+tool releases the async tool mutex so the agents it waits on can acquire it.
+Lockstep's block/unblock gates hand the phase to workers without a mutex.
 
 Results are truncated (head + tail, ``Limits.tool_output_chars``) before they
 enter the agent's context; the truncated text is what is recorded.
@@ -68,7 +70,8 @@ class ToolCtx:
 class Tool(Protocol):
     spec: ToolSpec
     shared: bool
-    control: bool  # ends the turn (submit / end_session / return_report)
+    blocking: bool = False  # waits for other agents; must release the async tool mutex
+    control: bool  # ends the turn (submit / end_session / return_report / spawn_workers)
 
     async def __call__(self, ctx: ToolCtx, **arguments: Any) -> ToolResult: ...
 
@@ -253,6 +256,7 @@ def _parameters(properties: dict[str, Any], required: tuple[str, ...] = ()) -> d
 
 class _BuiltinTool:
     shared = False
+    blocking = False
     control = False
 
 
@@ -309,7 +313,11 @@ class _ListScratchpads(_BuiltinTool):
     spec = ToolSpec("list_scratchpads", "List readable scratchpads.", _parameters({}))
 
     async def __call__(self, ctx: ToolCtx) -> ToolResult:
-        entries = ctx.workspace.list_index(ctx.agent_id)
+        entries = [
+            entry
+            for entry in ctx.workspace.list_index(ctx.agent_id)
+            if entry.writer != ctx.agent_id or entry.version > 0
+        ]
         return ToolResult(
             "\n".join(
                 f"{entry.writer} v{entry.version} ({entry.n_chars} chars): {entry.first_line}"

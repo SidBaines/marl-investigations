@@ -1,0 +1,52 @@
+# Compute-matched baselines: every cell gets the same episode budget of
+# 32768 generated tokens (all agents together). Per-agent budgets split it
+# according to the protocol's shape. Policy: Qwen3.5-4B (thinking) on Tinker.
+baseline: single
+common:
+  env: math
+  env_config: {python_tool: false}
+  policies:
+    q: {ref: "tinker:Qwen/Qwen3.5-4B", renderer: qwen3_5, model: qwen3_5_4b}
+  schedule: lockstep
+  episodes_per_task: 1
+  concurrency: 16
+  limits:
+    call: {max_tokens: 16384}
+    agent: {max_gen_tokens: 32768, final_reserve: 512}
+    episode: {max_gen_tokens: 32768, max_ticks: 64, max_wall_s: 3600}
+    ctx: {max_ctx: 32768}
+cells:
+  - label: single
+    protocol: single
+    seating: {solver: q}
+  - label: sc4
+    protocol: independent_n4
+    seating: {peer: q}
+    limits:
+      call: {max_tokens: 8192}
+      agent: {max_gen_tokens: 8192, final_reserve: 512}
+  - label: swarm4
+    protocol: swarm_n4
+    seating: {peer: q}
+    limits:
+      call: {max_tokens: 8192}
+      agent: {max_gen_tokens: 8192, final_reserve: 512}
+  - label: coordinator
+    protocol: coordinator_default
+    seating: {coordinator: q, worker: q}
+    limits:
+      agent: {max_gen_tokens: 16384, final_reserve: 512}
+      worker: {max_gen_tokens: 4096, final_reserve: 256}
+      spawn: {max_per_call: 4, max_total: 4}
+  - label: ms3_notes
+    protocol: multi_session_s3_notes
+    seating: {solver: q}
+  - label: ms3_compaction
+    protocol: multi_session_s3_compaction
+    seating: {solver: q}
+  - label: debate3
+    protocol: debate_n3_r2
+    seating: {peer: q}
+    limits:
+      call: {max_tokens: 5461}
+      agent: {max_gen_tokens: 10922, final_reserve: 512}

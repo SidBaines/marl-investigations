@@ -195,11 +195,6 @@ async def test_ckpt_multiple_learners_error_names_them(
         await resolve_policy(f"ckpt:{out}", policy_id="eval", trainable=False, renderer_name="fake")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ConfigError,
-    reason="eval/policies.py rejects ckpt refs before resolution; outside M3-5 ownership",
-)
 async def test_eval_rollout_with_checkpoint_seat(tmp_path: Path, fake_setup: FakeSetup) -> None:
     taskset = make_taskset(tmp_path / "tasks")
     cfg = config(taskset)

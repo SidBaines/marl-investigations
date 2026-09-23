@@ -51,7 +51,8 @@ def test_paired_per_task_not_unpaired_episodes() -> None:
     result = paired_comparison(cell, baseline, seed=7)
     assert result.n_tasks == 2 and result.difference == 0
     assert result.low == -1 and result.high == 1
-    assert result.wins == result.losses == 1 and result.mcnemar_p == 1
+    assert result.wins == result.losses == 1 and result.permutation_p == 1
+    assert result.mcnemar_p is None
     assert result == paired_comparison(dict(reversed(list(cell.items()))), baseline, seed=7)
     all_better = paired_comparison({str(i): [1] for i in range(4)}, {str(i): [0] for i in range(4)})
     assert all_better.difference == all_better.low == all_better.high == 1

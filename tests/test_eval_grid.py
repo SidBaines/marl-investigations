@@ -90,7 +90,7 @@ def test_grid_cli_end_to_end_and_child_resume(tmp_path: Path) -> None:
     rows = json_rows(report.file("results"))
     assert rows[1]["paired_lift"]["difference"] == 1
     assert rows[1]["paired_lift"]["n_tasks"] == 3
-    assert rows[1]["paired_lift"]["mcnemar_p"] == 0.25
+    assert rows[1]["paired_lift"]["permutation_p"] == 0.25
     for label in ("base", "candidate"):
         episodes = EpisodeSet.load(out / "cells" / label / "rollout")
         assert episodes.n == 6

@@ -234,7 +234,7 @@ async def test_exhausted_worker_returns_no_report_and_coordinator_still_submits(
     episode, _ = await asyncio.wait_for(run_episode(spec), timeout=2)
     assert episode.ok and episode.outcome.final_answer == "5"
     assert "worker.max_calls" in episode.limits_hit["coord0/w0"]
-    assert "[worker coord0/w0: no report]" in spec.policies["script"].calls[-1].prompt_text
+    assert "[worker coord0/w0: no report (budget)]" in spec.policies["script"].calls[-1].prompt_text
 
 
 async def test_forced_worker_report_is_retained() -> None:
@@ -421,9 +421,13 @@ async def test_report_content_does_not_depend_on_termination_reason(
     tool = TOOLS.get("spawn_workers")()
     result = await run_tool(tool, ctx, {"tasks": [{"task": "Check"}]})
     assert result.control == {} and result.error is None
-    assert not tool.shared and not tool.control
-    expected_report = "[worker coord0/w0: no report]" if report is None else report
-    assert result.content == f"[worker coord0/w0] {expected_report}"
+    assert not tool.shared and tool.control and tool.blocking
+    expected = (
+        f"[worker coord0/w0: no report ({ended_by})]"
+        if report is None
+        else f"[worker coord0/w0] {report}"
+    )
+    assert result.content == expected
 
 
 @pytest.mark.parametrize("scratchpads", [False, True])
@@ -438,11 +442,11 @@ def test_config_roles_and_registry(scratchpads: bool) -> None:
     assert protocol.config is config
     coordinator, worker = protocol.roles()
     assert coordinator.role == "coordinator" and coordinator.count == 1
-    assert (
-        coordinator.limits_key == "agent" and coordinator.system_prompt == "Coordinator {agent_id}"
+    assert coordinator.limits_key == "agent" and coordinator.system_prompt.startswith(
+        "Coordinator {agent_id}"
     )
     assert worker.role == "worker" and worker.count is None and worker.limits_key == "worker"
-    assert worker.system_prompt == "Worker {agent_id}"
+    assert worker.system_prompt.startswith("Worker {agent_id}")
     assert coordinator.tools == ("spawn_workers", "submit", "python") + (
         ("read_scratchpad", "list_scratchpads") if scratchpads else ()
     )
@@ -472,3 +476,458 @@ def test_yaml_configs_compose(name: str, scratchpads: bool) -> None:
     assert ("read_scratchpad" in coordinator.tools) == scratchpads
     with pytest.raises(ConfigError):
         resolve_protocol(name, {"unknown_option": True})
+
+
+@pytest.mark.parametrize("schedule", ["lockstep", "async"])
+@pytest.mark.parametrize("shared_tool", ["write_scratchpad", "python"])
+async def test_shared_tool_before_spawn_never_holds_workers_lock(
+    schedule: str,
+    shared_tool: str,
+) -> None:
+    from marli.interact.tools import Tool, ToolResult
+    from marli.render.base import ToolSpec
+
+    effects: list[str] = []
+
+    class SharedPython:
+        shared = True
+        control = False
+        spec = ToolSpec(
+            "python",
+            "Shared environment action",
+            {
+                "type": "object",
+                "properties": {"content": {"type": "string"}},
+                "required": ["content"],
+                "additionalProperties": False,
+            },
+        )
+
+        async def __call__(self, ctx: ToolCtx, *, content: str) -> ToolResult:
+            effects.append(ctx.agent_id)
+            await asyncio.sleep(0)
+            return ToolResult(content)
+
+    class SharedEnv(ArithEnv):
+        def tools(self, role: str) -> list[Tool]:
+            return [SharedPython()]
+
+    config = CoordinatorConfig(
+        coordinator_tools=("spawn_workers", "submit", "write_scratchpad"),
+        env_tools=("python",),
+        worker_scratchpads=True,
+    )
+    spec = coordinator_spec(
+        {
+            "coord0": [
+                Turn(
+                    tool_calls=(
+                        (shared_tool, {"content": "coordinator"}),
+                        ("spawn_workers", {"tasks": [{"task": "A"}, {"task": "B"}]}),
+                    )
+                ),
+                tool_turn("submit", answer="5"),
+            ],
+            **{
+                f"coord0/w{i}": [
+                    tool_turn(shared_tool, content=f"worker {i}"),
+                    tool_turn("return_report", report=f"report {i}"),
+                ]
+                for i in range(2)
+            },
+        },
+        config=config,
+        schedule=schedule,
+    )
+    spec.env = SharedEnv()
+    episode, _ = await asyncio.wait_for(run_episode(spec), 2)
+    assert episode.ok and episode.outcome.final_answer == "5"
+    result = next(c for c in episode.calls if c.agent_id == "coord0").tool_calls[1]
+    assert result.error is None and "report 0" in result.result and "report 1" in result.result
+    if shared_tool == "python":
+        assert effects == ["coord0", "coord0/w0", "coord0/w1"]
+    else:
+        # The denied coordinator write still takes the shared-tool phase.
+        assert len(episode.workspace_log) == 2
+
+
+@pytest.mark.parametrize("schedule", ["lockstep", "async"])
+async def test_rejected_spawn_allows_later_shared_tools_in_the_same_turn(schedule: str) -> None:
+    spec = coordinator_spec(
+        {
+            "coord0": [
+                Turn(
+                    tool_calls=(
+                        ("write_scratchpad", {"content": "before"}),
+                        ("spawn_workers", {"tasks": [{"task": " "}]}),
+                        ("write_scratchpad", {"content": "after"}),
+                        ("spawn_workers", {"tasks": [{"task": "check"}]}),
+                    )
+                ),
+                tool_turn("submit", answer="5"),
+            ],
+            "coord0/w0": [
+                tool_turn("write_scratchpad", content="work"),
+                tool_turn("return_report", report="findings"),
+            ],
+        },
+        config=CoordinatorConfig(
+            coordinator_tools=("spawn_workers", "submit", "write_scratchpad"),
+            worker_scratchpads=True,
+        ),
+        schedule=schedule,
+    )
+    episode, _ = await asyncio.wait_for(run_episode(spec), 2)
+    assert episode.ok and episode.outcome.final_answer == "5"
+    calls = min(episode.calls, key=lambda call: call.seq).tool_calls
+    assert "non-blank" in calls[1].error
+    assert calls[2].error == "agent 'coord0' may not write scratchpad"
+    assert calls[3].result == "[worker coord0/w0] findings"
+    assert len(episode.agents) == 2
+
+
+@pytest.mark.parametrize("schedule", ["lockstep", "async"])
+async def test_spawn_ends_turn_and_next_batch_has_a_critical_path_edge(schedule: str) -> None:
+    spawn = ("spawn_workers", {"tasks": [{"task": "check"}]})
+    spec = coordinator_spec(
+        {
+            "coord0": [
+                Turn(tool_calls=(spawn, spawn, ("submit", {"answer": "wrong"}))),
+                tool_turn("spawn_workers", tasks=[{"task": "second batch"}]),
+                tool_turn("submit", answer="5"),
+            ],
+            "coord0/w0": [tool_turn("return_report", report="first")],
+            "coord0/w1": [tool_turn("return_report", report="second")],
+        },
+        schedule=schedule,
+    )
+    episode, _ = await asyncio.wait_for(run_episode(spec), 2)
+    first = min(episode.calls, key=lambda c: c.seq)
+    assert [tool.error for tool in first.tool_calls] == [
+        None,
+        "tool call after control tool",
+        "tool call after control tool",
+    ]
+    assert episode.outcome.final_answer == "5" and len(episode.agents) == 3
+    assert episode.metrics["cp_calls"] == 5
+    assert episode.metrics["cp_tokens"] == episode.metrics["total_gen"]
+
+
+@pytest.mark.parametrize("schedule", ["lockstep", "async"])
+async def test_rejected_batch_leaves_account_unchanged_and_smaller_spawn_succeeds(
+    schedule: str,
+) -> None:
+    from dataclasses import asdict
+
+    limits = Limits(worker=AgentLimits(max_gen_tokens=1024, final_reserve=128))
+    limits.episode.max_gen_tokens = 2600
+    ledger = Ledger(limits, schedule=schedule)
+    ledger.register("coord0", kind="agent")
+    before = asdict(ledger._agents["coord0"])
+    system = SimpleNamespace(
+        task=ArithEnv().task,
+        start_agent=AsyncMock(return_value="handle"),
+        wait=AsyncMock(return_value=[AgentResult("coord0/w0", None, "ok", "report")]),
+    )
+    ctx = ToolCtx("coord0", "coordinator", 0, 0, None, None, Mock(), system, ledger)
+    tool = TOOLS.get("spawn_workers")()
+    rejected = await run_tool(tool, ctx, {"tasks": [{"task": "A"}] * 3})
+    assert rejected.error == "only 2 workers are affordable; requested 3"
+    assert asdict(ledger._agents["coord0"]) == before
+    system.start_agent.assert_not_awaited()
+    accepted = await run_tool(tool, ctx, {"tasks": [{"task": "B"}]})
+    assert accepted.error is None
+    assert system.start_agent.await_args.kwargs["agent_id"] == "coord0/w0"
+
+    spec = coordinator_spec(
+        {
+            "coord0": [
+                tool_turn("spawn_workers", tasks=[{"task": "A"}] * 3),
+                tool_turn("spawn_workers", tasks=[{"task": "B"}]),
+                tool_turn("submit", answer="5"),
+            ],
+            "coord0/w0": [tool_turn("return_report", report="ok")],
+        },
+        limits=limits,
+        schedule=schedule,
+    )
+    episode, _ = await run_episode(spec)
+    assert episode.ok and episode.outcome.final_answer == "5" and len(episode.agents) == 2
+    prompts = [ctx for ctx in spec.policies["script"].calls if ctx.meta.agent_id == "coord0"]
+    assert prompts[1].spec.max_tokens == (
+        limits.episode.max_gen_tokens
+        - len(episode.calls[0].completion_ids)
+        - limits.agent.final_reserve
+    )
+
+
+@pytest.mark.parametrize("task", ["", " ", "\n\t"])
+async def test_blank_task_rejected_without_reservation(task: str) -> None:
+    ledger = Mock(spec=Ledger, limits=Limits())
+    ctx = ToolCtx("coord0", "coordinator", 0, 0, None, None, None, None, ledger)
+    result = await run_tool(TOOLS.get("spawn_workers")(), ctx, {"tasks": [{"task": task}]})
+    assert "non-blank" in result.error
+    ledger.reserve_workers.assert_not_called()
+
+
+async def test_null_context_is_absent_and_budget_fields_reach_prompts() -> None:
+    limits = Limits(spawn=SpawnLimits(max_per_call=2, max_total=3))
+    limits.worker.max_gen_tokens = 7000
+    spec = coordinator_spec(
+        {
+            "coord0": [
+                tool_turn("spawn_workers", tasks=[{"task": "A", "context": None}]),
+                tool_turn("list_scratchpads"),
+                tool_turn("submit", answer="5"),
+            ],
+            "coord0/w0": [
+                tool_turn("write_scratchpad", content="work"),
+                tool_turn("return_report", report="ok"),
+            ],
+        },
+        config=resolve_protocol("coordinator_scratch")[1],
+        limits=limits,
+    )
+    episode, _ = await run_episode(spec)
+    prompts = spec.policies["script"].calls
+    assert "2 workers per call" in prompts[0].prompt_text
+    assert "3 workers total" in prompts[0].prompt_text
+    assert "7000 generated tokens" in prompts[0].prompt_text
+    worker = next(ctx.prompt_text for ctx in prompts if ctx.meta.role == "worker")
+    assert "Context: None" not in worker
+    assert (
+        "visible to the coordinator" in worker
+        and "visible to the coordinator" in prompts[0].prompt_text
+    )
+    listing = next(
+        t.result for c in episode.calls for t in c.tool_calls if t.name == "list_scratchpads"
+    )
+    assert "coord0 v0" not in listing and "coord0/w0 v1" in listing
+
+
+@pytest.mark.parametrize("field", ["coordinator_system_prompt", "worker_system_prompt"])
+@pytest.mark.parametrize("template", ["{unknown}", "{}", "{agent_id.missing}", "{"])
+def test_bad_coordinator_template_fails_at_config_time(field: str, template: str) -> None:
+    with pytest.raises(ConfigError, match=field):
+        CoordinatorConfig(**{field: template})
+
+
+def test_worker_tools_require_return_report() -> None:
+    with pytest.raises(ConfigError, match="return_report"):
+        CoordinatorConfig(worker_tools=("python",))
+
+
+async def test_worker_nudges_and_final_text_are_reports() -> None:
+    turns = {
+        "coord0": [
+            tool_turn("spawn_workers", tasks=[{"task": "A"}]),
+            tool_turn("submit", answer="5"),
+        ],
+        "coord0/w0": [Turn("findings"), tool_turn("return_report", report="findings")],
+    }
+    spec = coordinator_spec(turns)
+    await run_episode(spec)
+    worker_prompts = [
+        ctx.prompt_text for ctx in spec.policies["script"].calls if ctx.meta.role == "worker"
+    ]
+    assert "use a tool or call return_report with your findings" in worker_prompts[-1]
+    assert "submit" not in worker_prompts[-1]
+    spec = coordinator_spec(turns, limits=Limits(on_no_tool_call="final_text_as_answer"))
+    episode, _ = await run_episode(spec)
+    assert episode.calls[0].tool_calls[0].result == "[worker coord0/w0] findings"
+    assert "coord0/w0" not in episode.outcome.submissions and "coord0/w0" not in episode.grades
+    assert (
+        next(
+            e.data["ended_by"]
+            for e in episode.events
+            if e.kind == EventKind.DONE and e.agent_id == "coord0/w0"
+        )
+        == "report"
+    )
+
+
+@pytest.mark.parametrize("schedule", ["lockstep", "async"])
+async def test_wall_timeout_records_reason_and_cleans_blocked_workers(schedule: str) -> None:
+    clock = FakeClock()
+    renderer = FakeRenderer()
+    entered = asyncio.Event()
+
+    def latency(ctx: ScriptCtx) -> float:
+        if ctx.meta.role == "worker":
+            entered.set()
+            return 100
+        return 0
+
+    spec = coordinator_spec(
+        {
+            "coord0": [tool_turn("spawn_workers", tasks=[{"task": "A"}])],
+            "coord0/w0": [tool_turn("return_report", report="late")],
+        },
+        schedule=schedule,
+    )
+    spec.clock = clock
+    spec.limits.episode.max_wall_s = 10
+    spec.policies["script"] = ScriptedPolicy(
+        "script",
+        renderer,
+        spec.policies["script"]._script,
+        clock=clock,
+        latency_s=latency,
+    )
+    before = asyncio.all_tasks()
+    task = asyncio.create_task(run_episode(spec))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        clock.advance(10)
+        episode, _ = await asyncio.wait_for(task, 2)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert not episode.ok and episode.errors == ("episode wall-clock limit",)
+    assert {e.data["ended_by"] for e in episode.events if e.kind == EventKind.DONE} == {
+        "max_wall_s"
+    }
+    assert not [task for task in asyncio.all_tasks() - before if not task.done()]
+
+
+@pytest.mark.parametrize("schedule", ["lockstep", "async"])
+async def test_worker_critical_path_accounts_for_lockstep_barrier(schedule: str) -> None:
+    spec = coordinator_spec(
+        {
+            "coord0": [
+                tool_turn("spawn_workers", tasks=[{"task": "A"}, {"task": "B"}]),
+                tool_turn("submit", answer="5"),
+            ],
+            "coord0/w0": [Turn("short"), tool_turn("return_report", report="r0")],
+            "coord0/w1": [replace(tool_turn("return_report", report="r1"), content="long" * 100)],
+        },
+        schedule=schedule,
+    )
+    episode, _ = await run_episode(spec)
+    chains = {
+        a.agent_id: [len(c.completion_ids) for c in episode.calls if c.agent_id == a.agent_id]
+        for a in episode.agents
+    }
+    a, b = chains["coord0/w0"], chains["coord0/w1"]
+    expected = max(a[0], b[0]) + a[1] if schedule == "lockstep" else max(sum(a), sum(b))
+    assert episode.metrics["cp_tokens"] == sum(chains["coord0"]) + expected
+
+
+@pytest.mark.parametrize("tasks", [None, 5, {}, "do it", '[{"task": "A"}]', [None]])
+async def test_invalid_tasks_schema_never_reserves_workers(tasks: Any) -> None:
+    ledger = Mock(spec=Ledger, limits=Limits())
+    ctx = ToolCtx("coord0", "coordinator", 0, 0, None, None, None, None, ledger)
+    result = await run_tool(TOOLS.get("spawn_workers")(), ctx, {"tasks": tasks})
+    assert result.error
+    ledger.reserve_workers.assert_not_called()
+
+
+async def test_extra_spawn_argument_is_a_tool_error() -> None:
+    ledger = Mock(spec=Ledger, limits=Limits())
+    ctx = ToolCtx("coord0", "coordinator", 0, 0, None, None, None, None, ledger)
+    result = await run_tool(
+        TOOLS.get("spawn_workers")(),
+        ctx,
+        {
+            "tasks": [{"task": "A"}],
+            "wait": True,
+        },
+    )
+    assert result.error == "unknown arguments: ['wait']"
+    ledger.reserve_workers.assert_not_called()
+
+
+async def test_worker_permissions_block_nested_spawn_and_other_workers_pads() -> None:
+    spec = coordinator_spec(
+        {
+            "coord0": [
+                tool_turn("spawn_workers", tasks=[{"task": "A"}, {"task": "B"}]),
+                tool_turn("submit", answer="5"),
+            ],
+            "coord0/w0": [
+                Turn(
+                    tool_calls=(
+                        ("spawn_workers", {"tasks": [{"task": "nested"}]}),
+                        ("read_scratchpad", {"agent_id": "coord0/w1"}),
+                        ("list_scratchpads", {}),
+                    )
+                ),
+                tool_turn("return_report", report="first"),
+            ],
+            "coord0/w1": [
+                tool_turn("write_scratchpad", content="worker-one-private"),
+                tool_turn("return_report", report="second"),
+            ],
+        },
+        config=CoordinatorConfig(
+            worker_scratchpads=True,
+            worker_tools=("return_report", "read_scratchpad", "list_scratchpads"),
+        ),
+    )
+    episode, _ = await run_episode(spec)
+    first = next(c for c in episode.calls if c.agent_id == "coord0/w0")
+    assert first.tool_calls[0].error == "unknown tool spawn_workers"
+    assert "may not read" in first.tool_calls[1].error
+    assert first.tool_calls[2].result == ""
+    assert len(episode.agents) == 3
+    for ctx in spec.policies["script"].calls:
+        if ctx.meta.agent_id == "coord0/w0":
+            assert "worker-one-private" not in ctx.prompt_text
+
+
+async def test_worker_backend_failure_and_malformed_forced_report_still_join() -> None:
+    from marli.errors import BackendError
+
+    spec = coordinator_spec(
+        {
+            "coord0": [
+                tool_turn("spawn_workers", tasks=[{"task": "A"}, {"task": "B"}]),
+                tool_turn("submit", answer="5"),
+            ],
+        }
+    )
+    renderer = FakeRenderer()
+    ordinary = spec.policies["script"]._script
+
+    def script(ctx: ScriptCtx) -> list[int]:
+        if ctx.meta.agent_id == "coord0/w0":
+            raise BackendError("backend exploded")
+        if ctx.meta.agent_id == "coord0/w1":
+            if ctx.meta.purpose == "report":
+                return renderer.encode_text("garbage") + [S["eot"]]
+            return renderer.encode_completion("still working")
+        return list(ordinary(ctx))
+
+    spec.limits.worker.max_calls = 1
+    spec.policies["script"] = ScriptedPolicy("script", renderer, script)
+    episode, _ = await run_episode(spec)
+    assert not episode.ok and episode.outcome.final_answer == "5"
+    assert episode.calls[0].tool_calls[0].result == (
+        "[worker coord0/w0: no report (error)]\n\n[worker coord0/w1: no report (budget)]"
+    )
+    assert set(episode.grades) == {"coord0", "_system"}
+
+
+async def test_coordinator_ignores_caller_session_count_and_keeps_worker_report() -> None:
+    from marli.interact.limits import SessionLimits
+
+    spec = coordinator_spec(
+        {
+            "coord0": [
+                tool_turn("spawn_workers", tasks=[{"task": "A"}]),
+                Turn("y" * 400),
+                tool_turn("submit", answer="5"),
+            ],
+            "coord0/w0": [tool_turn("return_report", report="REPORT-FROM-W0")],
+        },
+        limits=Limits(
+            session=SessionLimits(
+                max_sessions=2, max_gen_tokens=300, carry_reserve=50, carry_max_tokens=50
+            )
+        ),
+    )
+    with pytest.warns(UserWarning, match="sessions are owned"):
+        episode, _ = await run_episode(spec)
+    assert episode.outcome.final_answer == "5"
+    assert len(episode.segments) == 2 and all(s.session_idx == 0 for s in episode.segments)
+    assert "REPORT-FROM-W0" in spec.policies["script"].calls[-1].prompt_text

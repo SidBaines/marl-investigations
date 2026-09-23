@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,7 +19,7 @@ from marli.tasks.taskset import TaskSet, read_tasks, write_tasks
 class BuildConfig:
     source: str = doc_field("aime_2025", help="task source registry name (marli list tasks)")
     split: str | None = None
-    max_n: int | None = None
+    max_n: int | None = doc_field(None, help="maximum tasks after decontamination")
     seed: int = 0
     shuffle: bool = False
     exclude: str | None = input_field(
@@ -37,7 +38,13 @@ class BuildConfig:
 
 
 def _normalize(prompt: str) -> str:
-    return " ".join(prompt.lower().split())
+    # Delimiters carry formatting, not prompt identity (including \(…\), $…$).
+    plain = "".join(
+        char
+        for char in prompt.lower()
+        if not unicodedata.category(char).startswith("P") and char not in "$\\"
+    )
+    return " ".join(plain.split())
 
 
 def _ngrams(prompt: str, n: int) -> set[tuple[str, ...]]:
@@ -46,9 +53,9 @@ def _ngrams(prompt: str, n: int) -> set[tuple[str, ...]]:
 
 
 async def build(cfg: BuildConfig, run: RunDir) -> TaskSet:
-    """Load the requested sample, then exclude normalized exact and word n-gram matches.
+    """Decontaminate before truncation, so max_n counts eligible tasks.
 
-    Counts partition the loaded sample; exact matches take precedence over n-grams.
+    Counts describe the full loaded pool; exact matches take precedence over n-grams.
     The runner publishes the manifest only after task rows are durably replaced.
     """
     source = SOURCES.load(cfg.source)
@@ -58,7 +65,10 @@ async def build(cfg: BuildConfig, run: RunDir) -> TaskSet:
     if cfg.ngram_exclude:
         for prompt in prompts:
             ngrams.update(_ngrams(prompt, cfg.ngram_exclude))
-    tasks = load_tasks(source, split=cfg.split, max_n=cfg.max_n, seed=cfg.seed, shuffle=cfg.shuffle)
+    loader_meta: dict[str, Any] = {}
+    tasks = load_tasks(
+        source, split=cfg.split, seed=cfg.seed, shuffle=cfg.shuffle, meta=loader_meta
+    )
     counts = {"loaded": len(tasks), "kept": 0, "dropped_exact": 0, "dropped_ngram": 0}
     kept = []
     for task in tasks:
@@ -69,9 +79,10 @@ async def build(cfg: BuildConfig, run: RunDir) -> TaskSet:
             counts["dropped_ngram"] += 1
         else:
             kept.append(task)
+    kept = kept[: cfg.max_n]
     counts["kept"] = len(kept)
     inputs = (InputRef.of(excluded),) if excluded is not None else ()
-    meta: dict[str, Any] = {"counts": counts}
+    meta: dict[str, Any] = {**loader_meta, "counts": counts}
     if excluded is not None:
         meta.update(decontaminated_against=inputs[0].path, ngram_exclude=cfg.ngram_exclude)
     path = write_tasks(run.out, kept)

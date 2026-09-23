@@ -410,6 +410,35 @@ async def test_system_prompt_n_agents_is_role_count() -> None:
     assert buffers[call.segment_id] == list(ctx.prompt_ids + call.completion_ids)
 
 
+async def test_system_prompt_budget_fields_validate_and_render_adjusted_limits() -> None:
+    class BudgetProtocol(SingleProtocol):
+        def adjust_limits(self, limits: Limits) -> Limits:
+            limits = super().adjust_limits(limits)
+            return replace(limits, session=replace(limits.session, max_gen_tokens=1234))
+
+    spec = single_spec()
+    spec.protocol = BudgetProtocol(
+        SingleConfig(
+            system_prompt="{agent_id} {role} {n_agents}: {session_tokens} session tokens; "
+            "{max_workers_per_call} per call; {max_workers_total} total; "
+            "{worker_tokens} worker tokens. Answer in \\boxed{{}}."
+        )
+    )
+    spec.limits.spawn.max_per_call = 2
+    spec.limits.spawn.max_total = 3
+    spec.limits.worker.max_gen_tokens = 7000
+    spec.limits.session.carry_reserve = 100
+    episode, buffers = await run_episode(spec)
+    (ctx,) = spec.policies["script"].calls
+    assert (
+        "solver0 solver 1: 1234 session tokens; 2 per call; 3 total; "
+        "7000 worker tokens. Answer in \\boxed{}."
+    ) in ctx.prompt_text
+    (call,) = episode.calls
+    assert buffers[call.segment_id] == list(ctx.prompt_ids + call.completion_ids)
+    assert spec.limits.session.max_gen_tokens == 16384
+
+
 @pytest.mark.parametrize("deterministic", [None, False, True])
 async def test_determinism_is_duck_typed_and_only_seated_policies_are_checked(
     deterministic: bool | None, monkeypatch: pytest.MonkeyPatch

@@ -23,9 +23,11 @@ class PairedComparison:
     difference: float
     low: float
     high: float
-    mcnemar_p: float
+    mcnemar_p: float | None
     wins: int
     losses: int
+    permutation_p: float | None = None
+    test: str = "mcnemar"
 
 
 def percentile(values: Sequence[float], q: float) -> float:
@@ -83,10 +85,10 @@ def paired_comparison(
     seed: int = 0,
     resamples: int = 2000,
 ) -> PairedComparison:
-    """Compare shared tasks; each task weighs equally regardless of its episode count.
+    """Compare per-task means, retaining repeats as one statistical unit.
 
-    McNemar uses strict majority-correct (> 1/2); a tie is not majority-correct.
-    This binary statistic is distinct from voting over answer equivalence classes.
+    G=1 uses exact McNemar. Repeated episodes use a two-sided sign-flip
+    test on per-task differences, without thresholding or majority ties.
     """
     shared = sorted(cell.keys() & baseline.keys())
     if not shared:
@@ -96,17 +98,40 @@ def paired_comparison(
     estimate = bootstrap_mean(
         [x - y for x, y in zip(a, b, strict=True)], seed=seed, resamples=resamples
     )
-    wins = sum(x > 0.5 and y <= 0.5 for x, y in zip(a, b, strict=True))
-    losses = sum(y > 0.5 and x <= 0.5 for x, y in zip(a, b, strict=True))
+    differences = [x - y for x, y in zip(a, b, strict=True)]
+    wins = sum(value > 0 for value in differences)
+    losses = sum(value < 0 for value in differences)
+    repeated = any(len(cell[task]) > 1 or len(baseline[task]) > 1 for task in shared)
     return PairedComparison(
         len(shared),
         estimate.mean,
         estimate.low,
         estimate.high,
-        mcnemar_exact(wins, losses),
+        None if repeated else mcnemar_exact(wins, losses),
         wins,
         losses,
+        sign_flip_p(differences, seed=seed) if repeated else None,
+        "sign_flip" if repeated else "mcnemar",
     )
+
+
+def sign_flip_p(differences: Sequence[float], *, seed: int = 0) -> float:
+    """Two-sided task sign-flip test; enumerate ≤20 nonzeros, else 10,000 draws."""
+    nonzero = [value for value in differences if value != 0]
+    observed = abs(math.fsum(nonzero))
+    threshold = observed - 1e-12
+    if len(nonzero) <= 20:
+        sums = [0.0]
+        for value in nonzero:
+            sums = [total + sign * value for total in sums for sign in (-1, 1)]
+        return sum(abs(total) >= threshold for total in sums) / len(sums)
+    rng = random.Random(seed)
+    extreme = sum(
+        abs(math.fsum(value * rng.choice((-1, 1)) for value in nonzero)) >= threshold
+        for _ in range(10000)
+    )
+    # Include the observed permutation to avoid zero Monte Carlo p-values.
+    return (extreme + 1) / 10001
 
 
 def avg_at_k(correct: Sequence[float], k: int | None = None) -> float:

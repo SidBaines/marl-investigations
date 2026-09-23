@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import random
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from marli.errors import ConfigError
@@ -47,11 +48,18 @@ class ContextSpec:
     compact_threshold: int = 0
     compact_reserve: int = 1024  # tokens reserved for the compaction call itself
     notes_cap_chars: int = 4000  # notes: max size of the notes file carried across sessions
-    tail_tokens: int = 0  # tail (Delethink-style): last m ids carried as a prefill
+    tail_tokens: int = 0  # tail: last m tokens of parsed replies, carried as user text
 
 
 @dataclass(frozen=True)
 class RoleSpec:
+    """An agent role and its prompt template.
+
+    Runtime fields: agent_id, role, n_agents, max_workers_per_call,
+    max_workers_total, worker_tokens and session_tokens. Budget fields come
+    from the protocol-adjusted episode limits.
+    """
+
     role: str
     # tool names from the tool registry (interact/tools.py) + env tools
     tools: tuple[str, ...]
@@ -71,7 +79,7 @@ class AgentResult:
     agent_id: str
     submission: str | None  # the agent's own submitted answer (None if none)
     report: str | None  # workers: returned report
-    ended_by: str  # submit | end_agent | budget | error | report | max_ticks
+    ended_by: str  # submit | end_agent | budget | error | report | max_ticks | max_wall_s
     n_sessions: int = 1
 
 
@@ -137,13 +145,19 @@ class Protocol(ABC):
     async def run(self, io: SystemIO) -> Outcome: ...
 
     def adjust_limits(self, limits: Limits) -> Limits:
-        """Return the episode limits this protocol runs under (default: unchanged).
+        """Pin non-session protocols to one session.
 
         Protocol *shape* that the runtime reads from ``Limits`` (e.g. the number
         of sessions) is set here from the protocol config, so callers configure
         it once. Must not mutate ``limits``; applied before validation.
         """
-        return limits
+        if limits.session.max_sessions > 1:
+            warnings.warn(
+                "sessions are owned by the multi_session protocol",
+                UserWarning,
+                stacklevel=2,
+            )
+        return replace(limits, session=replace(limits.session, max_sessions=1))
 
 
 PROTOCOLS: FnRegistry = FnRegistry("protocols")  # name -> factory(config) -> Protocol

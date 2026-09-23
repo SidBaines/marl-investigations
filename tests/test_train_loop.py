@@ -245,7 +245,7 @@ async def test_last_session_and_loss_aggregation_reach_backend(
     cfg = config(
         make_taskset(tmp_path / "tasks"),
         protocol="multi_session",
-        protocol_config={"sessions": 2, "carry": "tail", "tail_tokens": 4},
+        protocol_config={"sessions": 2, "carry": "notes"},
         learners={"a": LearnerSpec(base_model="qwen3_8b", backend="fake")},
         seating={"solver": "learner:a"},
         steps=1,
@@ -472,11 +472,19 @@ async def test_validation_precedes_backend_creation(
     assert fake_setup.backends == []
 
 
-async def test_no_datums_does_not_step_or_sync(tmp_path: Path, fake_setup: FakeSetup) -> None:
-    # Groups below min_group produce no datums even though rollouts contain actions.
-    cfg = config(
-        make_taskset(tmp_path / "tasks"), group_size=2, steps=1, credit=CreditConfig(min_group=3)
-    )
+async def test_no_datums_does_not_step_or_sync(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A step whose credit emits nothing (e.g. every group zero-variance) must not
+    # step or sync any learner, even though the rollouts contain actions.
+    original = loop.assign_credit
+
+    def no_credit(*args: Any, **kwargs: Any) -> Any:
+        _, stats, rae = original(*args, **kwargs)
+        return [], stats, rae
+
+    monkeypatch.setattr(loop, "assign_credit", no_credit)
+    cfg = config(make_taskset(tmp_path / "tasks"), group_size=2, steps=1)
     result = await run_verb("train rl", cfg, out=tmp_path / "train")
     assert all(
         learner.steps == [] and learner.version == 0
@@ -484,7 +492,17 @@ async def test_no_datums_does_not_step_or_sync(tmp_path: Path, fake_setup: FakeS
     )
     metric = rows(result.handle.root / "metrics.jsonl")[0]
     assert metric["idle_learners"] == ["a", "b"]
-    assert metric["credit"]["dropped_small_groups"] == 2
+
+
+async def test_min_group_above_group_size_is_rejected_before_spend(
+    tmp_path: Path, fake_setup: FakeSetup
+) -> None:
+    cfg = config(
+        make_taskset(tmp_path / "tasks"), group_size=2, steps=1, credit=CreditConfig(min_group=3)
+    )
+    with pytest.raises(ConfigError, match="min_group"):
+        await run_verb("train rl", cfg, out=tmp_path / "train")
+    assert not fake_setup.backends
 
 
 async def test_aggregate_training_budget_prevents_partial_update(

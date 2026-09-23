@@ -1,12 +1,12 @@
 """Reports expose sample sizes and compute beside accuracy, preserving task pairing.
 
-A standalone report consumes one Scores handle (one top-level input path).
-Grid combines several labelled Scores handles through the same report builder.
+Standalone and grid reports use the same labelled inputs and task-level statistics.
 """
 
 from __future__ import annotations
 
 import json
+import warnings
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from statistics import fmean
@@ -15,15 +15,23 @@ from typing import Any, ClassVar
 from marli.config import input_field
 from marli.errors import ConfigError
 from marli.eval.score import Scores
-from marli.eval.stats import avg_at_k, maj_at_k, paired_comparison, percentile, wilson_ci
+from marli.eval.stats import (
+    avg_at_k,
+    bootstrap_mean,
+    maj_at_k,
+    paired_comparison,
+    percentile,
+    wilson_ci,
+)
 from marli.handles import Handle, InputRef, atomic_write_text, register_handle
 from marli.rundir import RunDir
+from marli.verbs import input_paths
 
 
 @dataclass
 class ReportConfig:
     scores: str | None = input_field(
-        None, help="One Scores manifest or dir; use eval grid to combine labelled cells"
+        None, help="Scores manifest/dir or label=path entries joined by os.pathsep"
     )
     baseline: str | None = None
     group_by: list[str] = field(default_factory=lambda: ["protocol", "policy", "taskset"])
@@ -52,7 +60,9 @@ def build_report(sources: dict[str, Scores], cfg: ReportConfig, run: RunDir) -> 
     """Aggregate labelled sources; empty labels derive their name from group_by values."""
     cells: dict[str, list[dict[str, Any]]] = defaultdict(list)
     groups: dict[str, dict[str, Any]] = {}
+    costs: dict[str, float] = defaultdict(float)
     for label, source in sources.items():
+        source_cells: dict[str, int] = defaultdict(int)
         with source.file("rows").open(encoding="utf-8") as stream:
             for line in stream:
                 row = json.loads(line)
@@ -67,6 +77,14 @@ def build_report(sources: dict[str, Scores], cfg: ReportConfig, run: RunDir) -> 
                     raise ConfigError(f"label {cell!r} contains multiple group_by cells")
                 groups[cell] = group
                 cells[cell].append(row)
+                source_cells[cell] += 1
+                costs[cell] += row.get("cost_usd", 0.0)
+        # Rollout spend includes failed attempts absent from the final score rows.
+        if len(source_cells) == 1 and "cost_usd" in source.meta:
+            cell = next(iter(source_cells))
+            costs[cell] += source.meta["cost_usd"] - sum(
+                row.get("cost_usd", 0.0) for row in cells[cell][-source_cells[cell] :]
+            )
     if cfg.baseline is not None and cfg.baseline not in cells:
         raise ConfigError(f"unknown baseline {cfg.baseline!r}; cell labels: {sorted(cells)}")
     task_rows: dict[str, dict[str, list[dict[str, Any]]]] = {}
@@ -82,21 +100,37 @@ def build_report(sources: dict[str, Scores], cfg: ReportConfig, run: RunDir) -> 
     for label, rows in sorted(cells.items()):
         by_task = task_rows[label]
         correct = sum(row["correct"] for row in rows)
-        ci = wilson_ci(correct, len(rows))
         sizes = sorted({len(episodes) for episodes in by_task.values()})
+        repeated = max(sizes) > 1
+        means = [fmean(row["correct"] for row in eps) for _, eps in sorted(by_task.items())]
+        accuracy = fmean(means) if repeated else correct / len(rows)
+        if repeated:
+            estimate = bootstrap_mean(means)
+            ci = (estimate.low, estimate.high)
+        else:
+            ci = wilson_ci(correct, len(rows))
+        ok_rows = [row for row in rows if row["ok"]]
+        n_failed = len(rows) - len(ok_rows)
+        if n_failed:
+            warnings.warn(
+                f"{label}: {n_failed} failed episodes; accuracy_ok excludes them", stacklevel=2
+            )
         result: dict[str, Any] = {
             "label": label,
             "group": groups[label],
             "n_tasks": len(by_task),
             "n_episodes": len(rows),
-            "accuracy": correct / len(rows),
+            "accuracy": accuracy,
+            "accuracy_ok": fmean(row["correct"] for row in ok_rows) if ok_rows else None,
+            "accuracy_ci_method": "task_bootstrap" if repeated else "wilson",
+            "cost_usd": costs[label],
             "accuracy_ci": list(ci),
             "episodes_per_task": sizes,
             "avg_at_k": None,
             "maj_at_k": None,
             "oracle_any": fmean(row["oracle_any"] for row in rows),
             "answered_rate": fmean(row["answered"] for row in rows),
-            "n_failed": sum(not row["ok"] for row in rows),
+            "n_failed": n_failed,
             "compute": {},
             "paired_lift": None,
         }
@@ -133,7 +167,9 @@ def build_report(sources: dict[str, Scores], cfg: ReportConfig, run: RunDir) -> 
             harness = {row["harness"] for row in rows}
             baseline_harness = {row["harness"] for row in baseline_rows}
             if len(harness) != 1 or harness != baseline_harness:
-                result["comparison_note"] = "different taskset or environment; no paired comparison"
+                result["comparison_note"] = (
+                    "different taskset or environment or regrade setting; no paired comparison"
+                )
             elif not (by_task.keys() & task_rows[cfg.baseline].keys()):
                 result["comparison_note"] = "no shared tasks; no paired comparison"
             else:
@@ -148,11 +184,10 @@ def build_report(sources: dict[str, Scores], cfg: ReportConfig, run: RunDir) -> 
                 )
         results.append(result)
 
-    done = run.done_keys("results.jsonl", "label")
-    run.path("results.jsonl").touch(exist_ok=True)
-    for result in results:
-        if result["label"] not in done:
-            run.append_row("results.jsonl", result)
+    atomic_write_text(
+        run.path("results.jsonl"),
+        "".join(json.dumps(result, sort_keys=True) + "\n" for result in results),
+    )
     atomic_write_text(run.path("RESULTS.md"), _markdown(results, cfg.baseline))
     return Report(
         root=run.out,
@@ -160,6 +195,13 @@ def build_report(sources: dict[str, Scores], cfg: ReportConfig, run: RunDir) -> 
         results="results.jsonl",
         markdown="RESULTS.md",
         n_cells=len(results),
+        meta={
+            "warnings": [
+                f"{row['label']}: {row['n_failed']} failed episodes; accuracy_ok excludes them"
+                for row in results
+                if row["n_failed"]
+            ]
+        },
     )
 
 
@@ -168,9 +210,11 @@ def _markdown(results: list[dict[str, Any]], baseline: str | None) -> str:
         "# Evaluation results",
         "",
         "| Cell | Tasks | Episodes | Accuracy [95% CI] | avg@k | maj@k | Oracle | Answered | "
-        "Failed | Total gen mean/p50/p90 | CP tokens mean/p50/p90 | Calls mean/p50/p90 | "
-        "Peak ctx mean/p50/p90 | Paired lift [95% CI] | Paired n | McNemar p |",
-        "| " + " | ".join(["---"] * 16) + " |",
+        "Failed | Accuracy ok | Cost USD | Total gen mean/p50/p90 | "
+        "CP tokens mean/p50/p90 | Calls mean/p50/p90 | "
+        "Peak ctx mean/p50/p90 | Total uncached mean/p50/p90 | "
+        "Paired lift [95% CI] | Paired n | Paired test | p |",
+        "| " + " | ".join(["---"] * 20) + " |",
     ]
 
     def rate(value: float | None) -> str:
@@ -189,8 +233,10 @@ def _markdown(results: list[dict[str, Any]], baseline: str | None) -> str:
             rate(row["oracle_any"]),
             rate(row["answered_rate"]),
             str(row["n_failed"]),
+            rate(row["accuracy_ok"]),
+            f"{row['cost_usd']:.6f}",
         ]
-        for metric in ("total_gen", "cp_tokens", "calls", "peak_ctx"):
+        for metric in ("total_gen", "cp_tokens", "calls", "peak_ctx", "total_uncached"):
             stats = row["compute"].get(metric)
             values.append(
                 "/".join(f"{stats[key]:.1f}" for key in ("mean", "p50", "p90")) if stats else "—"
@@ -201,7 +247,10 @@ def _markdown(results: list[dict[str, Any]], baseline: str | None) -> str:
                 if lift
                 else "—",
                 str(lift["n_tasks"]) if lift else "—",
-                f"{lift['mcnemar_p']:.4g}" if lift else "—",
+                lift["test"] if lift else "—",
+                f"{(lift['mcnemar_p'] if lift['test'] == 'mcnemar' else lift['permutation_p']):.4g}"
+                if lift
+                else "—",
             ]
         )
         lines.append("| " + " | ".join(values) + " |")
@@ -213,15 +262,56 @@ def _markdown(results: list[dict[str, Any]], baseline: str | None) -> str:
             "from different tokenizers are not comparable; API token usage is separate "
             "in results.jsonl.",
             "",
-            "Accuracy and Wilson intervals use episodes (repeats are not independent tasks). "
+            "Accuracy uses Wilson intervals for G=1; for G>1 it averages per-task means "
+            "with 2,000 seeded task bootstrap resamples for its interval. "
             "avg@k and maj@k average tasks equally; k is each task's recorded episode count. "
             "maj@k votes over verifier-equivalent answers; ties use the earliest episode.",
             "",
             "Paired lift averages per-task accuracy differences on shared tasks with 2,000 "
-            "seeded task bootstrap resamples. McNemar uses strict majority-correct per task; "
-            "ties count as not majority-correct.",
+            "seeded task bootstrap resamples. G=1 uses exact McNemar; G>1 uses a sign-flip "
+            "permutation test on per-task differences (exact for up to 20 nonzero tasks, "
+            "otherwise 10,000 seeded draws).",
         ]
     )
+    lines.extend(
+        [
+            "",
+            "## Accuracy vs compute",
+            "",
+            "| Cell | Accuracy [95% CI] | CI method | Mean total_gen | Mean cp_tokens |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
+    for row in results:
+        low, high = row["accuracy_ci"]
+        compute = row["compute"]
+        label = row["label"].replace("|", "\\|").replace("\n", " ")
+        lines.append(
+            f"| {label} | {row['accuracy']:.3f} [{low:.3f}, {high:.3f}] | "
+            f"{row['accuracy_ci_method']} | {rate(compute.get('total_gen', {}).get('mean'))} | "
+            f"{rate(compute.get('cp_tokens', {}).get('mean'))} |"
+        )
+    for row in results:
+        if row["n_failed"]:
+            lines.extend(["", f"Warning: {row['label']} has {row['n_failed']} failed episodes."])
+    if baseline is not None:
+        base = next(row for row in results if row["label"] == baseline)
+        base_gen = base["compute"].get("total_gen", {}).get("mean")
+        unmatched = [
+            row["label"]
+            for row in results
+            if base_gen is not None
+            and "total_gen" in row["compute"]
+            and abs(row["compute"]["total_gen"]["mean"] - base_gen) > 0.1 * base_gen
+        ]
+        if unmatched:
+            lines.extend(
+                [
+                    "",
+                    "Not compute-matched (>10% mean total_gen difference from "
+                    f"baseline): {', '.join(unmatched)}.",
+                ]
+            )
     if baseline is not None:
         lines.extend(["", f"Baseline: {baseline}."])
     for row in results:
@@ -232,5 +322,7 @@ def _markdown(results: list[dict[str, Any]], baseline: str | None) -> str:
 
 async def report(cfg: ReportConfig, run: RunDir) -> Report:
     if cfg.scores is None:
-        raise ConfigError("report requires one Scores manifest; use grid for multiple cells")
-    return build_report({"": Scores.load(cfg.scores)}, cfg, run)
+        raise ConfigError("report requires Scores manifests")
+    return build_report(
+        {label: Scores.load(path) for label, path in input_paths(cfg.scores).items()}, cfg, run
+    )

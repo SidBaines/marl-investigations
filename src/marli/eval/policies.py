@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
@@ -45,8 +46,6 @@ class PolicySpec:
         if self.trainable:
             raise ConfigError("evaluation policies must have trainable=False")
         ref = parse_ref(self.ref)
-        if ref.kind == "ckpt":
-            raise ConfigError("evaluation checkpoint refs require the training resolver (M3)")
         if ref.base_url and (urlsplit(ref.base_url).query or urlsplit(ref.base_url).fragment):
             raise ConfigError("policy URLs must not contain query strings or fragments")
         if self.renderer is not None and self.renderer not in renderer_names():
@@ -58,6 +57,12 @@ def resolve_spec(spec: PolicySpec) -> tuple[PolicyRef, ModelSpec | None, str | N
     """Resolve catalog defaults without constructing a backend or tokenizer."""
     spec.__post_init__()
     ref = parse_ref(spec.ref, resolve_paths=True)
+    if ref.kind == "ckpt":
+        # A trained sampler: resolve to the concrete ref it points at (model and
+        # renderer defaults follow the base model), e.g. tinker:<base>#sampler=…
+        from marli.train.checkpoint import resolve_checkpoint_ref
+
+        ref = parse_ref(resolve_checkpoint_ref(ref, ref.learner), resolve_paths=True)
     model = load_model(spec.model) if spec.model else None
     if model is None and ref.kind in {"tinker", "vllm", "api"}:
         matches = [entry for entry in MODELS.load_all().values() if entry.hf_id == ref.target]
@@ -78,6 +83,13 @@ async def build_policies(
     specs: dict[str, PolicySpec], *, spend: SpendGuard
 ) -> tuple[dict[str, Policy], dict[str, Callable[[], DeltaRenderer]]]:
     resolved = {name: resolve_spec(spec) for name, spec in specs.items()}
+    for name, (_, model, renderer) in resolved.items():
+        if model and renderer and renderer != model.renderer:
+            warnings.warn(
+                f"policy {name!r}: renderer {renderer!r} disagrees with model "
+                f"{model.name!r} default {model.renderer!r}",
+                stacklevel=2,
+            )
     policies: dict[str, Policy] = {}
     renderers: dict[str, Callable[[], DeltaRenderer]] = {}
     for name, (ref, model, renderer) in resolved.items():

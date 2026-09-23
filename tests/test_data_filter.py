@@ -69,19 +69,32 @@ def episode(task_id: str, index: int, value: float, *, ok: bool = True) -> Episo
     )
 
 
-def save_episodes(root: Path, episodes: list[Episode]) -> Path:
+def save_episodes(root: Path, episodes: list[Episode], taskset: TaskSet) -> Path:
     with RunDir(root, kind="fixture", manifest_name="episodes.json", config_hash="fixture") as run:
         for item in episodes:
             records.write_episode(run.append_row, item, {}, record_tokens=False)
-    # Only the input manifest's kind and bytes are needed; EpisodeSet lives on another branch.
+    # Filtering needs recorded TaskSet provenance even for hand-built episodes.
     (root / "episodes.json").write_text(
-        json.dumps({"kind": "episodes", "manifest_version": 1}) + "\n"
+        json.dumps(
+            {
+                "kind": "episodes",
+                "manifest_version": 1,
+                "inputs": [
+                    {
+                        "kind": "taskset",
+                        "path": str(taskset.manifest_path),
+                        "sha256": taskset.sha256(),
+                    }
+                ],
+            }
+        )
+        + "\n"
     )
     return root
 
 
 @pytest.fixture
-def rollouts(tmp_path: Path) -> Path:
+def rollouts(tmp_path: Path, taskset: TaskSet) -> Path:
     episodes = []
     for name, values in {
         "mixed": [0.0, 1.0, 1.0],
@@ -98,7 +111,7 @@ def rollouts(tmp_path: Path) -> Path:
             episode("absent", 0, 1.0, ok=False),
         ]
     )
-    return save_episodes(tmp_path / "episodes", episodes)
+    return save_episodes(tmp_path / "episodes", episodes, taskset)
 
 
 async def test_pass_rates_metadata_and_counts(
@@ -264,7 +277,7 @@ async def test_invalid_ok_episode_grades_fail_loudly(
     tmp_path: Path, taskset: TaskSet, grades: dict[str, Any]
 ) -> None:
     root = save_episodes(
-        tmp_path / "bad-episodes", [replace(episode("mixed", 0, 1.0), grades=grades)]
+        tmp_path / "bad-episodes", [replace(episode("mixed", 0, 1.0), grades=grades)], taskset
     )
     with pytest.raises(ConfigError, match="episode 'mixed/e0'"):
         await run_verb(
@@ -276,7 +289,7 @@ async def test_invalid_ok_episode_grades_fail_loudly(
 
 
 async def test_episodes_from_unknown_task_fail_loudly(tmp_path: Path, taskset: TaskSet) -> None:
-    root = save_episodes(tmp_path / "bad-episodes", [episode("unrelated", 0, 1.0)])
+    root = save_episodes(tmp_path / "bad-episodes", [episode("unrelated", 0, 1.0)], taskset)
     with pytest.raises(ConfigError, match="unknown task"):
         await run_verb(
             "data filter",
@@ -300,3 +313,45 @@ async def test_episodes_from_unknown_task_fail_loudly(tmp_path: Path, taskset: T
 def test_invalid_config(overrides: list[str]) -> None:
     with pytest.raises(ConfigError):
         compose(FilterConfig, overrides=overrides)
+
+
+async def test_filter_rejects_recorded_taskset_digest_mismatch(
+    tmp_path: Path,
+    taskset: TaskSet,
+    rollouts: Path,
+) -> None:
+    changed = replace(taskset, meta={**taskset.meta, "replacement": True})
+    changed.save()
+    with pytest.raises(ConfigError, match="TaskSet digest"):
+        await run_verb(
+            "data filter",
+            FilterConfig(tasks=str(taskset.root), episodes=str(rollouts)),
+            out=tmp_path / "out",
+        )
+
+
+async def test_wall_clock_failures_count_as_zero_and_last_attempt_wins(
+    tmp_path: Path,
+    taskset: TaskSet,
+) -> None:
+    root = save_episodes(
+        tmp_path / "episodes",
+        [
+            episode("mixed", 0, 0),
+            episode("mixed", 0, 1),
+            replace(
+                episode("mixed", 1, 1, ok=False),
+                grades={},
+                limits_hit={"_episode": ("episode.max_wall_s",)},
+            ),
+        ],
+        taskset,
+    )
+    result = await run_verb(
+        "data filter",
+        FilterConfig(tasks=str(taskset.root), episodes=str(root)),
+        out=tmp_path / "out",
+    )
+    (task,) = read_tasks(result.handle)
+    assert task.task_id == "mixed" and task.meta["pass_rate"] == 0.5
+    assert result.handle.meta["filter"]["ignored_non_ok_episodes"] == 0
