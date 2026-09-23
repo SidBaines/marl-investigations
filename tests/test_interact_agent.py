@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pytest
 from _marli_test_envs import ArithEnv, ScratchEnv
@@ -700,3 +701,28 @@ async def test_no_tool_delivery_uses_user_message() -> None:
         if ctx.meta.agent_id == "solver0" and ctx.meta.call_index == 1
     )
     assert "⟨user⟩[workspace] solver1" in ctx.prompt_text
+
+
+async def test_role_permissions_restrict_reads() -> None:
+    from marli.interact.workspace import Permissions
+
+    protocol = RuntimeProtocol(tools=("submit", "write_scratchpad", "read_scratchpad"), count=2)
+    protocol.role = replace(protocol.role, permissions=Permissions(read_others=False))
+    spec = spec_for(
+        {
+            "solver0": [
+                Turn(tool_calls=(("write_scratchpad", {"content": "secret"}),)),
+                Turn(tool_calls=(("write_scratchpad", {"content": "more"}),)),
+                submit(),
+            ],
+            "solver1": [
+                Turn(tool_calls=(("write_scratchpad", {"content": "mine"}),)),
+                Turn(tool_calls=(("read_scratchpad", {"agent_id": "solver0"}),)),
+                submit(),
+            ],
+        },
+        protocol,
+    )
+    episode, _ = await run_episode(spec)
+    assert not any(read.writer == "solver0" for call in episode.calls for read in call.reads)
+    assert "secret" not in spec.policies["script"].calls[-1].prompt_text
