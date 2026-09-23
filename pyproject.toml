@@ -1,0 +1,54 @@
+[project]
+name = "marli"
+version = "0.0.1"
+description = "Multi-agent RL investigations on LLMs: interaction protocols, evaluation, and RL training (local learner + Tinker)."
+requires-python = ">=3.12"
+dependencies = [
+    # scimt-style lean core: everything heavy (torch, tinker, vllm, datasets)
+    # lives in per-stage extras and is imported lazily, so `import marli`
+    # and the CLI stay CPU-only and fast.
+    "httpx>=0.27",
+    "pyyaml>=6",
+    # marli.config: typed merge of dataclass configs from YAML + dotted
+    # overrides (OmegaConf structured configs, no Hydra).
+    "omegaconf>=2.3",
+]
+
+[project.scripts]
+marli = "marli.cli.main:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# File-backed registries (one YAML per entry).
+marli = ["models/*.yaml", "tasks/*.yaml", "interact/configs/*.yaml"]
+
+[tool.pytest.ini_options]
+# Prefer THIS checkout's src over any editable install (worktree safety; see
+# scimt #155). Run everything via `uv run` from the checkout/worktree root.
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Default runs never touch a GPU, the network, or a paid API. Opt in with
+# e.g. `uv run pytest -m live` (a later -m overrides this one).
+addopts = "-m 'not gpu and not live'"
+markers = [
+    "gpu: needs a CUDA device",
+    "live: hits the network or spends money (APIs, Tinker, pods)",
+    "tinker: needs the [tinker] extra (tinker + tinker-cookbook)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
