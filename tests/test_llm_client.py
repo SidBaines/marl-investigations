@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
+import threading
 import traceback
 from collections.abc import AsyncIterator
 from copy import deepcopy
@@ -54,15 +56,18 @@ def completion(text: str | None = "answer", **message: Any) -> dict[str, Any]:
 
 @dataclass
 class MockServer:
-    responses: list[httpx.Response | httpx.HTTPError] = field(default_factory=list)
+    responses: list[httpx.Response | httpx.HTTPError | httpx.InvalidURL] = field(
+        default_factory=list
+    )
     requests: list[httpx.Request] = field(default_factory=list)
     sleeps: list[float] = field(default_factory=list)
+    client_options: list[dict[str, Any]] = field(default_factory=list)
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         assert self.responses, "unexpected request"
         response = self.responses.pop(0)
-        if isinstance(response, httpx.HTTPError):
+        if isinstance(response, (httpx.HTTPError, httpx.InvalidURL)):
             raise response
         return response
 
@@ -77,12 +82,14 @@ async def server(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[MockServer]:
     clients: list[httpx.AsyncClient] = []
 
     def client(**kw: Any) -> httpx.AsyncClient:
+        server.client_options.append(kw)
         result = original(transport=httpx.MockTransport(server.handle), **kw)
         clients.append(result)
         return result
 
     monkeypatch.setattr(httpx, "AsyncClient", client)
     monkeypatch.setattr(asyncio, "sleep", server.sleep)
+    monkeypatch.setattr(random, "uniform", lambda low, high: 1.0)
     yield server
     for instance in clients:
         await instance.aclose()
@@ -122,7 +129,7 @@ async def test_provider_wire_contract(
         assert str(request.url) == url
         assert json.loads(request.content) == expected
         assert request.headers["content-type"] == "application/json"
-        assert request.extensions["timeout"]["read"] == 120
+        assert request.extensions["timeout"]["read"] == 600
         if provider == "anthropic":
             assert request.headers["x-api-key"] == secret
             assert request.headers["anthropic-version"] == "2023-06-01"
@@ -174,10 +181,10 @@ async def test_retry_sequence_and_backoff(server: MockServer) -> None:
 async def test_retry_exhaustion_is_bounded(server: MockServer) -> None:
     server.responses = [httpx.Response(503) for _ in range(8)]
     client = ChatClient(Endpoint("https://local.invalid/v1", "model"), max_retries=8)
-    with pytest.raises(RuntimeError, match="failed after 8 retries.*HTTP 503"):
+    with pytest.raises(RuntimeError, match="failed after 8 attempts.*HTTP 503"):
         await client.chat(PAYLOAD)
     assert len(server.requests) == 8
-    assert server.sleeps == [1, 2, 4, 8, 16, 30, 30]
+    assert server.sleeps == [1, 2, 4, 8, 16, 32, 60]
 
 
 @pytest.mark.parametrize(
@@ -193,11 +200,15 @@ async def test_transport_and_non_json_retry(
     assert server.sleeps == [1]
 
 
-async def test_400_is_not_retried(server: MockServer) -> None:
-    server.responses = [httpx.Response(400, text="unsupported parameter")]
+@pytest.mark.parametrize("status", [300, 301, 302, 303, 304, 307, 308, 400])
+async def test_unsupported_status_is_not_retried(server: MockServer, status: int) -> None:
+    server.responses = [httpx.Response(status, text="unsupported parameter")]
     client = ChatClient(Endpoint("https://local.invalid/v1", "model"))
-    with pytest.raises(UnsupportedRequestError, match="HTTP 400.*unsupported parameter"):
+    with pytest.raises(
+        UnsupportedRequestError, match=f"HTTP {status}.*unsupported parameter"
+    ) as caught:
         await client.chat(PAYLOAD)
+    assert caught.value.status_code == status
     assert len(server.requests) == 1
     assert not server.sleeps
 
@@ -392,8 +403,12 @@ async def test_anthropic_response_tools_thinking_and_usage(
 
 
 def test_anthropic_embedded_error_is_not_normalized_to_empty() -> None:
-    with pytest.raises(UnsupportedRequestError, match="anthropic error response"):
-        from_anthropic({"type": "error", "error": {"message": "overloaded"}})
+    with pytest.raises(
+        UnsupportedRequestError, match="anthropic error response: overloaded_error: overloaded"
+    ):
+        from_anthropic(
+            {"type": "error", "error": {"type": "overloaded_error", "message": "overloaded"}}
+        )
 
 
 async def test_cache_off_identical_calls_are_independent(server: MockServer) -> None:
@@ -715,15 +730,6 @@ async def test_credentials_redacted_from_exceptions(
                 "cost_usd": None,
             },
         ),
-        (
-            {},
-            {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "cached_prompt_tokens": None,
-                "cost_usd": None,
-            },
-        ),
     ],
 )
 def test_usage_of(usage: dict[str, Any], expected: dict[str, Any]) -> None:
@@ -768,3 +774,386 @@ async def test_raw_completions_route_and_cache(server: MockServer) -> None:
     anthropic = ChatClient(Endpoint("https://local.invalid", "model", provider="anthropic"))
     with pytest.raises(UnsupportedRequestError, match="route"):
         await anthropic.completions({"prompt": "prefix"})
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "fake-secret\r",
+        "fake-secret\n",
+        "fake-secret\r\n",
+        " fake-secret",
+        "fake-secret ",
+        "fake\tsecret",
+        "fake-secret\x7f",
+        "fake-secret-é",
+    ],
+)
+async def test_invalid_credentials_never_reach_transport_or_traceback(
+    server: MockServer,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    secret: str,
+) -> None:
+    monkeypatch.setenv("TEST_API_KEY", secret)
+    client = ChatClient(
+        Endpoint("https://local.invalid", "model", api_key_env="TEST_API_KEY", provider=provider)
+    )
+    with pytest.raises(ValueError) as caught:
+        await client.chat(PAYLOAD)
+    assert str(caught.value) == (
+        "API key environment variable 'TEST_API_KEY' contains whitespace "
+        "or non-printable/non-ASCII characters"
+    )
+    trace = "".join(traceback.format_exception(caught.value))
+    assert secret not in trace
+    assert "fake" not in trace
+    assert not server.requests
+    assert not server.sleeps
+
+
+@pytest.mark.parametrize(
+    "error_type", [httpx.LocalProtocolError, httpx.UnsupportedProtocol, httpx.InvalidURL]
+)
+async def test_local_request_errors_are_not_retried_and_redact_tracebacks(
+    server: MockServer,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    secret = "fake-secret-must-not-appear"
+    monkeypatch.setenv("TEST_API_KEY", secret)
+    server.responses = [error_type(f"invalid request using {secret}")]
+    client = ChatClient(Endpoint("https://local.invalid", "model", api_key_env="TEST_API_KEY"))
+    with pytest.raises(UnsupportedRequestError, match="invalid request using") as caught:
+        await client.chat(PAYLOAD)
+    assert caught.value.status_code is None
+    assert secret not in "".join(traceback.format_exception(caught.value))
+    assert "[redacted]" in str(caught.value)
+    assert len(server.requests) == 1
+    assert not server.sleeps
+
+
+@pytest.mark.parametrize("with_tools", [False, True])
+@pytest.mark.parametrize("text", ["checking", ""])
+async def test_anthropic_thinking_round_trip(
+    server: MockServer, with_tools: bool, text: str
+) -> None:
+    thinking = [
+        {"type": "thinking", "thinking": "private reasoning", "signature": "opaque-signature"},
+        {"type": "redacted_thinking", "data": "opaque-redacted-data"},
+    ]
+    blocks = thinking + ([{"type": "text", "text": text}] if text else [])
+    if with_tools:
+        blocks.append({"type": "tool_use", "id": "call_1", "name": "lookup", "input": {"key": "a"}})
+    raw = {"content": blocks, "stop_reason": "tool_use" if with_tools else "end_turn"}
+    server.responses = [httpx.Response(200, json=raw), httpx.Response(200, json=raw)]
+    client = ChatClient(Endpoint("https://local.invalid", "claude", provider="anthropic"))
+    result = await client.chat(PAYLOAD)
+    message = result["choices"][0]["message"]
+    assert message["thinking_blocks"] == thinking
+    assert message["reasoning_content"] == "private reasoning"
+    original = deepcopy(message)
+    followup = (
+        {"role": "tool", "tool_call_id": "call_1", "content": "found"}
+        if with_tools
+        else {"role": "user", "content": "continue"}
+    )
+    await client.chat({"messages": [*PAYLOAD["messages"], message, followup]})
+    body = json.loads(server.requests[1].content)
+    assert body["messages"][1] == {"role": "assistant", "content": blocks}
+    assert message == original
+
+
+def test_anthropic_redacted_thinking_without_plain_thinking() -> None:
+    blocks = [{"type": "redacted_thinking", "data": "opaque"}]
+    message = from_anthropic({"content": blocks})["choices"][0]["message"]
+    assert message["thinking_blocks"] == blocks
+    assert "reasoning_content" not in message
+    assert to_anthropic({"messages": [message]})["messages"][0]["content"] == blocks
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "finish_reason"),
+    [
+        ("end_turn", "stop"),
+        ("stop_sequence", "stop"),
+        ("max_tokens", "length"),
+        ("tool_use", "tool_calls"),
+        ("refusal", "content_filter"),
+        ("pause_turn", "pause_turn"),
+        (None, None),
+    ],
+)
+def test_anthropic_stop_reason_mapping(stop_reason: str | None, finish_reason: str | None) -> None:
+    result = from_anthropic({"stop_reason": stop_reason})
+    assert result["choices"][0]["finish_reason"] == finish_reason
+
+
+def test_anthropic_tool_without_parameters_gets_empty_object_schema() -> None:
+    tool = {"type": "function", "function": {"name": "clock"}}
+    body = to_anthropic({**PAYLOAD, "tools": [tool]})
+    assert body["tools"] == [
+        {"name": "clock", "input_schema": {"type": "object", "properties": {}}}
+    ]
+    assert "parameters" not in tool["function"]
+
+
+@pytest.mark.parametrize("status", [429, 503])
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"retry-after": "3.5"}, 3.5),
+        ({"retry-after": "0.1"}, 1),
+        ({"retry-after": "120"}, 60),
+        ({"retry-after-ms": "2500"}, 2.5),
+        ({"retry-after-ms": "100"}, 1),
+        ({"retry-after-ms": "90000"}, 60),
+        ({"retry-after": "invalid"}, 0.75),
+        ({}, 0.75),
+    ],
+)
+async def test_retry_headers_and_jitter(
+    server: MockServer,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    headers: dict[str, str],
+    expected: float,
+) -> None:
+    draws: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        draws.append((low, high))
+        return 0.75
+
+    monkeypatch.setattr(random, "uniform", uniform)
+    server.responses = [
+        httpx.Response(status, headers=headers),
+        httpx.Response(200, json=completion()),
+    ]
+    client = ChatClient(Endpoint("https://local.invalid", "model"))
+    assert await client.chat(PAYLOAD) == completion()
+    assert server.sleeps == [expected]
+    assert draws == ([(0.5, 1.5)] if expected == 0.75 else [])
+
+
+async def test_retry_jitter_is_capped_at_sixty_seconds(
+    server: MockServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(random, "uniform", lambda low, high: 1.5)
+    server.responses = [httpx.Response(503) for _ in range(9)]
+    client = ChatClient(Endpoint("https://local.invalid", "model"), max_retries=9)
+    with pytest.raises(RuntimeError, match="9 attempts"):
+        await client.chat(PAYLOAD)
+    assert server.sleeps == [1.5, 3, 6, 12, 24, 48, 60, 60]
+
+
+async def test_retry_header_does_not_reduce_backoff_or_apply_to_later_failures(
+    server: MockServer,
+) -> None:
+    server.responses = [
+        httpx.Response(429, headers={"retry-after": "10"}),
+        httpx.Response(503, headers={"retry-after-ms": "500"}),
+        httpx.ConnectError("offline"),
+        httpx.Response(200, json=completion()),
+    ]
+    client = ChatClient(Endpoint("https://local.invalid", "model"))
+    assert await client.chat(PAYLOAD) == completion()
+    assert server.sleeps == [10, 2, 4]
+
+
+@pytest.mark.parametrize("max_retries", [1, 6])
+async def test_read_timeouts_allow_at_most_one_retry(server: MockServer, max_retries: int) -> None:
+    server.responses = [httpx.ReadTimeout("") for _ in range(6)]
+    client = ChatClient(
+        Endpoint("https://local.invalid", "model"), max_retries=max_retries, timeout=42
+    )
+    attempts = min(max_retries, 2)
+    with pytest.raises(
+        RuntimeError,
+        match=rf"after {attempts} attempts: ReadTimeout \(timeout=42s\).*raising timeout.*billed",
+    ):
+        await client.chat(PAYLOAD)
+    assert len(server.requests) == attempts
+    assert server.sleeps == [1] * (attempts - 1)
+    assert server.requests[0].extensions["timeout"]["read"] == 42
+
+
+async def test_read_timeout_can_recover(server: MockServer) -> None:
+    server.responses = [
+        httpx.ReadTimeout("slow generation"),
+        httpx.Response(200, json=completion()),
+    ]
+    client = ChatClient(Endpoint("https://local.invalid", "model"))
+    assert await client.chat(PAYLOAD) == completion()
+    assert server.sleeps == [1]
+
+
+async def test_read_timeout_retry_limit_survives_other_retries(server: MockServer) -> None:
+    server.responses = [httpx.ReadTimeout(""), httpx.Response(503), httpx.ReadTimeout("")]
+    client = ChatClient(Endpoint("https://local.invalid", "model"))
+    with pytest.raises(RuntimeError, match="3 attempts: ReadTimeout"):
+        await client.chat(PAYLOAD)
+    assert len(server.requests) == 3
+    assert server.sleeps == [1, 2]
+
+
+@pytest.mark.parametrize("previous_failures", [0, 1])
+async def test_max_tokens_switch_preserves_last_attempt(
+    server: MockServer, previous_failures: int
+) -> None:
+    server.responses = [httpx.Response(503) for _ in range(previous_failures)] + [
+        httpx.Response(400, text="use max_completion_tokens instead"),
+        httpx.Response(200, json=completion()),
+    ]
+    client = ChatClient(
+        Endpoint("https://local.invalid", "model"), max_retries=previous_failures + 1
+    )
+    assert await client.chat(PAYLOAD) == completion()
+    assert len(server.requests) == previous_failures + 2
+    assert json.loads(server.requests[-1].content)["max_completion_tokens"] == 32
+    assert server.sleeps == [1] * previous_failures
+
+
+@pytest.mark.parametrize("status", [302, 400, 503])
+async def test_http_error_details_are_bounded_quoted_and_redacted_before_truncation(
+    server: MockServer, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    secret = "fake-secret-spanning-truncation"
+    monkeypatch.setenv("TEST_API_KEY", secret)
+    prefix = "line\n" + "x" * 185
+    server.responses = [httpx.Response(status, text=prefix + secret + "suffix" * 100)]
+    client = ChatClient(
+        Endpoint("https://local.invalid", "model", api_key_env="TEST_API_KEY"), max_retries=1
+    )
+    with pytest.raises(RuntimeError) as caught:
+        await client.chat(PAYLOAD)
+    expected = (prefix + "[redacted]" + "suffix" * 100)[:200]
+    assert str(caught.value).endswith(f"HTTP {status}: {expected!r}")
+    assert "fake-secret" not in "".join(traceback.format_exception(caught.value))
+
+
+@pytest.mark.parametrize("concurrency", [1, 128])
+async def test_connection_pool_matches_concurrency(server: MockServer, concurrency: int) -> None:
+    client = ChatClient(Endpoint("https://local.invalid", "model"), concurrency=concurrency)
+    limits = server.client_options[-1]["limits"]
+    assert limits.max_connections == concurrency
+    assert limits.max_keepalive_connections == concurrency
+    await client.aclose()
+
+
+@pytest.mark.parametrize("cache", ["memory", "disk"])
+async def test_cached_responses_are_isolated_from_caller_mutations(
+    server: MockServer, tmp_path: Path, cache: str
+) -> None:
+    raw = completion(None, tool_calls=[CALL])
+    server.responses = [httpx.Response(200, json=raw)]
+    client = ChatClient(
+        Endpoint("https://local.invalid", "model"), cache=cache, cache_path=tmp_path / "cache.jsonl"
+    )
+    first = await client.chat(PAYLOAD, cache_salt="same")
+    first["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] = "changed"
+    second = await client.chat(PAYLOAD, cache_salt="same")
+    assert second == raw
+    second["usage"]["completion_tokens"] = 999
+    assert await client.chat(PAYLOAD, cache_salt="same") == raw
+    assert len(server.requests) == 1
+    if cache == "disk":
+        assert json.loads((tmp_path / "cache.jsonl").read_text())["response"] == raw
+
+
+async def test_cache_off_never_deepcopies_responses(
+    server: MockServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unexpected_copy(value: Any) -> Any:
+        pytest.fail("cache-off responses should not be copied")
+
+    monkeypatch.setattr("marli.llm.client.copy.deepcopy", unexpected_copy)
+    server.responses = [httpx.Response(200, json=completion())]
+    client = ChatClient(Endpoint("https://local.invalid", "model"))
+    assert await client.chat(PAYLOAD) == completion()
+
+
+@pytest.mark.parametrize("raise_inside", [False, True])
+async def test_context_manager_closes_transport(
+    server: MockServer, raise_inside: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = ChatClient(Endpoint("https://local.invalid", "model"))
+    closed: list[bool] = []
+    original = client.aclose
+
+    async def close() -> None:
+        closed.append(True)
+        await original()
+
+    monkeypatch.setattr(client, "aclose", close)
+    try:
+        async with client as entered:
+            assert entered is client
+            assert not client._http.is_closed
+            if raise_inside:
+                raise ValueError("body failed")
+    except ValueError as exc:
+        assert raise_inside
+        assert str(exc) == "body failed"
+    else:
+        assert not raise_inside
+    assert closed == [True]
+    assert client._http.is_closed
+
+
+async def test_disk_cache_fsync_runs_off_event_loop(
+    server: MockServer, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop_thread = threading.get_ident()
+    fsync_threads: list[int] = []
+
+    def fsync(fd: int) -> None:
+        fsync_threads.append(threading.get_ident())
+
+    monkeypatch.setattr("marli.llm.client.os.fsync", fsync)
+    server.responses = [httpx.Response(200, json=completion(str(i))) for i in range(4)]
+    client = cached_client(Endpoint("https://local.invalid", "model"), tmp_path, "parallel")
+    results = await asyncio.gather(*(client.chat(PAYLOAD, cache_salt=str(i)) for i in range(4)))
+    assert len(fsync_threads) == 4
+    assert all(thread != loop_thread for thread in fsync_threads)
+    records = [
+        json.loads(line) for line in (tmp_path / "cache_parallel.jsonl").read_text().splitlines()
+    ]
+    assert [record["response"] for record in records] == results
+    assert len({record["key"] for record in records}) == 4
+
+
+@pytest.mark.parametrize("reasoning_content", [None, "preferred reasoning"])
+async def test_openrouter_reasoning_normalization(
+    server: MockServer, monkeypatch: pytest.MonkeyPatch, reasoning_content: str | None
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fake-key")
+    raw = completion(reasoning="provider reasoning")
+    if reasoning_content is not None:
+        raw["choices"][0]["message"]["reasoning_content"] = reasoning_content
+    server.responses = [httpx.Response(200, json=raw)]
+    client = ChatClient.openrouter("model", cache="memory")
+    result = await client.chat(PAYLOAD, cache_salt="same")
+    assert result["choices"][0]["message"]["reasoning_content"] == (
+        reasoning_content or "provider reasoning"
+    )
+    assert await client.chat(PAYLOAD, cache_salt="same") == result
+
+
+@pytest.mark.parametrize("response", [{}, {"usage": None}, {"usage": {}}])
+def test_missing_usage_warns_and_preserves_unknown_counts(response: dict[str, Any]) -> None:
+    with pytest.warns(UserWarning, match="missing usage"):
+        assert usage_of(response) == {
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "cached_prompt_tokens": None,
+            "cost_usd": None,
+        }
+
+
+@pytest.mark.parametrize("usage", [{"cost": 0.005}, {"prompt_tokens": 3}, {"output_tokens": 2}])
+def test_partial_usage_does_not_invent_zero_counts(usage: dict[str, Any]) -> None:
+    counts = usage_of({"usage": usage})
+    assert counts["prompt_tokens"] == usage.get("prompt_tokens")
+    assert counts["completion_tokens"] == usage.get("output_tokens")
