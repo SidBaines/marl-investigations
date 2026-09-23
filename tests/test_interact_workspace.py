@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from marli.errors import ConfigError
 from marli.interact.tools import ToolError
 from marli.interact.types import ReadVia, WorkspaceRead, Write
 from marli.interact.workspace import DeliverySpec, IndexEntry, Permissions, Workspace
@@ -63,7 +64,11 @@ def test_staged_visibility_and_seat_order(workspace: Workspace) -> None:
     workspace.write("bob", "scratchpad", "b2", mode="append", tick=2, seq=13)
     workspace.write("alice", "scratchpad", "a2", mode="overwrite", tick=2, seq=14)
     assert workspace.log() == ()
-    assert workspace.read("bob", "bob") == ("", 0)
+    assert workspace.read("bob", "bob") == ("b1\nb2", 2)
+    assert workspace.read("bob", "bob", version=2) == ("b1\nb2", 2)
+    assert workspace.read("bob", "bob", "notes") == ("private", 1)
+    assert workspace.read("bob", "bob", "notes", version=1) == ("private", 1)
+    assert workspace.read("bob", "bob", version=0) == ("", 0)
     assert workspace.read("alice", "bob") == ("", 0)
     assert workspace.pending_delivery("alice") == (None, [])
     bob_view = workspace.view("bob")
@@ -87,7 +92,9 @@ def test_staged_visibility_and_seat_order(workspace: Workspace) -> None:
     next_write = workspace.write("bob", "scratchpad", "b3", mode="append", tick=3, seq=15)
     assert next_write.version == 3
     assert next_write.content == "b1\nb2\nb3"
-    assert workspace.read("bob", "bob") == ("b1\nb2", 2)
+    assert workspace.read("bob", "bob") == ("b1\nb2\nb3", 3)
+    assert workspace.read("bob", "bob", version=2) == ("b1\nb2", 2)
+    assert workspace.read("alice", "bob") == ("b1\nb2", 2)
     assert workspace.commit_staged(["bob"])[0] == next_write
 
 
@@ -97,6 +104,59 @@ def test_unlisted_writes_remain_staged(workspace: Workspace) -> None:
     assert workspace.commit_staged(["alice"]) == []
     assert workspace.view("bob").own_staged == {"scratchpad": "b"}
     assert workspace.commit_staged(["bob"])[0].content == "b"
+
+
+@pytest.mark.parametrize("seat_order", [[], ["worker"], ["worker", "bob", "alice"]])
+def test_flush_commits_every_staged_write_in_deterministic_order(
+    workspace: Workspace, seat_order: list[str]
+) -> None:
+    workspace.staged = True
+    assert not workspace.has_staged()
+    pending = {}
+    for writer in ["worker", "bob", "alice"]:
+        pending[writer] = [
+            workspace.write(writer, "scratchpad", content, mode="append", tick=2, seq=seq)
+            for seq, content in enumerate(["first", "second"])
+        ]
+    assert workspace.has_staged()
+    expected_order = seat_order + sorted(pending.keys() - set(seat_order))
+    expected = [write for writer in expected_order for write in pending[writer]]
+    assert workspace.flush_staged(seat_order) == expected
+    assert workspace.log() == tuple(expected)
+    assert not workspace.has_staged()
+    assert workspace.flush_staged(seat_order) == []
+
+
+def test_flush_after_partial_commit_preserves_history(workspace: Workspace) -> None:
+    workspace.staged = True
+    alice = workspace.write("alice", "notes", "a", mode="append", tick=0, seq=1)
+    bob = workspace.write("bob", "scratchpad", "b", mode="append", tick=0, seq=2)
+    assert workspace.commit_staged(["alice"]) == [alice]
+    assert workspace.has_staged()
+    assert workspace.flush_staged(["alice"]) == [bob]
+    assert workspace.log() == (alice, bob)
+    assert not workspace.has_staged()
+
+
+def test_immediate_workspace_has_nothing_to_flush(workspace: Workspace) -> None:
+    write = workspace.write("alice", "notes", "a", mode="append", tick=None, seq=1)
+    assert not workspace.has_staged()
+    assert workspace.flush_staged([]) == []
+    assert workspace.log() == (write,)
+
+
+@pytest.mark.parametrize("method", ["commit_staged", "flush_staged"])
+@pytest.mark.parametrize("staged", [False, True])
+def test_unknown_seat_rejected_before_any_commit(
+    workspace: Workspace, method: str, staged: bool
+) -> None:
+    workspace.staged = staged
+    workspace.write("alice", "scratchpad", "a", mode="append", tick=0, seq=1)
+    before = workspace.log()
+    with pytest.raises(ValueError, match="unknown agent"):
+        getattr(workspace, method)(["alice", "missing"])
+    assert workspace.log() == before
+    assert workspace.has_staged() is staged
 
 
 @pytest.mark.parametrize(
@@ -189,7 +249,6 @@ def test_invalid_versions_are_tool_errors(workspace: Workspace, version: Any) ->
     ("method", "args", "kwargs"),
     [
         ("read", ("missing", "alice"), {}),
-        ("read", ("alice", "missing"), {}),
         ("write", ("missing", "scratchpad", "x"), {"mode": "append", "tick": 0, "seq": 0}),
         ("view", ("missing",), {}),
         ("list_index", ("missing",), {}),
@@ -199,8 +258,13 @@ def test_invalid_versions_are_tool_errors(workspace: Workspace, version: Any) ->
 def test_unknown_agents(
     workspace: Workspace, method: str, args: tuple[Any, ...], kwargs: dict[str, Any]
 ) -> None:
-    with pytest.raises(ToolError, match="unknown agent"):
+    with pytest.raises(ValueError, match="unknown agent"):
         getattr(workspace, method)(*args, **kwargs)
+
+
+def test_unknown_model_read_target_is_tool_error(workspace: Workspace) -> None:
+    with pytest.raises(ToolError, match="unknown agent"):
+        workspace.read("alice", "missing")
 
 
 def test_invalid_mode_preserves_state(workspace: Workspace) -> None:
@@ -221,9 +285,9 @@ def test_add_agent_and_snapshot_isolation(workspace: Workspace) -> None:
     view.own_staged["scratchpad"] = "changed snapshot"
     assert workspace.read("alice", "new") == ("new worker", 1)
     assert workspace.view("alice").own_staged == {}
-    with pytest.raises(ToolError, match="already registered"):
+    with pytest.raises(ConfigError, match="already registered"):
         workspace.add_agent("new", "peer")
-    with pytest.raises(ToolError, match="permissions for role"):
+    with pytest.raises(ConfigError, match="permissions for role"):
         workspace.add_agent("other", "unknown")
 
 
@@ -239,31 +303,63 @@ def test_index_has_empty_scratchpads_and_capped_first_lines(workspace: Workspace
 
 def test_notify_every_version_once_and_bookkeeping_is_per_reader(workspace: Workspace) -> None:
     workspace.delivery = DeliverySpec(index_first_line_chars=3)
+    workspace.write("bob", "scratchpad", "initial", mode="overwrite", tick=0, seq=0)
+    assert workspace.pending_delivery("alice")[1] == [
+        WorkspaceRead("bob", "scratchpad", 1, ReadVia.NOTIFY)
+    ]
     workspace.write("bob", "scratchpad", "abcdef\nsecond", mode="overwrite", tick=0, seq=1)
     workspace.write("bob", "scratchpad", "new", mode="overwrite", tick=0, seq=2)
     workspace.write("alice", "scratchpad", "mine", mode="overwrite", tick=0, seq=3)
     workspace.write("bob", "notes", "private", mode="overwrite", tick=0, seq=4)
     workspace.write("bob", "file.txt", "artifact", mode="overwrite", tick=0, seq=5)
-    assert workspace.read("alice", "bob") == ("new", 2)
+    assert workspace.read("alice", "bob") == ("new", 3)
     assert workspace.pending_delivery("alice") == (
-        "[workspace] bob wrote scratchpad v1 (13 chars): abc\n"
-        "[workspace] bob wrote scratchpad v2 (3 chars): new",
+        "[workspace] bob wrote scratchpad v2 (13 chars): abc\n"
+        "[workspace] bob wrote scratchpad v3 (3 chars): new",
         [
-            WorkspaceRead("bob", "scratchpad", 1, ReadVia.NOTIFY),
             WorkspaceRead("bob", "scratchpad", 2, ReadVia.NOTIFY),
+            WorkspaceRead("bob", "scratchpad", 3, ReadVia.NOTIFY),
         ],
     )
     assert workspace.pending_delivery("alice") == (None, [])
     assert [read.writer for read in workspace.pending_delivery("worker")[1]] == [
         "bob",
-        "bob",
         "alice",
     ]
     workspace.write("bob", "scratchpad", "", mode="overwrite", tick=1, seq=6)
     assert workspace.pending_delivery("alice") == (
-        "[workspace] bob wrote scratchpad v3 (0 chars): ",
-        [WorkspaceRead("bob", "scratchpad", 3, ReadVia.NOTIFY)],
+        "[workspace] bob wrote scratchpad v4 (0 chars): ",
+        [WorkspaceRead("bob", "scratchpad", 4, ReadVia.NOTIFY)],
     )
+
+
+@pytest.mark.parametrize(
+    ("mode", "view"), [("notify", "latest"), ("notify", "full"), ("push", "latest")]
+)
+@pytest.mark.parametrize("initial_empty_delivery", [False, True])
+def test_late_joiners_first_delivery_has_only_latest_per_writer(
+    workspace: Workspace, mode: str, view: str, initial_empty_delivery: bool
+) -> None:
+    workspace.delivery = DeliverySpec(mode=mode, view=view)
+    if initial_empty_delivery:
+        workspace.add_agent("late", "worker")
+        assert workspace.pending_delivery("late") == (None, [])
+    workspace.write("bob", "scratchpad", "old", mode="overwrite", tick=0, seq=1)
+    workspace.write("alice", "scratchpad", "alice", mode="overwrite", tick=0, seq=2)
+    workspace.write("bob", "scratchpad", "new", mode="overwrite", tick=1, seq=3)
+    if not initial_empty_delivery:
+        workspace.add_agent("late", "worker")
+    text, reads = workspace.pending_delivery("late")
+    assert text is not None and "old" not in text
+    assert reads == [
+        WorkspaceRead("alice", "scratchpad", 1, ReadVia(mode)),
+        WorkspaceRead("bob", "scratchpad", 2, ReadVia(mode)),
+    ]
+    assert workspace.pending_delivery("late") == (None, [])
+    workspace.write("bob", "scratchpad", "three", mode="overwrite", tick=2, seq=4)
+    workspace.write("bob", "scratchpad", "four", mode="overwrite", tick=2, seq=5)
+    expected_versions = [3, 4] if mode == "notify" else [4]
+    assert [read.version for read in workspace.pending_delivery("late")[1]] == expected_versions
 
 
 @pytest.mark.parametrize("view", ["latest", "full"])
@@ -295,21 +391,38 @@ def test_push_latest_vs_full_in_commit_order(workspace: Workspace, view: str) ->
 
 
 def test_push_tail_cap_records_only_included_versions(workspace: Workspace) -> None:
-    workspace.delivery = DeliverySpec(mode="push", view="full", push_max_chars=20)
+    workspace.delivery = DeliverySpec(mode="push", view="full", push_max_chars=80)
     workspace.write("bob", "scratchpad", "old", mode="overwrite", tick=0, seq=1)
-    workspace.write("bob", "scratchpad", "0123456789abcdef", mode="overwrite", tick=0, seq=2)
+    content = "0123456789abcdef" * 10
+    workspace.write("bob", "scratchpad", content, mode="overwrite", tick=0, seq=2)
     text, reads = workspace.pending_delivery("alice")
-    assert text == "…[truncated]89abcdef"
-    assert len(text) == 20
+    header = "[workspace] bob scratchpad v2:\n"
+    marker = "…[truncated]"
+    assert text == header + marker + content[-(80 - len(header) - len(marker)) :]
+    assert len(text) == 80
     assert reads == [WorkspaceRead("bob", "scratchpad", 2, ReadVia.PUSH)]
     assert workspace.pending_delivery("alice") == (None, [])
 
 
-@pytest.mark.parametrize("cap", [0, 5, 12])
-def test_push_cap_smaller_than_marker(workspace: Workspace, cap: int) -> None:
-    workspace.delivery = DeliverySpec(mode="push", push_max_chars=cap)
-    workspace.write("bob", "scratchpad", "x", mode="overwrite", tick=0, seq=1)
-    assert workspace.pending_delivery("alice") == ("…[truncated]"[:cap], [])
+def test_push_drops_whole_oldest_blocks_without_truncating_headers(workspace: Workspace) -> None:
+    workspace.delivery = DeliverySpec(mode="push", view="full", push_max_chars=70)
+    for seq in range(1, 4):
+        workspace.write("bob", "scratchpad", str(seq), mode="overwrite", tick=0, seq=seq)
+    assert workspace.pending_delivery("alice") == (
+        "[workspace] bob scratchpad v2:\n2\n\n[workspace] bob scratchpad v3:\n3",
+        [WorkspaceRead("bob", "scratchpad", version, ReadVia.PUSH) for version in [2, 3]],
+    )
+    assert workspace.pending_delivery("alice") == (None, [])
+
+
+@pytest.mark.parametrize("writer", ["b" * 40, "b" * 100])
+def test_push_omits_block_when_header_and_truncation_marker_cannot_fit(
+    workspace: Workspace, writer: str
+) -> None:
+    workspace.delivery = DeliverySpec(mode="push", push_max_chars=65)
+    workspace.add_agent(writer, "peer")
+    workspace.write(writer, "scratchpad", "x" * 100, mode="overwrite", tick=0, seq=1)
+    assert workspace.pending_delivery("alice") == (None, [])
     assert workspace.pending_delivery("alice") == (None, [])
 
 
@@ -322,14 +435,25 @@ def test_pull_never_delivers(workspace: Workspace) -> None:
 
 
 @pytest.mark.parametrize(
-    "delivery",
+    "kwargs",
     [
-        DeliverySpec(mode="invalid"),
-        DeliverySpec(view="invalid"),
-        DeliverySpec(push_max_chars=-1),
-        DeliverySpec(index_first_line_chars=-1),
+        {"mode": "invalid"},
+        {"view": "invalid"},
+        {"push_max_chars": -1},
+        {"push_max_chars": 0},
+        {"push_max_chars": 64},
+        {"index_first_line_chars": -1},
     ],
 )
-def test_invalid_delivery_configuration(delivery: DeliverySpec) -> None:
-    with pytest.raises(ValueError):
-        Workspace(roles={}, permissions={}, delivery=delivery, staged=False)
+def test_invalid_delivery_configuration(kwargs: dict[str, Any]) -> None:
+    with pytest.raises(ConfigError):
+        DeliverySpec(**kwargs)
+
+
+def test_invalid_workspace_configuration() -> None:
+    with pytest.raises(ConfigError, match="notes_cap_chars"):
+        Workspace(
+            roles={}, permissions={}, delivery=DeliverySpec(), staged=False, notes_cap_chars=-1
+        )
+    with pytest.raises(ConfigError, match="permissions for role"):
+        Workspace(roles={"alice": "unknown"}, permissions={}, delivery=DeliverySpec(), staged=False)
