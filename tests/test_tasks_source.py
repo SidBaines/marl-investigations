@@ -43,6 +43,8 @@ def test_nested_paths_and_filtering_are_explicit() -> None:
     assert dapo.prompt_path == "prompt.0.content"
     assert dapo.answer_path == "reward_model.ground_truth"
     assert dapo.dedupe is True
+    assert dapo.prompt_transform == "dapo_strip_wrapper"
+    assert dapo.fields == {"id": "extra_info.index"}
     assert SOURCES.load("hmmt_feb_2026").filters == {"answer_nonempty": True}
     assert "unverified" in SOURCES.load("math500").notes
 
@@ -54,6 +56,7 @@ def test_frozen_and_conservative_defaults() -> None:
     assert spec.commit_text is False
     assert spec.filters == {}
     assert spec.dedupe is False
+    assert spec.prompt_transform is None
     with pytest.raises(FrozenInstanceError):
         spec.name = "changed"  # type: ignore[misc]
 
@@ -71,6 +74,8 @@ def test_frozen_and_conservative_defaults() -> None:
         {"filters": {"answer_nonempty": "true"}},
         {"commit_text": "false"},
         {"dedupe": "false"},
+        {"prompt_transform": "unknown"},
+        {"prompt_transform": []},
     ],
 )
 def test_invalid_source_rejected(changes: dict[str, Any]) -> None:
@@ -82,4 +87,11 @@ def test_unknown_yaml_key_rejected(tmp_path: Path) -> None:
     original = SOURCES.path("aime_2025").read_text()
     (tmp_path / "aime_2025.yaml").write_text(original + "typo: true\n")
     with pytest.raises(ValueError, match="unknown keys.*typo"):
+        Registry("tasks", tmp_path, TaskSourceSpec).load("aime_2025")
+
+
+def test_unknown_transform_rejected_at_spec_load(tmp_path: Path) -> None:
+    original = SOURCES.path("aime_2025").read_text()
+    (tmp_path / "aime_2025.yaml").write_text(original + "prompt_transform: typo\n")
+    with pytest.raises(ValueError, match="unknown prompt_transform"):
         Registry("tasks", tmp_path, TaskSourceSpec).load("aime_2025")

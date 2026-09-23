@@ -1,0 +1,6 @@
+protocol: multi_session
+config:
+  sessions: 3
+  carry: tail
+  tail_tokens: 2048
+notes: 3 sessions; carry = last 2048 tokens of the previous context (Delethink-style).

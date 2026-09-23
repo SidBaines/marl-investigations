@@ -132,6 +132,7 @@ def _validate(spec: EpisodeSpec) -> None:
 
 async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]:
     """Validate before spending, isolate backend failures, and always close the env."""
+    spec = replace(spec, limits=spec.protocol.adjust_limits(spec.limits))
     _validate(spec)
     clock = spec.clock if spec.clock is not None else SystemClock()
     group_id = spec.group_id or f"{spec.task.task_id}/{spec.config_hash[:8]}"

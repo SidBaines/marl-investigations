@@ -1,0 +1,6 @@
+protocol: multi_session
+config:
+  sessions: 3
+  carry: compaction
+  compact_threshold: 0
+notes: 3 sessions; carry = session-end summary (compaction).

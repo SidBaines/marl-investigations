@@ -22,6 +22,7 @@ class TaskSourceSpec:
     config: str | None = None
     answer_path: str | None = None
     prompt_path: str | None = None
+    prompt_transform: str | None = None
     dedupe: bool = False
     filters: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
@@ -45,6 +46,14 @@ class TaskSourceSpec:
             raise ValueError("answer_nonempty must be a boolean")
         if type(self.commit_text) is not bool or type(self.dedupe) is not bool:
             raise ValueError("commit_text and dedupe must be booleans")
+        if self.prompt_transform is not None:
+            from marli.tasks.loaders import PROMPT_TRANSFORMS
+
+            if (
+                not isinstance(self.prompt_transform, str)
+                or self.prompt_transform not in PROMPT_TRANSFORMS
+            ):
+                raise ValueError(f"unknown prompt_transform: {self.prompt_transform!r}")
 
 
 SOURCES: Registry[TaskSourceSpec] = Registry("tasks", Path(__file__).parent, TaskSourceSpec)
