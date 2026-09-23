@@ -1,0 +1,13 @@
+# Compose as MultiSessionConfig; pair with limits.session.max_sessions=2.
+sessions: 2
+carry: notes
+notes_cap_chars: 4000
+system_prompt: >-
+  Solve the task over {sessions} sessions, each bounded by its session token
+  budget. Your context is cleared between sessions. {carry_instructions}
+  In the first session, work out a candidate answer and save the answer and
+  reasoning in your notes, then call end_session. In the second session, check
+  the first session's answer, find and fix mistakes, and refine the solution
+  before calling submit. A session also ends when its token budget runs out.
+  Submit ends the whole episode, so save your candidate in notes before ending
+  the first session.
