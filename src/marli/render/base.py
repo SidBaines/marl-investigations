@@ -5,8 +5,8 @@ messages into token ids in two steps: ``initial`` renders the first prompt
 (system + tools + messages, ending with the assistant generation header and
 any generation prefill such as Qwen3.5's ``<think>\n``); ``continuation``
 renders only what comes *after* a sampled completion (closing the previous turn
-if it ended on ``length``, the new tool results / delivered messages, and the
-next generation header). The sampled ids themselves are appended verbatim by
+if it did not sample an end-of-turn token, the new tool results / delivered
+messages, and the next generation header). The sampled ids are appended verbatim by
 the agent runtime — the renderer never re-renders them. This keeps "datums use
 exactly the ids the policy saw" true and makes one datum per segment possible.
 
@@ -121,10 +121,11 @@ class DeltaRenderer(Protocol):
 
     def continuation(self, last_termination: str, new_msgs: Sequence[Msg]) -> list[int]:
         """Tokens to append after a sampled completion so the buffer again ends in a
-        generation header. ``last_termination`` is the previous completion's
-        termination: after "length"/"malformed-without-stop" the renderer first emits
-        the end-of-turn tokens the model did not sample. Consecutive tool results are
-        grouped the way the model's reference template groups them."""
+        generation header. The runtime passes ``"stop"`` iff the completion ended
+        with a stop id, even when parsing found a malformed call. Renderers close
+        the turn iff the last completion did not end with their end-of-turn token
+        (an alternate EOS can stop generation without closing the turn). Consecutive
+        tool results are grouped the way the reference template groups them."""
         ...
 
     def forced_tool_prefix(self, tool_name: str) -> list[int]:
@@ -135,15 +136,16 @@ class DeltaRenderer(Protocol):
 
     def suppress_thinking_prefix(self) -> list[int]:
         """Observation tokens appended after the generation header to skip the reasoning
-        channel for harness-requested calls (compaction/carry summaries, forced finals),
+        channel for COMPACT/CARRY calls (compaction/carry summaries),
         in the template's own non-thinking form (Qwen3.5: close the prefilled think block;
-        gpt-oss: open the final channel). ``[]`` for formats without a reasoning channel."""
+        gpt-oss: open the final channel). Forced FINAL/REPORT calls use only
+        ``forced_tool_prefix``. ``[]`` for formats without a reasoning channel."""
         ...
 
     def parse(self, completion_ids: Sequence[int], tools: Sequence[ToolSpec] = ()) -> ParsedTurn:
         """Parse sampled ids (including the stop token, if any). ``tools`` lets formats
         with untyped parameter text (Qwen3.5 XML) type arguments by their JSON schema:
-        string-typed parameters keep the raw text; others are JSON-decoded when possible."""
+        string-capable parameters keep raw text; other declared types determine decoding."""
         ...
 
     def decode(self, ids: Sequence[int]) -> str: ...

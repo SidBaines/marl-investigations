@@ -25,6 +25,13 @@ def _tokenizer(hf_id: str) -> PreTrainedTokenizerBase:
     return AutoTokenizer.from_pretrained(hf_id)
 
 
+@cache
+def _tokenizer_sha(hf_id: str) -> str:
+    from marli.render.hf import _tokenizer_sha as fingerprint
+
+    return fingerprint(_tokenizer(hf_id))
+
+
 def _fake(hf_id: str | None) -> DeltaRenderer:
     return FakeRenderer()
 
@@ -41,9 +48,10 @@ def _qwen(name: str, hf_id: str | None) -> DeltaRenderer:
     from marli.render.qwen import qwen_profile
 
     xml = name.startswith("qwen3_5")
-    tokenizer = _tokenizer(hf_id or ("Qwen/Qwen3.5-4B" if xml else "Qwen/Qwen3-8B"))
+    hf_id = hf_id or ("Qwen/Qwen3.5-4B" if xml else "Qwen/Qwen3-8B")
+    tokenizer = _tokenizer(hf_id)
     profile = qwen_profile(tokenizer, xml=xml, thinking=not name.endswith("_nothink"))
-    return HFTemplateRenderer(tokenizer, name, profile)
+    return HFTemplateRenderer(tokenizer, name, profile, tokenizer_sha=_tokenizer_sha(hf_id))
 
 
 _FACTORIES: dict[str, Callable[[str | None], DeltaRenderer]] = {
