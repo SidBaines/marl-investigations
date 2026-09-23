@@ -26,9 +26,17 @@ def build_datums(
     recorded calls and never re-tokenizes, normalizes credit, or clips tokens.
     """
     datums: list[TrainDatum] = []
+    seen: set[tuple[str, str, str]] = set()
+    roles = {agent.agent_id: agent.role for agent in episode.agents}
     for credit in credits:
         if credit.episode_id != episode.episode_id:
             continue
+        key = (credit.episode_id, credit.agent_id, credit.segment_id)
+        if key in seen:
+            raise ValueError(f"Duplicate credit for {key}")
+        seen.add(key)
+        if not isfinite(credit.advantage):
+            raise ValueError(f"Credit for {key}: advantage must be finite")
         segment_calls = sorted(
             (
                 call
@@ -45,6 +53,8 @@ def build_datums(
                 f"Credit for {episode.episode_id}/{credit.agent_id}, "
                 f"segment {credit.segment_id!r}: no trainable calls"
             )
+        if credit.role != roles.get(credit.agent_id):
+            raise ValueError(f"Credit for {key}: role does not match the agent's role")
         version = calls[0].policy_version
         for call in segment_calls:
             if call.policy_version != version:

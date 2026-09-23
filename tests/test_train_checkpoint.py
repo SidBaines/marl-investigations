@@ -66,6 +66,28 @@ def test_state_is_never_sampler(checkpoint: Checkpoint) -> None:
     assert local.require_state("a") == str(checkpoint.root / "state.json")
 
 
+@pytest.mark.parametrize("state", ["tinker://run/sampler_weights/step-4", "sampler_weights/step-4"])
+def test_sampler_weights_in_state_field_rejected(checkpoint: Checkpoint, state: str) -> None:
+    saved = replace(checkpoint, learners={"a": record(4, state=state)})
+    with pytest.raises(ConfigError, match="state is a sampler path"):
+        saved.require_state("a")
+
+
+@pytest.mark.parametrize("concrete", [False, True])
+def test_policy_ref_retains_base_url(checkpoint: Checkpoint, concrete: bool) -> None:
+    sampler = "tinker://run/sampler_weights/step-4"
+    if concrete:
+        sampler = f"tinker:Qwen/Qwen3-8B#sampler={sampler}"
+    saved = replace(
+        checkpoint, learners={"a": record(4, sampler=sampler, base_url="http://local:8000")}
+    )
+    saved.save()
+    ref = Checkpoint.load(saved.root).policy_ref("a")
+    assert (
+        ref == "tinker@http://local:8000|Qwen/Qwen3-8B#sampler=tinker://run/sampler_weights/step-4"
+    )
+
+
 @pytest.mark.parametrize("step", [None, 0, 2, 4])
 def test_sampler_at_saved_step(checkpoint: Checkpoint, step: int | None) -> None:
     expected_step = checkpoint.step if step is None else step

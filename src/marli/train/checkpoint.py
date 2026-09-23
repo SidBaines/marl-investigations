@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, TypedDict
+from typing import Any, ClassVar, NotRequired, TypedDict
 
 from marli.errors import ConfigError
 from marli.handles import Handle, register_handle
@@ -25,6 +25,7 @@ class LearnerCheckpoint(TypedDict):
     base_model: str
     backend: str
     rank: int
+    base_url: NotRequired[str | None]
 
 
 class SavedStep(TypedDict):
@@ -50,6 +51,8 @@ class Checkpoint(Handle):
         state = record.get("state")
         if not state:
             raise ConfigError(f"checkpoint learner {learner!r} has no resumable state")
+        if "sampler_weights" in state.split("/"):
+            raise ConfigError(f"checkpoint learner {learner!r} state is a sampler path")
         return state if "://" in state else str((self.root / state).resolve())
 
     def _records(self, step: int | None) -> dict[str, LearnerCheckpoint]:
@@ -81,10 +84,12 @@ class Checkpoint(Handle):
                 if model.tinker_id is None:
                     raise ConfigError(f"model {base!r} has no tinker_id")
                 base = model.tinker_id
-            return str(PolicyRef("tinker", base, sampler=sampler))
+            return str(PolicyRef("tinker", base, base_url=record.get("base_url"), sampler=sampler))
         ref = parse_ref(sampler)
         if ref.kind not in {"tinker", "scripted", "vllm"}:
             raise ConfigError(f"checkpoint sampler must be a concrete token policy: {sampler!r}")
+        if ref.kind == "tinker" and ref.base_url is None and record.get("base_url"):
+            ref = PolicyRef("tinker", ref.target, base_url=record["base_url"], sampler=ref.sampler)
         return str(ref)
 
 

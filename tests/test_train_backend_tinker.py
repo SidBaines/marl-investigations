@@ -19,7 +19,7 @@ from marli.model import load_model
 from marli.policy.tinker import TinkerPolicy
 from marli.render.fake import FakeRenderer
 from marli.train.backends.registry import make_backend
-from marli.train.backends.tinker import TinkerBackend
+from marli.train.backends.tinker import TinkerBackend, TinkerLearner
 from marli.train.checkpoint import Checkpoint
 from marli.train.types import LearnerSpec, TrainDatum
 
@@ -145,9 +145,15 @@ def sdk(monkeypatch: pytest.MonkeyPatch) -> Any:
         sdk.clients.append(client)
         return client
 
+    weights_info = SimpleNamespace(base_model="Qwen/Qwen3-8B", is_lora=True, lora_rank=32)
+    rest = SimpleNamespace(get_weights_info_by_tinker_path=AsyncMock(return_value=weights_info))
     service = SimpleNamespace(
         create_lora_training_client_async=AsyncMock(side_effect=training_client),
         create_training_client_from_state_async=AsyncMock(side_effect=training_client),
+        create_training_client_from_state_with_optimizer_async=AsyncMock(
+            side_effect=training_client
+        ),
+        create_rest_client=Mock(return_value=rest),
         create_sampling_client_async=AsyncMock(side_effect=lambda **kw: object()),
         close=AsyncMock(),
     )
@@ -332,7 +338,7 @@ async def test_unlimited_guard_allows_unpriced_model(sdk: Any, guard: SpendGuard
 @pytest.mark.parametrize(
     "error,expected",
     [
-        (ValueError("bad config"), ConfigError),
+        (ValueError("runtime failure"), BackendError),
         (BadRequestError("bad request"), ConfigError),
         (UnprocessableEntityError("invalid"), ConfigError),
         (APIError("remote failure"), BackendError),
@@ -399,52 +405,64 @@ async def test_snapshots_state_and_policy_identity(sdk: Any) -> None:
         ("sampler", "run-a-v2", None),
         ("state", "run-a-step2", None),
     ]
+    before_restore = learner.policy()
     await learner.load_state(state)
+    service = sdk.ServiceClient.return_value
+    service.create_training_client_from_state_with_optimizer_async.assert_awaited_once_with(
+        path=state
+    )
+    assert learner.training_client.saves == [("sampler", "a-init", None)]
+    assert learner.policy().sampling_client is not before_restore.sampling_client
     await learner.load_state(state, with_optimizer=False)
-    assert learner.training_client.loads == [(state, True), (state, False)]
-    assert "load_optimizer:result" in sdk.events and "load:result" in sdk.events
+    service.create_training_client_from_state_async.assert_awaited_once_with(path=state)
+    assert learner.training_client.saves == [("sampler", "a-restore-1", None)]
     assert learner.version == 2
 
 
-@pytest.mark.parametrize("checkpoint_sampler", [False, True])
-async def test_init_from_restores_optimizer_and_optional_sampler(
-    sdk: Any, tmp_path: Path, checkpoint_sampler: bool
+@pytest.mark.parametrize("source_kind", ["raw", "manifest", "manifest_sampler"])
+@pytest.mark.parametrize("init_mode", ["resume", "weights"])
+async def test_init_from_restores_weights_optimizer_sampler_and_version(
+    sdk: Any, tmp_path: Path, source_kind: str, init_mode: str
 ) -> None:
     state = "tinker://run/weights/step-5"
     model = load_model("qwen3_8b")
     source = state
-    if checkpoint_sampler:
-        checkpoint = Checkpoint(
-            root=tmp_path,
-            step=5,
-            run_config_hash="hash",
-            learners={
-                "a": {
-                    "state": state,
-                    "sampler": "tinker://run/sampler/step-5",
-                    "version": 5,
-                    "base_model": model.name,
-                    "backend": "tinker",
-                    "rank": 32,
-                }
-            },
+    sampler = "tinker://run/sampler_weights/step-5" if source_kind == "manifest_sampler" else None
+    if source_kind != "raw":
+        source = str(
+            Checkpoint(
+                root=tmp_path,
+                step=5,
+                run_config_hash="hash",
+                learners={
+                    "a": {
+                        "state": state,
+                        "sampler": sampler,
+                        "version": 5,
+                        "base_model": model.name,
+                        "backend": "tinker",
+                        "rank": 32,
+                    }
+                },
+            ).save()
         )
-        source = str(checkpoint.save())
-    learner = await TinkerBackend(SpendGuard(1)).create_learner(
+    learner = await TinkerBackend(SpendGuard(1), init_mode=init_mode).create_learner(
         "a", LearnerSpec(init_from=source), model=model, seed=0
     )
     service = sdk.ServiceClient.return_value
-    service.create_training_client_from_state_async.assert_awaited_once_with(path=state)
+    resume = service.create_training_client_from_state_with_optimizer_async
+    warm = service.create_training_client_from_state_async
+    (resume if init_mode == "resume" else warm).assert_awaited_once_with(path=state)
+    (warm if init_mode == "resume" else resume).assert_not_called()
     service.create_lora_training_client_async.assert_not_called()
-    assert learner.training_client.loads == [(state, True)]
-    assert "load_optimizer:result" in sdk.events
-    assert learner.policy().policy_version == learner.version == 0
-    if checkpoint_sampler:
-        service.create_sampling_client_async.assert_awaited_once_with(
-            model_path="tinker://run/sampler/step-5"
-        )
-    else:
-        service.create_sampling_client_async.assert_awaited_once_with(base_model=model.tinker_id)
+    assert learner.training_client.loads == []
+    version = 0 if source_kind == "raw" else 5
+    assert learner.policy().policy_version == learner.version == version
+    expected_sampler = sampler or "tinker://sampler/a-init"
+    service.create_sampling_client_async.assert_awaited_once_with(model_path=expected_sampler)
+    assert learner.training_client.saves == ([] if sampler else [("sampler", "a-init", None)])
+    await learner.train_step([datum(version=version)])
+    assert (await learner.sync_sampler("next")).version == version + 1
 
 
 async def test_reuses_base_url_guard(sdk: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -459,6 +477,193 @@ async def test_reuses_base_url_guard(sdk: Any, monkeypatch: pytest.MonkeyPatch) 
     assert snap.policy_ref.startswith("tinker@http://local:8000|Qwen/")
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("backend", "fake"),
+        ("base_model", "qwen3_4b"),
+        ("rank", 8),
+    ],
+)
+async def test_checkpoint_metadata_mismatch_fails_before_sdk_restore(
+    sdk: Any, tmp_path: Path, field: str, value: str | int
+) -> None:
+    record = {
+        "state": "tinker://run/weights/step-5",
+        "sampler": None,
+        "version": 5,
+        "base_model": "qwen3_8b",
+        "backend": "tinker",
+        "rank": 32,
+        field: value,
+    }
+    ck = Checkpoint(root=tmp_path, step=5, run_config_hash="hash", learners={"a": record})
+    with pytest.raises(ConfigError, match=field):
+        await TinkerBackend(None).create_learner(
+            "a", LearnerSpec(init_from=str(ck.save())), model=load_model("qwen3_8b"), seed=0
+        )
+    service = sdk.ServiceClient.return_value
+    assert sdk.clients == []
+    service.create_rest_client.assert_not_called()
+    service.create_sampling_client_async.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("base_model", "Qwen/Qwen3-4B"),
+        ("lora_rank", 8),
+        ("is_lora", False),
+    ],
+)
+async def test_raw_state_metadata_is_checked_before_restore(
+    sdk: Any, field: str, value: str | int | bool
+) -> None:
+    service = sdk.ServiceClient.return_value
+    info = service.create_rest_client.return_value.get_weights_info_by_tinker_path.return_value
+    setattr(info, field, value)
+    with pytest.raises(ConfigError, match="base_model|rank"):
+        await TinkerBackend(None).create_learner(
+            "a",
+            LearnerSpec(init_from="tinker://run/weights/step-5"),
+            model=load_model("qwen3_8b"),
+            seed=0,
+        )
+    service.create_training_client_from_state_with_optimizer_async.assert_not_called()
+    service.create_training_client_from_state_async.assert_not_called()
+    service.create_sampling_client_async.assert_not_called()
+
+
+async def test_restore_respects_explicit_spec_rank(sdk: Any) -> None:
+    service = sdk.ServiceClient.return_value
+    info = service.create_rest_client.return_value.get_weights_info_by_tinker_path.return_value
+    info.lora_rank = 8
+    learner = await TinkerBackend(None).create_learner(
+        "a",
+        LearnerSpec(rank=8, init_from="tinker://run/weights/step-5"),
+        model=load_model("qwen3_8b"),
+        seed=0,
+    )
+    assert learner.spec.rank == 8
+    assert learner.training_client.saves == [("sampler", "a-init", None)]
+
+
+def test_missing_tinker_extra_is_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "tinker", None)
+    with pytest.raises(ConfigError, match=r"\[tinker\] extra"):
+        TinkerBackend(None)
+
+
+def test_unknown_init_mode_is_config_error(sdk: Any) -> None:
+    with pytest.raises(ConfigError, match="init_mode"):
+        TinkerBackend(None, init_mode="unknown")
+    sdk.ServiceClient.assert_not_called()
+
+
+async def test_local_optimizer_validation_is_config_error(sdk: Any) -> None:
+    backend = TinkerBackend(None)
+    learner = await backend.create_learner("a", LearnerSpec(), model=load_model("qwen3_8b"), seed=0)
+    sdk.AdamParams = Mock(side_effect=ValueError("invalid optimizer"))
+    with pytest.raises(ConfigError, match="invalid optimizer"):
+        await learner.train_step([datum()])
+    assert sdk.events == []
+
+
+@pytest.mark.parametrize(
+    "error,status",
+    [
+        (ValueError("remote failure"), "errored"),
+        (asyncio.CancelledError(), "interrupted"),
+    ],
+)
+async def test_close_reports_training_failure(sdk: Any, error: BaseException, status: str) -> None:
+    backend = TinkerBackend(None)
+    learner = await backend.create_learner("a", LearnerSpec(), model=load_model("qwen3_8b"), seed=0)
+    learner.training_client.optim_step_async = AsyncMock(
+        return_value=SimpleNamespace(result_async=AsyncMock(side_effect=error))
+    )
+    with pytest.raises(BackendError if isinstance(error, ValueError) else asyncio.CancelledError):
+        await learner.train_step([datum()])
+    await backend.close()
+    sdk.ServiceClient.return_value.close.assert_awaited_once_with(status)
+
+
+async def test_close_reports_external_failure_in_finally(sdk: Any) -> None:
+    backend = TinkerBackend(None)
+    with pytest.raises(RuntimeError, match="rollout"):
+        try:
+            raise RuntimeError("rollout failed")
+        finally:
+            await backend.close()
+    sdk.ServiceClient.return_value.close.assert_awaited_once_with("errored")
+
+
+async def test_grad_norm_from_forward_metrics(sdk: Any) -> None:
+    learner = await TinkerBackend(None).create_learner(
+        "a", LearnerSpec(), model=load_model("qwen3_8b"), seed=0
+    )
+    learner.training_client.optim_result.metrics = None
+    learner.training_client.forward_result.metrics["grad_norm"] = 4.5
+    result = await learner.train_step([datum()])
+    assert result.grad_norm == 4.5
+
+
+async def test_invalid_training_response_marks_close_errored(sdk: Any) -> None:
+    backend = TinkerBackend(None)
+    learner = await backend.create_learner("a", LearnerSpec(), model=load_model("qwen3_8b"), seed=0)
+    learner.training_client.forward_result.metrics = {}
+    with pytest.raises(BackendError, match="missing loss:sum"):
+        await learner.train_step([datum()])
+    await backend.close()
+    sdk.ServiceClient.return_value.close.assert_awaited_once_with("errored")
+
+
+@pytest.mark.tinker
+async def test_train_step_with_installed_sdk_types_and_fake_transport() -> None:
+    tinker = pytest.importorskip("tinker")
+    sdk = SimpleNamespace(events=[])
+    data = datum()
+    forward_result = tinker.types.ForwardBackwardOutput(
+        loss_fn_output_type="ArrayRecord",
+        loss_fn_outputs=[
+            {
+                "logprobs": tinker.TensorData(
+                    data=[-100.0, -0.75, -200.0, -1.75], dtype="float32", shape=[4]
+                )
+            }
+        ],
+        metrics={"loss:sum": 3.5},
+    )
+    optim_result = tinker.types.OptimStepResponse(metrics=None)
+    client = SimpleNamespace(
+        forward_backward_async=AsyncMock(return_value=Future(sdk, "forward", forward_result)),
+        optim_step_async=AsyncMock(return_value=Future(sdk, "optim", optim_result)),
+    )
+    guard = SpendGuard(1)
+    learner = TinkerLearner(
+        "a",
+        LearnerSpec(),
+        model=load_model("qwen3_8b"),
+        service=None,
+        training_client=client,
+        sampling_client=object(),
+        spend=guard,
+        base_url=None,
+    )
+    result = await learner.train_step([data])
+    sent = client.forward_backward_async.call_args.args[0][0]
+    assert sent.model_input.to_ints() == list(data.tokens[:-1])
+    assert sent.loss_fn_inputs["target_tokens"].tolist() == list(data.tokens[1:])
+    assert sent.loss_fn_inputs["logprobs"].tolist() == list(data.logprobs)
+    assert sent.loss_fn_inputs["advantages"].tolist() == list(data.advantages)
+    adam = client.optim_step_async.call_args.args[0]
+    assert isinstance(adam, tinker.AdamParams)
+    assert adam.grad_clip_norm == 0.0
+    assert result.loss == 3.5 and result.grad_norm is None
+    assert result.kl_sample_train == 0.5
+    assert guard.spent == tinker_cost(learner.model, train=4)
+
+
 @pytest.mark.tinker
 def test_installed_sdk_contract_drift() -> None:
     tinker = pytest.importorskip("tinker")
@@ -466,6 +671,8 @@ def test_installed_sdk_contract_drift() -> None:
         "__init__": {"base_url": "http://local:8000"},
         "create_lora_training_client_async": {"base_model": "base", "rank": 8, "seed": 0},
         "create_training_client_from_state_async": {"path": "tinker://state"},
+        "create_training_client_from_state_with_optimizer_async": {"path": "tinker://state"},
+        "create_rest_client": {},
         "create_sampling_client_async": {"base_model": "base", "model_path": "tinker://sampler"},
         "close": {"status": "success"},
     }
@@ -481,6 +688,9 @@ def test_installed_sdk_contract_drift() -> None:
     }
     for method, kwargs in training_calls.items():
         inspect.signature(getattr(tinker.TrainingClient, method)).bind(None, **kwargs)
+    from tinker.lib.public_interfaces.rest_client import RestClient
+
+    inspect.signature(RestClient.get_weights_info_by_tinker_path).bind(None, "tinker://state")
     inspect.signature(tinker.APIFuture.result_async).bind(None)
     inspect.signature(tinker.ModelInput.from_ints).bind([1, 2])
     inspect.signature(tinker.TensorData.tolist).bind(None)

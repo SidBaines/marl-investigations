@@ -37,7 +37,7 @@ class FakeLearner:
         *,
         model: ModelSpec,
         policy_factory: str | None,
-        state_dir: Path,
+        state_dir: Path | None,
     ) -> None:
         self.name = name
         self.spec = spec
@@ -98,6 +98,8 @@ class FakeLearner:
         return SamplerSnapshot(self.name, self.version, f"fake://{self.name}/{name}", ref)
 
     async def save_state(self, name: str) -> str:
+        if self.state_dir is None:
+            raise ConfigError("fake save_state requires an explicit state_dir")
         path = (self.state_dir / self.name / f"{name}.json").resolve()
         atomic_write_text(path, json.dumps({"version": self.version, "weights": self.weights}))
         return str(path)
@@ -118,7 +120,7 @@ class FakeBackend:
         self, policy_factory: str | None = None, *, state_dir: str | Path | None = None
     ) -> None:
         self.policy_factory = policy_factory
-        self.state_dir = Path(state_dir) if state_dir is not None else Path("runs/fake-state")
+        self.state_dir = Path(state_dir) if state_dir is not None else None
         self.learners: dict[str, FakeLearner] = {}
 
     async def create_learner(
@@ -132,6 +134,7 @@ class FakeBackend:
         if spec.init_from is not None:
             checkpoint = Checkpoint.load(spec.init_from)
             await learner.load_state(checkpoint.require_state(name))
+            learner.version = checkpoint.learners[name]["version"]
         self.learners[name] = learner
         return learner
 
