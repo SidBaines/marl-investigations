@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
+from functools import cache
 from typing import Any
 
 
@@ -266,22 +267,37 @@ def record_to_dict(obj: Any) -> Any:
     return obj
 
 
+@cache
+def _record_field_types(cls: type) -> dict[str, Any]:
+    from dataclasses import fields
+    from typing import get_type_hints
+
+    hints = get_type_hints(cls)
+    return {f.name: hints[f.name] for f in fields(cls)}
+
+
 def record_from_dict(cls: type, data: Any) -> Any:
-    """Inverse of :func:`record_to_dict` for ``cls`` (rebuilds nested records, enums, tuples)."""
-    from dataclasses import fields, is_dataclass
+    """Rebuild records, requiring every serialized field, including defaulted fields."""
+    from dataclasses import is_dataclass
     from enum import Enum
     from types import UnionType
-    from typing import Union, get_args, get_origin, get_type_hints
+    from typing import Union, get_args, get_origin
 
-    if data is None or cls is Any:
+    if cls is Any:
         return data
     origin = get_origin(cls)
     args = get_args(cls)
     if origin in (UnionType, Union):
+        if data is None and type(None) in args:
+            return None
         (inner,) = (arg for arg in args if arg is not type(None))
         return record_from_dict(inner, data)
+    if data is None:
+        raise ValueError(f"None is not allowed for {cls.__name__}")
     if origin is tuple:
         if len(args) == 2 and args[1] is Ellipsis:
+            if args[0] in (int, float, str, bool, Any):
+                return tuple(data)
             return tuple(record_from_dict(args[0], item) for item in data)
         return tuple(record_from_dict(kind, item) for kind, item in zip(args, data, strict=True))
     if origin is dict:
@@ -289,12 +305,14 @@ def record_from_dict(cls: type, data: Any) -> Any:
     if isinstance(cls, type) and issubclass(cls, Enum):
         return cls(data)
     if is_dataclass(cls):
-        hints = get_type_hints(cls)
-        return cls(
-            **{
-                f.name: record_from_dict(hints[f.name], data[f.name])
-                for f in fields(cls)
-                if f.name in data
-            }
-        )
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected a dict for {cls.__name__}")
+        hints = _record_field_types(cls)
+        unknown = data.keys() - hints.keys()
+        if unknown:
+            raise ValueError(f"Unknown fields for {cls.__name__}: {sorted(unknown, key=repr)}")
+        missing = hints.keys() - data.keys()
+        if missing:
+            raise ValueError(f"Missing fields for {cls.__name__}: {sorted(missing)}")
+        return cls(**{name: record_from_dict(kind, data[name]) for name, kind in hints.items()})
     return data

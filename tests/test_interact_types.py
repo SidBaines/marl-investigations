@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from dataclasses import fields, is_dataclass, replace
 from enum import Enum
-from typing import Any
+from time import perf_counter
+from typing import Any, get_args, get_type_hints
 
 import pytest
 
@@ -164,11 +165,61 @@ def test_nested_tuples_and_seat_keys_use_json_lists() -> None:
     assert record_from_dict(tuple[str, int], ["peer", 2]) == ("peer", 2)
 
 
-def test_default_fields_can_be_omitted() -> None:
-    assert record_from_dict(Usage, {}) == Usage()
+@pytest.mark.parametrize("record", RECORDS, ids=lambda record: type(record).__name__)
+def test_every_field_is_required_even_when_defaulted(record: Any) -> None:
+    for field in fields(record):
+        encoded = record_to_dict(record)
+        del encoded[field.name]
+        with pytest.raises(ValueError, match=rf"{type(record).__name__}.*{field.name}"):
+            record_from_dict(type(record), encoded)
+
+
+@pytest.mark.parametrize("record", RECORDS, ids=lambda record: type(record).__name__)
+@pytest.mark.parametrize("data", [None, [], "invalid", 1, True])
+def test_records_require_dicts(record: Any, data: Any) -> None:
+    with pytest.raises(ValueError, match=type(record).__name__):
+        record_from_dict(type(record), data)
+
+
+@pytest.mark.parametrize("record", RECORDS, ids=lambda record: type(record).__name__)
+def test_unknown_fields_are_listed(record: Any) -> None:
+    encoded = record_to_dict(record) | {"extra_a": 1, "extra_b": 2}
+    with pytest.raises(ValueError, match=rf"{type(record).__name__}.*extra_a.*extra_b"):
+        record_from_dict(type(record), encoded)
+
+
+@pytest.mark.parametrize("record", RECORDS, ids=lambda record: type(record).__name__)
+def test_none_requires_an_optional_field(record: Any) -> None:
+    for name, kind in get_type_hints(type(record)).items():
+        encoded = record_to_dict(record) | {name: None}
+        if type(None) in get_args(kind):
+            assert getattr(record_from_dict(type(record), encoded), name) is None
+        else:
+            with pytest.raises(ValueError):
+                record_from_dict(type(record), encoded)
+
+
+@pytest.mark.parametrize(
+    ("kind", "data"),
+    [
+        (int, [1, 2]),
+        (float, [0.1, 0.2]),
+        (str, ["a", "b"]),
+        (bool, [True, False]),
+        (Any, [1, "a", None, {"nested": [2]}]),
+    ],
+)
+def test_scalar_tuples_preserve_values(kind: type, data: list[Any]) -> None:
+    assert_exact_types(record_from_dict(tuple[kind, ...], data), tuple(data))
+
+
+def test_large_token_arrays_decode_quickly() -> None:
     encoded = record_to_dict(CALL)
-    del encoded["usage"]
-    del encoded["timing"]
-    restored = record_from_dict(Call, encoded)
-    assert restored.usage == Usage()
-    assert restored.timing.started_at == restored.timing.latency_s == 0.0
+    encoded["completion_ids"] = R.encode_completion("x" * (800_000 - 1))
+    encoded["logprobs"] = [-0.5] * 800_000
+    started = perf_counter()
+    decoded = record_from_dict(Call, encoded)
+    elapsed = perf_counter() - started
+    assert decoded.completion_ids == tuple(encoded["completion_ids"])
+    assert decoded.logprobs == tuple(encoded["logprobs"])
+    assert elapsed < 0.3

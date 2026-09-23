@@ -13,34 +13,44 @@ all computed offline from records so every protocol is measured identically):
 
 - ``gen_tokens`` (per call) = ``len(completion_ids)`` (includes stop token and
   thinking; excludes prefill / forced-close / injected tokens, which are never
-  in completion_ids). API calls use ``usage.completion_tokens`` instead.
-  ``total_gen`` = sum over all calls of all agents
+  in completion_ids). ``total_gen`` = sum over token-policy calls of all agents
   (workers, finalizers, compaction/carry/final calls included); also broken
   down as ``gen/<role>`` and ``gen_purpose/<purpose>``.
 - ``prompt_tokens`` (per call) = ``prompt_len``; ``total_prompt`` = sum.
-  API calls have no token buffer and contribute zero prompt/uncached tokens.
+  API calls use a foreign tokenizer: their usage is reported separately as
+  ``api_calls``, ``api_gen_tokens`` and ``api_prompt_tokens``. They contribute
+  only to tokenizer-free call counts, not the shared token/context metrics.
 - ``uncached_ideal`` (per call) = ``prompt_len`` minus the longest common
   prefix between this call's prompt and the full token sequence
   (prompt + completion) of any earlier call **of the same policy_id and
   policy_version** in this episode. ``total_uncached`` = sum.
+  Append-only buffers make it exact to compare against (a) the previous call
+  in the same segment and (b) the latest earlier call of every other segment.
   (Server-reported cache hits are logged separately as a diagnostic only.)
 - ``calls`` = number of calls; ``calls/<purpose>``.
+  BUDGET/CTX calls consumed no compute: they count only as ``refused_calls``
+  and contribute zero to all call/token compute metrics.
 - Critical path: build a DAG over calls with edges (i) consecutive calls of
   the same agent, (ii) the spawning call -> each worker's first call,
   (iii) each worker's last call -> the coordinator's next call,
   (iv) under lockstep, every call at one tick -> every call at the next
   recorded tick (i.e. tick barrier edges for the agents active at each tick),
-  (v) every peer's last call -> the finalizer's first call.
+  (v) each non-finalizer agent's last call -> the finalizer's first call,
+  when that last call precedes the finalizer's first call.
   Async reads are not edges. ``cp_tokens`` = longest path weighted by
   gen_tokens; ``cp_calls`` = longest path with unit weights (≈ Kimi
-  CriticalSteps).
+  CriticalSteps). Refused calls have zero weight; API calls have zero token
+  weight but unit call weight. Both retain their dependency edges.
 - ``peak_ctx`` = max over calls of prompt_len + gen_tokens;
   ``peak_active_ctx`` = max over ticks (lockstep) or event times (async) of the
   sum of active agents' current buffer lengths (a KV-cache proxy).
+  Agents are active from their first call until DONE (or their last call when
+  DONE is absent). Carry each agent's latest length forward between calls.
   Within a tick use each agent's largest context. Async lengths are observed
   at CALL_START/CALL_END and released at DONE; tokens within a call have no
   individual timestamps. The peak is at least the largest individual buffer.
-  API calls have no buffer to contribute to ``peak_active_ctx``.
+  API calls contribute to neither context metric. Refused token calls still
+  record their buffer lengths, even though they generate no tokens.
 - Protocol diagnostics: ``n_agents``, ``n_workers``, ``n_sessions``,
   ``tool_calls``, ``tool_errors``, ``malformed_calls``, ``forced_calls``,
   ``cross_reads`` (WorkspaceReads whose writer != reader), ``notify_reads`` /
@@ -100,6 +110,8 @@ from marli.interact.types import (
 if TYPE_CHECKING:
     from marli.interact.scheduler import Clock
 
+_REFUSED = (Termination.BUDGET, Termination.CTX)
+
 
 class Recorder:
     """Collect one episode's records without deciding its outcome or grades."""
@@ -125,17 +137,23 @@ class Recorder:
         self._buffers[segment_id].extend(ids)
 
     def buffer(self, segment_id: str) -> list[int]:
+        """Return the live list; mutations extend or change the recorded buffer."""
         return self._buffers[segment_id]
 
     def add_call(self, call: Call) -> None:
         self._calls.append(call)
 
     def add_agent(self, info: AgentInfo) -> None:
+        """Record an agent whose seat key is a flat tuple of JSON scalars."""
+        if not isinstance(info.seat_key, tuple) or any(
+            type(value) not in (str, int, float, bool, type(None)) for value in info.seat_key
+        ):
+            raise ValueError(f"Agent {info.agent_id} seat_key must be a flat tuple of scalars")
         self._agents.append(info)
 
     def add_event(self, kind: EventKind, agent_id: str, tick: int | None, **data: Any) -> int:
         seq = len(self._events)
-        self._events.append(Event(seq, kind, agent_id, tick, data))
+        self._events.append(Event(seq, kind, agent_id, tick, json.loads(json.dumps(data))))
         return seq
 
     def add_write(self, w: Write) -> None:
@@ -152,6 +170,10 @@ class Recorder:
     def build(self, **episode_fields: Any) -> tuple[Episode, dict[str, list[int]]]:
         """Snapshot records and buffers; the caller supplies rollout decisions."""
         episode_fields.setdefault("episode_id", self.episode_id)
+        if episode_fields["episode_id"] != self.episode_id:
+            raise ValueError(
+                f"Episode {episode_fields['episode_id']} does not match recorder {self.episode_id}"
+            )
         buffers = {key: list(ids) for key, ids in self._buffers.items()}
         episode = Episode(
             **episode_fields,
@@ -168,7 +190,7 @@ class Recorder:
 
 
 def _gen_tokens(call: Call) -> int:
-    return len(call.completion_ids) if call.segment_id else call.usage.completion_tokens
+    return len(call.completion_ids) if call.segment_id and call.termination not in _REFUSED else 0
 
 
 def _critical_path(episode: Episode, calls: Sequence[Call]) -> tuple[int, int]:
@@ -198,9 +220,11 @@ def _critical_path(episode: Episode, calls: Sequence[Call]) -> tuple[int, int]:
                 predecessors[after[0]].add(chain[-1])
         if agent.role == "finalizer":
             predecessors[chain[0]].update(
-                by_agent[peer.agent_id][-1]
-                for peer in episode.agents
-                if peer.role == "peer" and by_agent[peer.agent_id]
+                by_agent[other.agent_id][-1]
+                for other in episode.agents
+                if other.role != "finalizer"
+                and by_agent[other.agent_id]
+                and by_agent[other.agent_id][-1] < chain[0]
             )
 
     ticks = sorted(by_tick)
@@ -212,39 +236,68 @@ def _critical_path(episode: Episode, calls: Sequence[Call]) -> tuple[int, int]:
     call_paths: list[int] = []
     for index, call in enumerate(calls):
         parents = predecessors[index]
+        for parent in parents:
+            if parent >= index:
+                raise MarliError(
+                    f"Backward dependency from call {calls[parent].call_id} to {call.call_id}"
+                )
         token_paths.append(_gen_tokens(call) + max((token_paths[p] for p in parents), default=0))
-        call_paths.append(1 + max((call_paths[p] for p in parents), default=0))
+        call_paths.append(
+            int(call.termination not in _REFUSED) + max((call_paths[p] for p in parents), default=0)
+        )
     return max(token_paths, default=0), max(call_paths, default=0)
 
 
 def _peak_active_ctx(calls: Sequence[Call], events: Sequence[Event]) -> int:
-    by_tick: dict[int, dict[str, int]] = defaultdict(dict)
-    by_id = {call.call_id: call for call in calls}
-    peak = 0
+    lockstep = any(call.tick is not None for call in calls)
+    starts = {e.data["call_id"]: e.seq for e in events if e.kind == EventKind.CALL_START}
+    ends = {e.data["call_id"]: e.seq for e in events if e.kind == EventKind.CALL_END}
+    done = {e.agent_id: e for e in events if e.kind == EventKind.DONE}
+    observations: dict[int, dict[str, int]] = defaultdict(dict)
+    last: dict[str, int] = {}
     for call in calls:
-        if not call.segment_id:
-            continue
-        length = call.prompt_len + len(call.completion_ids)
-        peak = max(peak, length)
+        length = call.prompt_len + _gen_tokens(call)
         if call.tick is not None:
-            tick = by_tick[call.tick]
+            time = call.tick
+            tick = observations[time]
             tick[call.agent_id] = max(tick.get(call.agent_id, 0), length)
-    peak = max(peak, max((sum(tick.values()) for tick in by_tick.values()), default=0))
+        else:
+            start = starts.get(call.call_id, call.seq)
+            time = ends.get(call.call_id, start)
+            observations[start][call.agent_id] = call.prompt_len
+            observations[time][call.agent_id] = length
+        last[call.agent_id] = max(last.get(call.agent_id, time), time)
 
+    releases: dict[int, set[str]] = defaultdict(set)
+    for agent, time in last.items():
+        if agent in done:
+            event = done[agent]
+            time = event.tick if lockstep and event.tick is not None else event.seq
+        releases[time].add(agent)
+
+    peak = 0
     active: dict[str, int] = {}
-    for event in sorted(events, key=lambda event: event.seq):
-        if event.tick is not None:
-            continue
-        if event.kind == EventKind.DONE:
-            active.pop(event.agent_id, None)
-        elif event.kind in (EventKind.CALL_START, EventKind.CALL_END):
-            call = by_id[event.data["call_id"]]
-            if call.segment_id:
-                active[call.agent_id] = call.prompt_len
-                if event.kind == EventKind.CALL_END:
-                    active[call.agent_id] += len(call.completion_ids)
+    for time in sorted(observations.keys() | releases.keys()):
+        active.update(observations.get(time, {}))
         peak = max(peak, sum(active.values()))
+        for agent in releases.get(time, ()):
+            active.pop(agent, None)
     return peak
+
+
+def _common_prefix(a: Sequence[int], b: Sequence[int], end: int) -> int:
+    if type(a) is not type(b):
+        a, b = tuple(a[:end]), tuple(b[:end])
+    if a[:end] == b[:end]:
+        return end
+    low, high = 0, end
+    while low < high:
+        middle = (low + high + 1) // 2
+        if a[:middle] == b[:middle]:
+            low = middle
+        else:
+            high = middle - 1
+    return low
 
 
 def compute_metrics(episode: Episode, buffers: Mapping[str, Sequence[int]]) -> dict[str, float]:
@@ -254,7 +307,11 @@ def compute_metrics(episode: Episode, buffers: Mapping[str, Sequence[int]]) -> d
         "total_gen": 0.0,
         "total_prompt": 0.0,
         "total_uncached": 0.0,
-        "calls": float(len(calls)),
+        "calls": 0.0,
+        "refused_calls": 0.0,
+        "api_calls": 0.0,
+        "api_gen_tokens": 0.0,
+        "api_prompt_tokens": 0.0,
         "peak_ctx": 0.0,
         "n_agents": float(len(episode.agents)),
         "n_workers": float(sum(agent.role == "worker" for agent in episode.agents)),
@@ -274,32 +331,39 @@ def compute_metrics(episode: Episode, buffers: Mapping[str, Sequence[int]]) -> d
         "push_reads": 0.0,
         "scratchpad_writes": float(sum(w.key == "scratchpad" for w in episode.workspace_log)),
     }
-    history: dict[tuple[str, int | None], list[Call]] = defaultdict(list)
+    history: dict[tuple[str, int | None], dict[str, Call]] = defaultdict(dict)
     for call in calls:
-        gen = _gen_tokens(call)
-        metrics["total_gen"] += gen
-        for key, value in (
-            (f"gen/{call.role}", gen),
-            (f"gen_purpose/{call.purpose.value}", gen),
-            (f"calls/{call.purpose.value}", 1),
-        ):
-            metrics[key] = metrics.get(key, 0.0) + value
-        prompt_len = call.prompt_len if call.segment_id else 0
-        metrics["total_prompt"] += prompt_len
-        metrics["peak_ctx"] = max(metrics["peak_ctx"], float(prompt_len + gen))
         if call.segment_id:
-            prompt = buffers[call.segment_id][:prompt_len]
-            earlier = history[call.policy_id, call.policy_version]
-            longest = 0
-            for previous in earlier:
-                previous_buffer = buffers[previous.segment_id]
-                end = min(prompt_len, previous.prompt_len + len(previous.completion_ids))
-                common = 0
-                while common < end and prompt[common] == previous_buffer[common]:
-                    common += 1
-                longest = max(longest, common)
-            metrics["total_uncached"] += prompt_len - longest
-            earlier.append(call)
+            metrics["peak_ctx"] = max(
+                metrics["peak_ctx"], float(call.prompt_len + _gen_tokens(call))
+            )
+        if call.termination in _REFUSED:
+            metrics["refused_calls"] += 1
+        else:
+            metrics["calls"] += 1
+            key = f"calls/{call.purpose.value}"
+            metrics[key] = metrics.get(key, 0.0) + 1
+            if not call.segment_id:
+                metrics["api_calls"] += 1
+                metrics["api_gen_tokens"] += call.usage.completion_tokens
+                metrics["api_prompt_tokens"] += call.usage.prompt_tokens
+            else:
+                gen = _gen_tokens(call)
+                metrics["total_gen"] += gen
+                for key in (f"gen/{call.role}", f"gen_purpose/{call.purpose.value}"):
+                    metrics[key] = metrics.get(key, 0.0) + gen
+                metrics["total_prompt"] += call.prompt_len
+                prompt = buffers[call.segment_id]
+                earlier = history[call.policy_id, call.policy_version]
+                longest = 0
+                for previous in earlier.values():
+                    end = min(call.prompt_len, previous.prompt_len + len(previous.completion_ids))
+                    if end > longest:
+                        longest = max(
+                            longest, _common_prefix(prompt, buffers[previous.segment_id], end)
+                        )
+                metrics["total_uncached"] += call.prompt_len - longest
+                earlier[call.segment_id] = call
         metrics["tool_calls"] += len(call.tool_calls)
         metrics["tool_errors"] += sum(tool.error is not None for tool in call.tool_calls)
         metrics["malformed_calls"] += call.termination == Termination.MALFORMED
@@ -315,7 +379,8 @@ def compute_metrics(episode: Episode, buffers: Mapping[str, Sequence[int]]) -> d
     cp_tokens, cp_calls = _critical_path(episode, calls)
     metrics["cp_tokens"] = float(cp_tokens)
     metrics["cp_calls"] = float(cp_calls)
-    metrics["peak_active_ctx"] = float(_peak_active_ctx(calls, episode.events))
+    token_calls = [c for c in calls if c.segment_id]
+    metrics["peak_active_ctx"] = float(_peak_active_ctx(token_calls, episode.events))
     return metrics
 
 
@@ -354,19 +419,37 @@ def read_episodes(
 ) -> Iterator[tuple[Episode, dict[str, list[int]]]]:
     """Stream episodes, joining the optional sidecar by episode identity."""
     dir = Path(dir)
-    tokens: dict[str, dict[str, str]] = {}
-    if with_tokens and (dir / "tokens.jsonl").exists():
-        tokens = {row["episode_id"]: row["segments"] for row in _read_rows(dir / "tokens.jsonl")}
+    token_rows = (
+        _read_rows(dir / "tokens.jsonl")
+        if with_tokens and (dir / "tokens.jsonl").exists()
+        else iter(())
+    )
+    pending: dict[str, dict[str, str]] = {}
     for row in _read_rows(dir / "episodes.jsonl"):
         episode = record_from_dict(Episode, row)
         buffers: dict[str, list[int]] = {}
         if with_tokens:
-            if episode.episode_id not in tokens:
-                raise MarliError(f"Missing tokens for episode {episode.episode_id}")
-            for segment_id, encoded in tokens[episode.episode_id].items():
+            while episode.episode_id not in pending:
+                token_row = next(token_rows, None)
+                if token_row is None:
+                    raise MarliError(f"Missing tokens for episode {episode.episode_id}")
+                pending[token_row["episode_id"]] = token_row["segments"]
+            for segment_id, encoded in pending.pop(episode.episode_id).items():
                 packed = array("i")
                 packed.frombytes(base64.b64decode(encoded, validate=True))
                 if sys.byteorder == "big":
                     packed.byteswap()
                 buffers[segment_id] = packed.tolist()
+            for segment in episode.segments:
+                if segment.segment_id not in buffers:
+                    raise MarliError(
+                        f"Missing tokens for episode {episode.episode_id}, "
+                        f"segment {segment.segment_id}"
+                    )
+                actual = len(buffers[segment.segment_id])
+                if actual != segment.n_tokens:
+                    raise MarliError(
+                        f"Token length mismatch for episode {episode.episode_id}, "
+                        f"segment {segment.segment_id}: expected {segment.n_tokens}, got {actual}"
+                    )
         yield episode, buffers
