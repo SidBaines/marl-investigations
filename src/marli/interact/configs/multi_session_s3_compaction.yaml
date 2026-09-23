@@ -1,0 +1,4 @@
+# Compose as MultiSessionConfig; pair with limits.session.max_sessions=3.
+sessions: 3
+carry: compaction
+compact_threshold: 0
