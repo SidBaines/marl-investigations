@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import importlib
 import logging
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import _marli_fake_verbs as fake
 import pytest
 
 from marli import config, verbs
-from marli.errors import ConfigError
-from marli.handles import sha256_file
-from marli.rundir import RunStatus
+from marli.errors import ConfigError, MarliError
+from marli.handles import Handle, sha256_file
+from marli.rundir import RunDir, RunStatus
 
 
 @pytest.fixture(autouse=True)
@@ -135,6 +137,8 @@ async def test_input_is_copied_resolved_and_content_hashed(tmp_path: Path, monke
 
 
 async def test_warnings_are_captured_and_logged(tmp_path: Path, monkeypatch, caplog) -> None:
+    # Pytest replaces showwarning for each test; restore the process-wide hook.
+    monkeypatch.setattr(warnings, "showwarning", verbs._showwarning)
     echo = fake.echo
 
     async def warn(cfg, run):
@@ -143,10 +147,165 @@ async def test_warnings_are_captured_and_logged(tmp_path: Path, monkeypatch, cap
 
     monkeypatch.setattr(fake, "echo", warn)
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+        warnings.simplefilter("always")
         with caplog.at_level(logging.WARNING, logger="marli"):
             result = await verbs.run_verb(fake.SPEC, fake.EchoConfig(), out=tmp_path)
     assert result.warnings == ["degraded execution"]
     assert [(r.name, r.levelname, r.message) for r in caplog.records] == [
         ("marli", "WARNING", "degraded execution")
     ]
+
+
+@pytest.mark.parametrize("returned", ["none", "lookalike", "base_handle", "wrong_manifest"])
+async def test_wrong_handles_are_rejected_before_finalizing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returned: str
+) -> None:
+    spec = fake.SPEC
+    if returned == "wrong_manifest":
+        spec = dataclasses.replace(spec, manifest="expected.json")
+        value = fake.DummyHandle(root=tmp_path)
+    elif returned == "lookalike":
+        value = SimpleNamespace(MANIFEST=spec.manifest)
+    elif returned == "base_handle":
+        value = Handle(root=tmp_path)
+    else:
+        value = None
+
+    async def wrong(cfg: fake.EchoConfig, run: RunDir) -> object:
+        return value
+
+    monkeypatch.setattr(fake, "echo", wrong)
+    with pytest.raises(MarliError) as caught:
+        await verbs.run_verb(spec, fake.EchoConfig(), out=tmp_path)
+    message = str(caught.value)
+    assert spec.name in message
+    assert spec.manifest in message
+    assert type(value).__name__ in message
+    assert repr(getattr(value, "MANIFEST", None)) in message
+    assert not list(tmp_path.glob("*.json"))
+
+
+async def test_concurrent_warning_collectors_preserve_filters_and_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(warnings, "showwarning", verbs._showwarning)
+    echo = fake.echo
+    first_ready, second_ready = asyncio.Event(), asyncio.Event()
+
+    async def warn(cfg: fake.EchoConfig, run: RunDir) -> Handle:
+        if cfg.message == "second":
+            await first_ready.wait()
+        warnings.warn(f"{cfg.message} one", stacklevel=1)
+        if cfg.message == "first":
+            first_ready.set()
+            await second_ready.wait()
+        else:
+            second_ready.set()
+            await asyncio.sleep(0)
+        warnings.warn(f"{cfg.message} two", stacklevel=1)
+        warnings.warn(f"{cfg.message} one", stacklevel=1)
+        return await echo(cfg, run)
+
+    monkeypatch.setattr(fake, "echo", warn)
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        filters = warnings.filters
+        before = filters[:]
+        first, second = await asyncio.gather(
+            verbs.run_verb(fake.SPEC, fake.EchoConfig(message="first"), out=tmp_path / "first"),
+            verbs.run_verb(fake.SPEC, fake.EchoConfig(message="second"), out=tmp_path / "second"),
+        )
+        assert warnings.filters is filters
+        assert warnings.filters == before
+    assert first.warnings == ["first one", "first two"]
+    assert second.warnings == ["second one", "second two"]
+
+
+@pytest.mark.parametrize("fail", [False, True])
+async def test_warning_hook_delegates_after_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail: bool
+) -> None:
+    monkeypatch.setattr(warnings, "showwarning", verbs._showwarning)
+    delegated: list[str] = []
+
+    def original(message: Warning | str, *args: object) -> None:
+        delegated.append(str(message))
+
+    echo = fake.echo
+
+    async def warn(cfg: fake.EchoConfig, run: RunDir) -> Handle:
+        warnings.warn("inside", stacklevel=1)
+        if fail:
+            raise RuntimeError("failure")
+        return await echo(cfg, run)
+
+    monkeypatch.setattr(verbs, "_original_showwarning", original)
+    monkeypatch.setattr(fake, "echo", warn)
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.warn("before", stacklevel=1)
+        if fail:
+            with pytest.raises(RuntimeError, match="failure"):
+                await verbs.run_verb(fake.SPEC, fake.EchoConfig(), out=tmp_path)
+        else:
+            result = await verbs.run_verb(fake.SPEC, fake.EchoConfig(), out=tmp_path)
+            assert result.warnings == ["inside"]
+        warnings.warn("after", stacklevel=1)
+    assert delegated == ["before", "after"]
+
+
+async def test_warning_capture_respects_filters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(warnings, "showwarning", verbs._showwarning)
+    echo = fake.echo
+
+    async def warn(cfg: fake.EchoConfig, run: RunDir) -> Handle:
+        warnings.warn("ignored", stacklevel=1)
+        return await echo(cfg, run)
+
+    monkeypatch.setattr(fake, "echo", warn)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        before = warnings.filters[:]
+        result = await verbs.run_verb(fake.SPEC, fake.EchoConfig(), out=tmp_path)
+        assert warnings.filters == before
+    assert result.warnings == []
+
+
+async def test_path_input_preserves_type(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = fake.DummyHandle(root=tmp_path / "source")
+    source.save()
+    monkeypatch.chdir(tmp_path)
+    cfg = fake.PathConfig(source=Path("source"))
+    spec = dataclasses.replace(fake.SPEC, config="_marli_fake_verbs:PathConfig")
+
+    async def check_path(cfg: fake.PathConfig, run: RunDir) -> Handle:
+        assert isinstance(cfg.source, Path)
+        assert cfg.source == source.manifest_path
+        return fake.DummyHandle(root=run.out)
+
+    monkeypatch.setattr(fake, "echo", check_path)
+    await verbs.run_verb(spec, cfg, out=tmp_path / "out")
+    assert cfg.source == Path("source")
+
+
+@pytest.mark.parametrize("operation", ["stat", "read_text"])
+def test_manifest_search_skips_large_and_unreadable_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    source = fake.DummyHandle(root=tmp_path)
+    source.save()
+    large = tmp_path / "large.json"
+    large.write_text('{"kind":"dummy","manifest_version":1,"data":"' + "x" * 1_000_000 + '"}')
+    unreadable = tmp_path / "unreadable.json"
+    unreadable.write_text('{"kind":"dummy","manifest_version":1}')
+    original = getattr(Path, operation)
+
+    def fail(path: Path, *args: object, **kwargs: object) -> object:
+        if path == unreadable:
+            raise OSError("unreadable")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, operation, fail)
+    assert verbs.input_manifest(tmp_path, "source") == source.manifest_path
