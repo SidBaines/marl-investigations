@@ -1,0 +1,9 @@
+name: math500
+hf_id: HuggingFaceH4/MATH-500
+split: test
+kind: math
+fields: {id: unique_id, prompt: problem, answer: answer, difficulty: level, topic: subject}
+answer_format: latex
+license: mit
+commit_text: false
+notes: 500 rows. MIT per the HF H4 card, unverified. Contamination-sensitive. Schema verified 2026-09-23.

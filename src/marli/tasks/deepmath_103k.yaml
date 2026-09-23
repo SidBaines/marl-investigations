@@ -1,0 +1,9 @@
+name: deepmath_103k
+hf_id: zwhe99/DeepMath-103K
+split: train
+kind: math
+fields: {prompt: question, answer: final_answer, difficulty: difficulty, topic: topic}
+answer_format: latex
+license: mit
+commit_text: false
+notes: Ignore r1_solution_* columns. Schema verified on the HF Hub 2026-09-23.
