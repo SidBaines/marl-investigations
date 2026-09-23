@@ -1,0 +1,11 @@
+name: qwen3_4b_instruct_2507
+hf_id: Qwen/Qwen3-4B-Instruct-2507
+family: qwen3
+renderer: qwen3
+architecture: Qwen3ForCausalLM
+max_ctx: 32768
+default_max_tokens: 2048
+thinking: false
+tool_format: qwen3_json
+local: unverified
+notes: "Retired on Tinker 2026-06-12."
