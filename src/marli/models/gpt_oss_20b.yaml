@@ -1,0 +1,17 @@
+name: gpt_oss_20b
+hf_id: openai/gpt-oss-20b
+family: gpt_oss
+renderer: gpt_oss
+architecture: GptOssForCausalLM
+max_ctx: 32768
+default_max_tokens: 8192
+thinking: true
+tool_format: harmony
+tinker_id: openai/gpt-oss-20b
+tinker_max_ctx: 32768
+tinker_prices:
+  prefill: 0.18
+  sample: 0.45
+  train: 0.40
+  as_of: "2026-09-23"
+local: unverified
