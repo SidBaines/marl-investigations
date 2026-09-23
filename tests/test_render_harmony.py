@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
+from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -185,6 +187,8 @@ def test_length_truncation(
     assert turn.termination == "length"
     assert turn.thinking == "Still thinking"
     assert turn.content == ""
+    delta = renderer.continuation(turn.termination, [Msg("user", "Continue.")])
+    assert renderer.decode(delta).startswith("<|start|>user" if ending else "<|end|><|start|>user")
 
 
 def test_length_truncated_tool(renderer: HarmonyRenderer, encoding: HarmonyEncoding) -> None:
@@ -261,6 +265,7 @@ def test_forced_prefix_uses_first_required_parameter(renderer: HarmonyRenderer) 
 
 
 def test_length_continuation_closes_open_message(renderer: HarmonyRenderer) -> None:
+    renderer.initial(None, [], [])
     assert renderer.decode(renderer.continuation("length", [])).startswith(
         "<|end|><|start|>assistant"
     )
@@ -279,7 +284,9 @@ def test_plain_text_encoding_and_special_decoding(
 
 def test_profiles_and_fingerprint(encoding: HarmonyEncoding) -> None:
     assert set(HARMONY_RENDERERS) == {"gpt_oss_low", "gpt_oss_medium", "gpt_oss_high"}
-    expected_sha = hashlib.sha256(f"{encoding.name}:201089".encode()).hexdigest()
+    expected_sha = hashlib.sha256(
+        f"{encoding.name}:201089:{version('openai_harmony')}".encode()
+    ).hexdigest()[:16]
     for effort in ("low", "medium", "high"):
         renderer = HARMONY_RENDERERS[f"gpt_oss_{effort}"]()
         assert isinstance(renderer, DeltaRenderer)
@@ -317,6 +324,7 @@ def test_import_is_light() -> None:
     )
 
 
+@pytest.mark.hf
 def test_initial_matches_cached_hf_template(renderer: HarmonyRenderer) -> None:
     hub = pytest.importorskip("huggingface_hub")
     cached = hub.try_to_load_from_cache("openai/gpt-oss-20b", "tokenizer_config.json")
@@ -343,15 +351,12 @@ def test_initial_matches_cached_hf_template(renderer: HarmonyRenderer) -> None:
             for t in TOOLS
         ],
         reasoning_effort="medium",
-        tokenize=True,
-        return_dict=False,
+        tokenize=False,
         add_generation_prompt=True,
     )
+    expected = re.sub(r"Current date: \d{4}-\d{2}-\d{2}", "Current date: 2026-09-23", expected)
+    expected = tokenizer.encode(expected, add_special_tokens=False)
     actual = renderer.initial(SYSTEM, TOOLS, [Msg("user", QUESTION)])
-    if actual != expected:
-        end = tokenizer.convert_tokens_to_ids("<|end|>")
-        assert actual[actual.index(end) + 1 :] == expected[expected.index(end) + 1 :]
-        pytest.skip("Only system header differs: Harmony pins the conversation date")
     assert actual == expected
 
 
@@ -362,3 +367,101 @@ def test_suppress_thinking_prefix_opens_final_channel(
     completion = encoding.encode("Summary text.<|return|>", allowed_special="all")
     turn = renderer.parse(prefix + completion)
     assert turn.content == "Summary text." and turn.thinking is None
+
+
+def test_final_then_user_preserves_return_and_analysis(
+    renderer: HarmonyRenderer, encoding: HarmonyEncoding
+) -> None:
+    user = h.Message.from_role_and_content(h.Role.USER, QUESTION)
+    thinking = h.Message.from_role_and_content(h.Role.ASSISTANT, "Keep reasoning.").with_channel(
+        "analysis"
+    )
+    final = h.Message.from_role_and_content(h.Role.ASSISTANT, "4").with_channel("final")
+    followup = h.Message.from_role_and_content(h.Role.USER, "[notify] peer1 disagrees.")
+    buffer = renderer.initial(SYSTEM, TOOLS, [Msg("user", QUESTION)])
+    completion = encoding.encode(
+        "<|channel|>analysis<|message|>Keep reasoning.<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>4<|return|>",
+        allowed_special="all",
+    )
+    turn = renderer.parse(completion)
+    buffer += completion + renderer.continuation(
+        turn.termination, [Msg("user", "[notify] peer1 disagrees.")]
+    )
+    reference = _reference_prompt(encoding, [user, thinking, final, followup])
+    differences = [i for i, (a, b) in enumerate(zip(buffer, reference, strict=True)) if a != b]
+    assert len(differences) == 1
+    index = differences[0]
+    assert renderer.decode([reference[index]]) == "<|end|>"
+    assert renderer.decode([buffer[index]]) == "<|return|>"
+    reference[index] = buffer[index]
+    assert buffer == reference
+    assert "Keep reasoning." in renderer.decode(buffer)
+
+
+@pytest.mark.parametrize("channel", ["analysis", "commentary", "final", None])
+def test_function_recipient_takes_precedence_over_channel(
+    renderer: HarmonyRenderer, encoding: HarmonyEncoding, channel: str | None
+) -> None:
+    renderer.initial(SYSTEM, TOOLS, [])
+    header = f"<|channel|>{channel} " if channel else " "
+    ids = encoding.encode(
+        header + 'to=functions.submit <|constrain|>json<|message|>{"answer":"4"}<|call|>',
+        allowed_special="all",
+    )
+    turn = renderer.parse(ids)
+    assert turn.content == "" and turn.thinking is None
+    assert len(turn.tool_calls) == 1
+    call = turn.tool_calls[0]
+    assert call.ok and call.name == "submit" and call.arguments == {"answer": "4"}
+    assert turn == renderer.parse(ids, TOOLS)
+    override = renderer.parse(ids, [ToolSpec("different", "Different tool.", {})])
+    assert not override.tool_calls[0].ok and override.tool_calls[0].name == "submit"
+
+
+@pytest.mark.parametrize("recipient", ["functions.unknown", "python", "browser"])
+@pytest.mark.parametrize("channel", ["analysis", "commentary", "final"])
+def test_unknown_recipients_are_retained(
+    renderer: HarmonyRenderer, encoding: HarmonyEncoding, recipient: str, channel: str
+) -> None:
+    ids = encoding.encode(
+        f"<|channel|>{channel} to={recipient}<|message|>{{}}<|call|>", allowed_special="all"
+    )
+    turn = renderer.parse(ids, TOOLS)
+    assert turn.content == "" and turn.thinking is None
+    assert len(turn.tool_calls) == 1
+    call = turn.tool_calls[0]
+    assert not call.ok and call.name == recipient.removeprefix("functions.") and call.raw == "{}"
+
+
+@pytest.mark.parametrize("system", [None, "", "Instructions."])
+@pytest.mark.parametrize("tools", [[], TOOLS])
+def test_developer_only_when_instructions_or_tools(
+    renderer: HarmonyRenderer, system: str | None, tools: list[ToolSpec]
+) -> None:
+    prompt = renderer.decode(renderer.initial(system, tools, [Msg("user", QUESTION)]))
+    assert ("<|start|>developer" in prompt) == bool(system or tools)
+    assert f"<|start|>user<|message|>{QUESTION}<|end|>" in prompt
+
+
+def test_history_arguments_preserve_unicode(renderer: HarmonyRenderer) -> None:
+    prompt = renderer.initial(
+        SYSTEM,
+        TOOLS,
+        [
+            Msg("user", QUESTION),
+            Msg("assistant", "", tool_calls=(ToolCall("submit", {"answer": "λ 世界"}),)),
+            Msg("tool", "accepted", name="submit"),
+        ],
+    )
+    assert '{"answer": "λ 世界"}' in renderer.decode(prompt)
+
+
+def test_fingerprint_includes_harmony_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    from marli.render import harmony
+
+    original = HarmonyRenderer().tokenizer_sha
+    monkeypatch.setattr(harmony, "version", lambda _: "test-other-version")
+    changed = HarmonyRenderer().tokenizer_sha
+    assert original != changed and len(original) == len(changed) == 16
+    int(changed, 16)

@@ -8,7 +8,16 @@ stops end a completion; ``<|end|>`` can separate messages within one completion.
 The conversation date defaults to 2026-09-23 for reproducible prompts. The
 cached gpt-oss HF template instead reads the current date when rendering its
 system header. Harmony, rather than that template's history rewriting, is the
-reference for delta parity.
+reference for delta parity. After a sampled final followed by a user message,
+the append-only buffer keeps ``<|return|>`` and all earlier analysis. Canonical
+history instead ends that final with ``<|end|>`` and, by default, drops analysis
+before a later final. With ``auto_drop_analysis=False``, the reference differs
+only at that final's closing token.
+
+Other HF-template differences: tool results are JSON-quoted via ``tojson`` in
+HF but plain text here; history tool calls use ``json`` in HF versus
+``<|constrain|>json`` here. HF also uses ``<|end|>`` for history finals and drops
+analysis before a later final. These rewrites cannot replace sampled ids.
 """
 
 from __future__ import annotations
@@ -17,6 +26,7 @@ import hashlib
 import json
 from collections.abc import Callable, Sequence
 from functools import partial
+from importlib.metadata import version
 from typing import TYPE_CHECKING
 
 from marli.render.base import DeltaRenderer, Msg, ParsedToolCall, ParsedTurn, ToolSpec
@@ -56,40 +66,40 @@ class HarmonyRenderer:
             for token in self._encoding.special_tokens_set
         )
         self.tokenizer_sha = hashlib.sha256(
-            f"{self._encoding.name}:{vocab_size}".encode()
-        ).hexdigest()
+            f"{self._encoding.name}:{vocab_size}:{version('openai_harmony')}".encode()
+        ).hexdigest()[:16]
         self._tools: dict[str, ToolSpec] = {}
         # A malformed frame can still end on an action stop. Continuation must
         # not insert an extra close in that case.
-        self._last_completion_stopped = False
+        self._last_sampled_id: int | None = None
 
     def initial(
         self, system: str | None, tools: Sequence[ToolSpec], msgs: Sequence[Msg]
     ) -> list[int]:
         h = self._harmony
         self._tools = {tool.name: tool for tool in tools}
-        self._last_completion_stopped = False
-        developer = h.DeveloperContent(instructions=system)
-        if tools:
-            developer.with_function_tools(
-                [
-                    h.ToolDescription.new(t.name, t.description, parameters=t.parameters)
-                    for t in tools
-                ]
-            )
-        messages = [
-            h.Message.from_role_and_content(h.Role.SYSTEM, self._system),
-            h.Message.from_role_and_content(h.Role.DEVELOPER, developer),
-            *self._messages(msgs),
-        ]
+        self._last_sampled_id = None
+        messages = [h.Message.from_role_and_content(h.Role.SYSTEM, self._system)]
+        if system or tools:
+            developer = h.DeveloperContent(instructions=system)
+            if tools:
+                developer.with_function_tools(
+                    [
+                        h.ToolDescription.new(t.name, t.description, parameters=t.parameters)
+                        for t in tools
+                    ]
+                )
+            messages.append(h.Message.from_role_and_content(h.Role.DEVELOPER, developer))
+        messages.extend(self._messages(msgs))
         return self._encoding.render_conversation_for_completion(
             h.Conversation.from_messages(messages), h.Role.ASSISTANT, self._render_config
         )
 
     def continuation(self, last_termination: str, new_msgs: Sequence[Msg]) -> list[int]:
         h = self._harmony
-        needs_close = last_termination == "length" or (
-            last_termination == "malformed" and not self._last_completion_stopped
+        needs_close = last_termination != "stop" and self._last_sampled_id not in (
+            *self.stop_token_ids,
+            *self._end_ids,
         )
         return (self._end_ids if needs_close else []) + (
             self._encoding.render_conversation_for_completion(
@@ -129,7 +139,7 @@ class HarmonyRenderer:
                 for call in msg.tool_calls:
                     messages.append(
                         h.Message.from_role_and_content(
-                            h.Role.ASSISTANT, json.dumps(call.arguments)
+                            h.Role.ASSISTANT, json.dumps(call.arguments, ensure_ascii=False)
                         )
                         .with_channel("commentary")
                         .with_recipient(f"functions.{call.name}")
@@ -161,8 +171,9 @@ class HarmonyRenderer:
 
     def parse(self, completion_ids: Sequence[int], tools: Sequence[ToolSpec] = ()) -> ParsedTurn:
         ids = list(completion_ids)
-        self._last_completion_stopped = bool(ids and ids[-1] in self.stop_token_ids)
-        termination = "stop" if self._last_completion_stopped else "length"
+        self._last_sampled_id = ids[-1] if ids else None
+        termination = "stop" if self._last_sampled_id in self.stop_token_ids else "length"
+        specs = {tool.name: tool for tool in tools} if tools else self._tools
         try:
             messages = self._encoding.parse_messages_from_completion_tokens(
                 ids, self._harmony.Role.ASSISTANT
@@ -178,18 +189,14 @@ class HarmonyRenderer:
             if message.author.role != self._harmony.Role.ASSISTANT:
                 continue
             raw = "".join(part.text for part in message.content)
-            if message.channel == "analysis":
-                thinking.append(raw)
-            elif message.channel == "final":
-                content.append(raw)
-            elif message.channel == "commentary":
-                if message.recipient and message.recipient.startswith("functions."):
+            if message.recipient is not None:
+                if message.recipient.startswith("functions."):
                     name = message.recipient.removeprefix("functions.")
                     try:
                         arguments = json.loads(raw)
                     except (ValueError, RecursionError):
                         arguments = None
-                    ok = bool(name) and isinstance(arguments, dict)
+                    ok = name in specs and isinstance(arguments, dict)
                     calls.append(
                         ParsedToolCall(
                             name=name or None,
@@ -198,8 +205,14 @@ class HarmonyRenderer:
                             ok=ok,
                         )
                     )
-                elif message.recipient is None:
-                    content.append(raw)
+                else:
+                    calls.append(
+                        ParsedToolCall(name=message.recipient, arguments=None, raw=raw, ok=False)
+                    )
+            elif message.channel == "analysis":
+                thinking.append(raw)
+            elif message.channel in ("final", "commentary"):
+                content.append(raw)
         return ParsedTurn(
             content="".join(content),
             thinking="".join(thinking) if thinking else None,
