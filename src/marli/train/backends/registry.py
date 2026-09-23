@@ -21,5 +21,9 @@ def make_backend(
 
         return TinkerBackend(spend, base_url=base_url, **kw)
     if name == "local":
-        raise ConfigError("local training backend not implemented until M4")
+        from marli.train.backends.local.backend import LocalBackend
+
+        if {"server_json", "adapters_dir"} - kw.keys():
+            raise ConfigError("local training requires server_json and adapters_dir")
+        return LocalBackend(spend=spend, **kw)
     raise ConfigError(f"unknown training backend {name!r}; expected tinker, fake or local")

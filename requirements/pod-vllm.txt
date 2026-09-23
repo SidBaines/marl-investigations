@@ -1,0 +1,3 @@
+# Separate /opt/vllm venv; vLLM owns its compatible torch/CUDA dependencies.
+# 0.30.x token-id completions + runtime LoRA API; argv is pinned by CPU tests.
+vllm==0.30.0
