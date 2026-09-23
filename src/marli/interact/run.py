@@ -29,9 +29,15 @@ eval rollouts, RL rollouts and tests.
         # 2. outcome = await protocol.run(io)   (bounded by limits.episode.max_wall_s)
         # 3. grades: per-agent (grade_individual) + "_system" for outcome.final_answer
         # 4. metrics = compute_metrics(...); assemble Episode; env.teardown() in finally
-        # Never raises for agent/backend failures: returns ok=False with errors.
+        # BackendError ends only the failing agent; spend/config/programming errors propagate.
         # Raises ConfigError for invalid specs (unseated role, renderer/policy mismatch,
         # trainable seat with non-raw sampling, ctx > backend max_seq_len).
+
+Lockstep records use logical (tick, seat_key, in-agent) order, independently
+of generation latency. Sequence references are normalized together before
+metrics are computed; async records retain their observed order. Replayability
+requires seated policies to declare deterministic=True (absent means False).
+System prompt templates use the role's count for n_agents, or 0 for dynamic roles.
 """
 
 from __future__ import annotations
@@ -49,10 +55,9 @@ from marli.interact.records import Recorder, compute_metrics
 from marli.interact.scheduler import AsyncScheduler, Clock, LockstepScheduler, SystemClock
 from marli.interact.system import EpisodeSystem, Protocol
 from marli.interact.tools import TOOLS
-from marli.interact.types import Episode, Outcome
+from marli.interact.types import Episode, EventKind, Outcome
 from marli.interact.workspace import DeliverySpec, Permissions, Workspace
 from marli.policy.base import Policy, SamplingSpec, TokenPolicy, check_trainable_sampling
-from marli.policy.scripted import ScriptedChatPolicy, ScriptedPolicy
 from marli.render.base import DeltaRenderer
 
 
@@ -93,6 +98,12 @@ def _validate(spec: EpisodeSpec) -> None:
     if len({role.role for role in roles}) != len(roles):
         raise ConfigError("protocol.roles must have unique role names")
     for role in roles:
+        try:
+            role.system_prompt.format(
+                agent_id=f"{role.role}0", role=role.role, n_agents=role.count or 0
+            )
+        except (KeyError, ValueError, IndexError, AttributeError) as exc:
+            raise ConfigError(f"role {role.role!r}: invalid system_prompt template: {exc}") from exc
         if role.role not in spec.seating:
             raise ConfigError(f"unseated role {role.role!r}")
         policy_id = spec.seating[role.role]
@@ -146,7 +157,8 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
             )
             for role in roles
         },
-        delivery=spec.delivery,
+        # A protocol preset owns delivery when it declares one.
+        delivery=getattr(spec.protocol, "delivery", None) or spec.delivery,
         staged=spec.schedule == "lockstep",
         notes_cap_chars=max((role.context.notes_cap_chars for role in roles), default=4000),
     )
@@ -198,10 +210,12 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
         errors.extend(
             runtime.error for runtime in io.runtimes.values() if runtime.error is not None
         )
+        submissions = {agent_id: runtime.submission for agent_id, runtime in io.runtimes.items()}
+        submissions.update(outcome.submissions)
         grades = {
-            agent_id: await spec.env.grade(runtime.submission)
-            for agent_id, runtime in io.runtimes.items()
-            if runtime.submission is not None
+            agent_id: await spec.env.grade(answer)
+            for agent_id, answer in submissions.items()
+            if answer is not None or agent_id in outcome.submissions
         }
         grades["_system"] = await spec.env.grade(outcome.final_answer)
         for key, hits in ledger.limits_hit().items():
@@ -220,15 +234,17 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
             replayable=spec.schedule == "lockstep"
             and all(
                 getattr(
-                    policy,
+                    spec.policies[spec.seating[role.role]],
                     "deterministic",
-                    isinstance(policy, (ScriptedPolicy, ScriptedChatPolicy)),
+                    False,
                 )
-                for policy in spec.policies.values()
+                for role in roles
             ),
             ok=not errors,
             errors=tuple(errors),
         )
+        if spec.schedule == "lockstep":
+            episode = _lockstep_order(episode)
         return replace(episode, metrics=compute_metrics(episode, buffers)), buffers
     finally:
         tasks = [handle.task for handle in io.handles]
@@ -240,3 +256,32 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             await spec.env.teardown()
+
+
+def _lockstep_order(episode: Episode) -> Episode:
+    """Assign logical sequence numbers without serializing concurrent sampling."""
+    seats = {agent.agent_id: agent.seat_key for agent in episode.agents}
+    ordered = sorted(
+        episode.events,
+        key=lambda event: (
+            event.tick if event.tick is not None else -1,
+            event.kind == EventKind.COMMIT,  # staged writes commit at tick close
+            seats[event.agent_id],
+            event.seq,
+        ),
+    )
+    seqs = {event.seq: seq for seq, event in enumerate(ordered)}
+    calls = tuple(
+        sorted(
+            (replace(call, seq=seqs[call.seq]) for call in episode.calls),
+            key=lambda call: call.seq,
+        )
+    )
+    segment_order = {call.segment_id: call.seq for call in reversed(calls)}
+    return replace(
+        episode,
+        calls=calls,
+        events=tuple(replace(event, seq=seqs[event.seq]) for event in ordered),
+        segments=tuple(sorted(episode.segments, key=lambda seg: segment_order[seg.segment_id])),
+        workspace_log=tuple(replace(write, seq=seqs[write.seq]) for write in episode.workspace_log),
+    )

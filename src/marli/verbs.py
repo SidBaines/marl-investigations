@@ -104,6 +104,13 @@ VERBS: dict[str, VerbSpec] = {
         "report.json",
         "Run labelled rollout/score cells and combine their compute-aware report.",
     ),
+    "view": VerbSpec(
+        "view",
+        "marli.viewer.verb:view",
+        "marli.viewer.verb:ViewConfig",
+        "view.json",
+        "Render saved multi-agent episodes as one self-contained HTML page.",
+    ),
 }
 BUILTINS: tuple[str, ...] = ("list", "describe", "inspect", "status")
 

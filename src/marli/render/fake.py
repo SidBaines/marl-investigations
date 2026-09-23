@@ -227,6 +227,13 @@ def _find(ids: list[int], target: int, start: int) -> int:
 
 
 def _text(ids: Sequence[int]) -> str:
+    # Specials nested where only bytes are expected (e.g. inside a call body)
+    # render as their marker instead of raising: parsing never fails on garbage.
+    if any(t >= 256 for t in ids):
+        return "".join(
+            f"⟨{ID_TO_SPECIAL.get(t, '?')}⟩" if t >= 256 else bytes([t]).decode("latin-1")
+            for t in ids
+        )
     return bytes(ids).decode("utf-8", errors="replace")
 
 

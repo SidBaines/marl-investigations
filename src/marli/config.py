@@ -100,14 +100,31 @@ def from_mappings[T](cls: type[T], *layers: Any) -> T:
         raise TypeError(f"from_mappings() takes a dataclass type, got {cls!r}")
     _validate_enums(cls)
     try:
-        merged = OmegaConf.merge(
-            OmegaConf.structured(cls), *(OmegaConf.create(dict(layer or {})) for layer in layers)
-        )
+        base = OmegaConf.structured(cls)
+        # frozen dataclasses (and frozen nested defaults) make nodes read-only; layers
+        # must still merge over them — the result is re-validated by the dataclass.
+        _writable(base)
+        merged = OmegaConf.merge(base, *(OmegaConf.create(dict(layer or {})) for layer in layers))
         obj = OmegaConf.to_object(merged)
     except (OmegaConfBaseException, ValueError) as exc:
         raise _config_error(exc) from exc
     assert isinstance(obj, cls)
     return _retuple(obj)
+
+
+def _writable(node: Any) -> None:
+    """Clear read-only flags set by frozen dataclasses, recursively."""
+    OmegaConf.set_readonly(node, False)
+    if OmegaConf.is_dict(node):
+        for key in node:
+            child = node._get_node(key)
+            if OmegaConf.is_config(child):
+                _writable(child)
+    elif OmegaConf.is_list(node):
+        for index in range(len(node)):
+            child = node._get_node(index)
+            if OmegaConf.is_config(child):
+                _writable(child)
 
 
 def _retuple(obj: Any) -> Any:

@@ -1,0 +1,6 @@
+protocol: swarm
+config:
+  n_agents: 4
+  delivery:
+    mode: notify
+notes: Four peers share scratchpad notifications and aggregate by verifier-equivalent vote.

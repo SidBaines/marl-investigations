@@ -90,3 +90,13 @@ def test_forced_tool_prefix_completes_to_valid_call():
     completion = [*R.encode_text('{"answer": "7"}}'), S["/call"], S["eot"]]
     turn = R.parse(prefix + completion)
     assert turn.tool_calls[0].ok and turn.tool_calls[0].arguments == {"answer": "7"}
+
+
+def test_parse_never_raises_on_specials_nested_in_a_call_body() -> None:
+    from marli.render.fake import SPECIAL_IDS as S
+    from marli.render.fake import FakeRenderer
+
+    r = FakeRenderer()
+    ids = [S["call"], *r.encode_text('{"name": "submit"'), S["call"], S["/call"]]
+    parsed = r.parse(ids)
+    assert parsed.tool_calls and parsed.tool_calls[0].ok is False

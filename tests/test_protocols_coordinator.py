@@ -131,7 +131,14 @@ async def test_parallel_workers_join_before_next_tick_with_exact_prompts_and_met
     assert "Context: Check each addend." in worker_prompts["coord0/w0"]
     assert "Check the result independently." in worker_prompts["coord0/w1"]
     assert "Check each addend." not in worker_prompts["coord0/w1"]
-    for call, prompt in zip(calls, prompts, strict=True):
+    # lockstep records calls in (tick, seat) order; policies see them in arrival order
+    by_agent: dict[str, list] = {}
+    for prompt in prompts:
+        by_agent.setdefault(prompt.meta.agent_id, []).append(prompt)
+    paired = []
+    for call in calls:
+        paired.append((call, by_agent[call.agent_id].pop(0)))
+    for call, prompt in paired:
         assert buffers[call.segment_id][: call.prompt_len] == list(prompt.prompt_ids)
         assert buffers[call.segment_id][
             call.prompt_len : call.prompt_len + len(call.completion_ids)
@@ -176,7 +183,10 @@ async def test_spawn_limits_reject_entire_batch(
 
 @pytest.mark.parametrize("episode_tokens,affordable", [(512, 0), (2048, 1)])
 async def test_unaffordable_batch_starts_no_workers(episode_tokens: int, affordable: int) -> None:
-    limits = Limits(worker=AgentLimits(max_gen_tokens=1024, final_reserve=128))
+    limits = Limits(
+        agent=AgentLimits(final_reserve=64),
+        worker=AgentLimits(max_gen_tokens=1024, final_reserve=128),
+    )
     limits.episode.max_gen_tokens = episode_tokens
     spec = coordinator_spec(
         {

@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import json
-import re
-import sys
-import types
 from typing import Any
 
 import pytest
-from test_envs_sandbox import sandbox_host, sandbox_python  # noqa: F401
+from test_envs_sandbox import sandbox_host  # noqa: F401
 
 from marli.envs import math as math_env
 from marli.envs.base import ENVS, Task
@@ -17,6 +14,9 @@ from marli.envs.math import MathEnv, MathEnvConfig, shared_verifier
 from marli.envs.registry import make_env
 from marli.envs.sandbox.base import ExecResult
 from marli.interact.tools import ToolCtx, run_tool
+from marli.tasks import verifiers
+
+_REAL_VERIFIER = verifiers.MathVerifier
 
 
 class FakeVerifier:
@@ -28,22 +28,9 @@ class FakeVerifier:
         return pred is not None and pred.strip() == gold.strip()
 
 
-def fake_boxed(text: str) -> str | None:
-    matches = re.findall(r"\\boxed\{([^{}]*)\}", text)
-    return matches[-1] if matches else None
-
-
-def fake_normalize(text: str) -> str:
-    return "".join(text.split()).lower()
-
-
 @pytest.fixture(autouse=True)
 def fake_verifiers(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = types.ModuleType("marli.tasks.verifiers")
-    module.MathVerifier = FakeVerifier
-    module.extract_boxed = fake_boxed
-    module.normalize_answer = fake_normalize
-    monkeypatch.setitem(sys.modules, "marli.tasks.verifiers", module)
+    monkeypatch.setattr(verifiers, "MathVerifier", FakeVerifier)
     monkeypatch.setattr(math_env, "_VERIFIER", None)
 
 
@@ -120,7 +107,7 @@ async def test_shared_verifier_and_format_override(task: Task) -> None:
         (" +0042 ", "42"),
         ("-0", "0"),
         (r"\boxed{0042}", "42"),
-        (" X + Y ", "x+y"),
+        (" X + Y ", "X+Y"),
     ],
 )
 def test_canonical(task: Task, submission: str | None, canonical: str | None) -> None:
@@ -152,8 +139,9 @@ async def test_disabled_setup_never_creates_sandbox(
 
 async def test_python_arguments_timeout_and_output(task: Task) -> None:
     class RecordingSandbox:
-        async def exec(self, cmd: list[str], *, timeout_s: float) -> ExecResult:
-            assert cmd == ["python3", "-c", "pass"]
+        async def exec(self, cmd: list[str], *, timeout_s: float, stdin: str) -> ExecResult:
+            assert cmd == ["python3", "-"]
+            assert stdin == "pass"
             assert timeout_s == 1.25
             return ExecResult(None, "x" * 100_000, "err", True, 1.25)
 
@@ -165,6 +153,7 @@ async def test_python_arguments_timeout_and_output(task: Task) -> None:
         "stderr": "err",
         "timed_out": True,
         "duration_s": 1.25,
+        "truncated": False,
     }
     assert (await run_tool(tool, context(), {"code": "pass"})).error
     assert (await run_tool(tool, context(), {"code": 4})).error
@@ -205,3 +194,82 @@ async def test_python_real_sandbox_lifecycle(task: Task, sandbox_host: Any) -> N
     await env.teardown()
     assert env.sandbox is None
     assert not workdir.exists()
+
+
+@pytest.mark.parametrize("value", ["float", "", 123])
+def test_answer_format_validated_at_construction(task: Task, value: Any) -> None:
+    with pytest.raises(ValueError, match="answer_format"):
+        MathEnvConfig(answer_format=value)
+    with pytest.raises(ValueError, match="answer_format"):
+        MathEnv({}, Task("bad", "synthetic", 1, {"answer_format": value}))
+    with pytest.raises(ValueError, match="answer_format"):
+        MathEnv({}, Task("missing", "synthetic", 1))
+
+
+@pytest.mark.parametrize("answer", ["1_000", "١٠٠٠", "１０００", "9" * 5000, "$+001,000$", ""])
+async def test_canonical_matches_verifier_integer_key(task: Task, answer: str) -> None:
+    verifier = _REAL_VERIFIER()
+    try:
+        assert MathEnv({}, task).canonical(answer) == await verifier.canonical(answer, "integer")
+    finally:
+        verifier.close()
+
+
+@pytest.mark.parametrize("failure", [ValueError("invalid command"), OSError("exec failed")])
+async def test_python_exec_failures_become_tool_errors(task: Task, failure: Exception) -> None:
+    class BrokenSandbox:
+        async def exec(self, *args: Any, **kwargs: Any) -> ExecResult:
+            raise failure
+
+    (tool,) = MathEnv({"python_tool": True}, task).tools("peer")
+    result = await run_tool(tool, context(BrokenSandbox()), {"code": "pass"})
+    assert result.error
+    assert "python execution failed" in result.content
+
+
+async def test_python_nul_and_large_code_do_not_crash_episode(
+    task: Task,
+    sandbox_host: Any,  # noqa: F811
+) -> None:
+    env = MathEnv({"python_tool": True}, task)
+    await env.setup()
+    try:
+        (tool,) = env.tools("peer")
+        result = await run_tool(tool, context(env.sandbox), {"code": "print('a')\0"})
+        content = json.loads(result.content)
+        assert content["exit_code"] != 0 and "null bytes" in content["stderr"]
+        code = "#" + "x" * (200 * 1024) + "\nprint('large code works')"
+        result = await run_tool(tool, context(env.sandbox), {"code": code})
+        content = json.loads(result.content)
+        assert content["exit_code"] == 0 and content["stdout"] == "large code works\n"
+        result = await run_tool(
+            tool, context(env.sandbox), {"code": "while True: print('x' * 4096)"}
+        )
+        content = json.loads(result.content)
+        assert content["truncated"] and len(result.content) < 8 * 1024**2
+    finally:
+        await env.teardown()
+
+
+@pytest.mark.parametrize(
+    ("answer_format", "gold", "submission"),
+    [("integer", "1000", r"\boxed{+001,000}"), ("latex", r"\frac{1}{2}", "0.5")],
+)
+async def test_grade_with_real_math_verifier(
+    monkeypatch: pytest.MonkeyPatch, answer_format: str, gold: str, submission: str
+) -> None:
+    if answer_format == "latex":
+        pytest.importorskip("math_verify")
+        pytest.importorskip("pebble")
+    verifier = _REAL_VERIFIER(max_workers=1)
+    monkeypatch.setattr(math_env, "_VERIFIER", verifier)
+    env = MathEnv(
+        {}, Task("synthetic", "Synthetic arithmetic", gold, {"answer_format": answer_format})
+    )
+    try:
+        assert await env.grade(submission) == {"correct": 1.0, "answered": 1.0}
+        assert await env.grade("7") == {"correct": 0.0, "answered": 1.0}
+    finally:
+        import asyncio
+
+        await asyncio.to_thread(verifier.close)

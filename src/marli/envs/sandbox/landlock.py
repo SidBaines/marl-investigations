@@ -1,4 +1,4 @@
-"""Deny filesystem access and TCP by default before executing untrusted code.
+"""Allow only runtime files and the episode directory to untrusted code.
 
 Only the launcher installs a ruleset: restricting the training process would
 be irreversible. ABI probing is safe in the parent and requires no privileges.
@@ -54,18 +54,33 @@ def restrict(workdir: Path, abi: int) -> None:
             Path("/usr"),
             Path("/bin"),
             *Path("/").glob("lib*"),
-            Path("/etc"),
-            Path("/opt"),
-            Path(sys.prefix),
-            Path(sys.base_prefix),
-            Path("/dev/null"),
+            *[
+                Path("/etc") / name
+                for name in (
+                    "ld.so.cache",
+                    "ld.so.conf",
+                    "ld.so.conf.d",
+                    "localtime",
+                    "passwd",
+                    "group",
+                    "nsswitch.conf",
+                    "hostname",
+                    "hosts",
+                    "alternatives",
+                    "mime.types",
+                )
+            ],
+            *Path("/etc").glob("python3*"),
             Path("/dev/urandom"),
             Path("/proc/self"),
         ]
-        for path in dict.fromkeys([*read_paths, workdir]):
+        devices = [Path("/dev/null"), Path("/dev/zero")]
+        for path in dict.fromkeys([*read_paths, *devices, workdir]):
             if not path.exists():
                 continue
             access = fs_rights if path == workdir else _READ
+            if path in devices:
+                access = (1 << 1) | (1 << 2)
             if not path.is_dir():
                 access &= (1 << 0) | (1 << 1) | (1 << 2) | (1 << 14)
             path_fd = os.open(path, os.O_PATH | os.O_CLOEXEC)

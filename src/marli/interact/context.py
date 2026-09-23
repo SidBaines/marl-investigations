@@ -8,10 +8,14 @@ Owned by the agent runtime; each decides *when* the context is reset and
   -> ``on_exhaust``).
 - ``compaction(threshold)`` (SUPO-style): when the next prompt would exceed
   ``threshold`` tokens, the runtime drops the pending last action/observation
-  delta, appends a compaction instruction (observation) and makes a
+  delta (tool results and nudges are dropped), appends a compaction instruction and makes a
   ``purpose=COMPACT`` call *in the ending segment* (so the summary tokens are
   trained with the segment that produced them). The new segment is
-  ``initial(system, tools, [user(first_message + summary)])``. Validation:
+  ``initial(system, tools, [user(first_message + summary + delivery)])``.
+  Acknowledged deliveries and their WorkspaceReads cross compaction and session
+  resets into the next segment's first call. A fresh segment never compacts;
+  if its prompt cannot fit, the runtime applies on_exhaust (attempt a final
+  when enabled, otherwise end with ended_by="ctx"). Validation:
   ``threshold <= max_ctx - compact_reserve``.
 - ``notes(cap)``: the agent has ``read_notes``/``write_notes`` tools; notes
   persist in the workspace. At a session boundary the new session's first
@@ -71,12 +75,15 @@ class ContextManager(Protocol):
         """Request the next session's summary, or None when no carry call is needed."""
         ...
 
-    def carry_text(self, *, summary: str | None, notes: str | None) -> CarryText:
+    def carry_text(
+        self, *, summary: str | None, notes: str | None, session: bool = True
+    ) -> CarryText:
         """Format enabled carry sources after the task in the first user message.
 
         Empty or whitespace-only sources are omitted. Caps count retained source characters;
         labels and the leading ``…[truncated]`` marker are additional text.
         Truncation keeps the tail of each source.
+        session=False labels an in-session summary as earlier work.
         """
         ...
 
@@ -136,12 +143,14 @@ class _ContextManager:
             "on the task in this reply."
         )
 
-    def carry_text(self, *, summary: str | None, notes: str | None) -> CarryText:
+    def carry_text(
+        self, *, summary: str | None, notes: str | None, session: bool = True
+    ) -> CarryText:
         parts: list[str] = []
         truncated = False
         for label, content, cap in (
             (
-                "Previous session summary",
+                "Previous session summary" if session else "Summary of your earlier work",
                 summary if self.spec.kind in ("compaction", "both") else None,
                 self.limits.session.carry_max_tokens * 4,
             ),

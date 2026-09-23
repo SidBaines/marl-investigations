@@ -31,6 +31,7 @@ def single_spec() -> EpisodeSpec:
         renderer, {"solver0": [Turn(tool_calls=(("submit", {"answer": " 05 "}),))]}
     )
     policy = ScriptedPolicy("script", renderer, script)
+    policy.deterministic = True
     return EpisodeSpec(
         SingleProtocol(),
         env,
@@ -100,6 +101,7 @@ async def test_chat_single_records_usage_and_unique_cache_salt() -> None:
         )
 
     policy = ScriptedChatPolicy("chat", reply)
+    policy.deterministic = True
     spec.seating = {"solver": "chat"}
     spec.policies = {"chat": policy}
     spec.renderers = {}
@@ -281,3 +283,151 @@ def test_invalid_delivery_is_rejected_at_construction() -> None:
     spec = single_spec()
     with pytest.raises(ConfigError, match="delivery mode"):
         replace(spec.delivery, mode="invalid")
+
+
+@pytest.mark.parametrize("peer_answer", ["4", None])
+async def test_outcome_submissions_override_runtime_for_individual_grades(
+    peer_answer: str | None,
+) -> None:
+    class OutcomeProtocol(SingleProtocol):
+        async def run(self, io: SystemIO) -> Outcome:
+            result = await super().run(io)
+            return replace(result, submissions={"solver0": peer_answer})
+
+    spec = single_spec()
+    spec.protocol = OutcomeProtocol()
+    episode, _ = await run_episode(spec)
+    assert episode.outcome.final_answer == " 05 "
+    assert episode.grades == {"solver0": {"correct": 0.0}, "_system": {"correct": 1.0}}
+    assert spec.env.graded == [peer_answer, " 05 "]
+
+
+async def test_runtime_submission_grades_fall_back_for_absent_outcome_agents() -> None:
+    class OutcomeProtocol(SingleProtocol):
+        async def run(self, io: SystemIO) -> Outcome:
+            result = await super().run(io)
+            return replace(result, submissions={})
+
+    spec = single_spec()
+    spec.protocol = OutcomeProtocol()
+    episode, _ = await run_episode(spec)
+    assert episode.grades["solver0"] == {"correct": 1.0}
+
+
+@pytest.mark.parametrize("override", [True, False])
+async def test_protocol_delivery_override_or_episode_fallback(override: bool) -> None:
+    from marli.interact.workspace import DeliverySpec
+
+    class DeliveryProtocol(SingleProtocol):
+        delivery = DeliverySpec(mode="pull") if override else None
+
+        async def run(self, io: SystemIO) -> Outcome:
+            assert io.workspace.delivery.mode == ("pull" if override else "push")
+            return await super().run(io)
+
+    spec = single_spec()
+    spec.protocol = DeliveryProtocol()
+    spec.delivery = DeliverySpec(mode="push")
+    episode, _ = await run_episode(spec)
+    assert episode.ok
+
+
+async def test_vote_ties_use_episode_rng_and_none_is_excluded() -> None:
+    class VoteProtocol(SingleProtocol):
+        async def run(self, io: SystemIO) -> Outcome:
+            state = io.rng.getstate()
+            expected = io.rng.choice([" 05 ", "6"])
+            io.rng.setstate(state)
+            answer, votes = await io.vote({"a": None, "b": " 05 ", "c": "6", "d": None})
+            assert answer == expected
+            assert votes == {"5": 1, "6": 1}
+            assert await io.vote({"a": None, "b": None}) == (None, {})
+            assert await io.vote({}) == (None, {})
+            return Outcome(answer, {}, "vote", votes)
+
+    spec = single_spec()
+    spec.protocol = VoteProtocol()
+    episode, _ = await run_episode(spec)
+    assert episode.ok and not episode.calls
+
+
+async def test_vote_compares_only_first_cluster_members_and_raw_key_fallback() -> None:
+    class NearEnv(ArithEnv):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pairs: list[tuple[str | None, str | None]] = []
+
+        def canonical(self, submission: str | None) -> str | None:
+            return None
+
+        async def same_answer(self, a: str | None, b: str | None) -> bool:
+            self.pairs.append((a, b))
+            return a is not None and b is not None and abs(int(a) - int(b)) <= 1
+
+    class VoteProtocol(SingleProtocol):
+        async def run(self, io: SystemIO) -> Outcome:
+            answer, votes = await io.vote({"a": "1", "b": "2", "c": "3", "d": None})
+            return Outcome(answer, {}, "vote", votes)
+
+    spec = single_spec()
+    spec.protocol = VoteProtocol()
+    env = NearEnv()
+    spec.env = env
+    episode, _ = await run_episode(spec)
+    assert episode.outcome.final_answer == "1"
+    assert episode.outcome.votes == {"1": 2, "3": 1}
+    assert env.pairs == [("2", "1"), ("3", "1")]
+
+
+@pytest.mark.parametrize(
+    "prompt", ['Answer as {"answer": ...}.', "{unknown}", "{", "{n_agents:bad}"]
+)
+async def test_system_prompt_format_validation_precedes_env_setup(prompt: str) -> None:
+    spec = single_spec()
+    spec.protocol = SingleProtocol(SingleConfig(system_prompt=prompt))
+    with pytest.raises(ConfigError, match="system_prompt"):
+        await run_episode(spec)
+    assert spec.env.setup_count == spec.env.teardown_count == 0
+    assert not spec.policies["script"].calls
+
+
+async def test_system_prompt_n_agents_is_role_count() -> None:
+    class TwoRoles(SingleProtocol):
+        def roles(self) -> list[RoleSpec]:
+            (solver,) = super().roles()
+            return [
+                replace(solver, count=3, system_prompt="Solvers: {n_agents}."),
+                replace(solver, role="idle", count=7),
+            ]
+
+    spec = single_spec()
+    spec.protocol = TwoRoles()
+    spec.seating["idle"] = "script"
+    episode, buffers = await run_episode(spec)
+    (call,) = episode.calls
+    (ctx,) = spec.policies["script"].calls
+    assert "Solvers: 3." in ctx.prompt_text
+    assert buffers[call.segment_id] == list(ctx.prompt_ids + call.completion_ids)
+
+
+@pytest.mark.parametrize("deterministic", [None, False, True])
+async def test_determinism_is_duck_typed_and_only_seated_policies_are_checked(
+    deterministic: bool | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = single_spec()
+    seated = spec.policies["script"]
+    if deterministic is None:  # a policy without the attribute is not replayable
+        del seated.deterministic
+        monkeypatch.delattr(type(seated), "deterministic")
+    else:
+        seated.deterministic = deterministic
+    unused = ScriptedChatPolicy("unused", lambda messages, meta: None)
+    unused.trainable = True
+    unused.max_seq_len = 1
+    unused.deterministic = False
+    spec.policies["unused"] = unused
+    episode, buffers = await run_episode(spec)
+    assert episode.replayable is (deterministic is True)
+    assert not unused.calls
+    (call,) = episode.calls
+    assert buffers[call.segment_id] == list(seated.calls[0].prompt_ids + call.completion_ids)
