@@ -31,8 +31,8 @@ class SpendGuard:
         _validate_amount(usd, "usd")
         if self._max_usd is not None and self._spent + usd > self._max_usd:
             raise BudgetExceededError(
-                f"budget limit ${self._max_usd:g} exceeded for {what!r}: "
-                f"spent so far ${self._spent:g}, additional spend ${usd:g}"
+                f"budget limit ${self._max_usd:.4f} exceeded for {what!r}: "
+                f"spent so far ${self._spent:.4f}, additional spend ${usd:.4f}"
             )
 
     def charge(self, usd: float, what: str) -> None:
@@ -40,7 +40,11 @@ class SpendGuard:
         _validate_amount(usd, "usd")
         self._spent += usd
         self._by_item[what] = self._by_item.get(what, 0.0) + usd
-        self.check(0.0, what)
+        if self._max_usd is not None and self._spent > self._max_usd:
+            raise BudgetExceededError(
+                f"budget limit ${self._max_usd:.4f} exceeded by {what!r} (charged ${usd:.4f}): "
+                f"spent so far ${self._spent:.4f}"
+            )
 
     def summary(self) -> dict[str, float | None | dict[str, float]]:
         """Return a snapshot of the limit, total, and accumulated spend per item."""

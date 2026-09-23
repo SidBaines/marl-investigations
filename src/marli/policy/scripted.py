@@ -44,6 +44,8 @@ class ScriptedPolicy:
         latency_s: float | Callable[[ScriptCtx], float] = 0.0,
         policy_version: int | None = None,
     ) -> None:
+        if not callable(latency_s) and latency_s < 0:
+            raise ValueError(f"latency_s must be non-negative, got {latency_s!r}")
         self.policy_id = policy_id
         self.trainable = trainable
         self.renderer_name = renderer.name
@@ -75,6 +77,8 @@ class ScriptedPolicy:
             -3.0 + 3.0 * random.Random(derive_seed(seed, i)).random() for i in range(len(ids))
         )
         latency = self._latency_s(ctx) if callable(self._latency_s) else self._latency_s
+        if latency < 0:
+            raise ValueError(f"latency_s must be non-negative, got {latency!r}")
         if latency:
             await self._sleep(latency)
         return Sample(
@@ -114,14 +118,16 @@ def from_callable(fn: Callable[[ScriptCtx], Turn], renderer: FakeRenderer) -> Sc
 
 
 def _lookup_turn(
-    turns: Mapping[str, Sequence[Turn]], key: str, index: int, default: Turn | None
+    turns: Mapping[str, Sequence[Turn]], key: str, index: int, default: Turn | None, *, kind: str
 ) -> Turn:
     sequence = turns.get(key, ())
     if 0 <= index < len(sequence):
         return sequence[index]
     if default is not None:
         return default
-    raise IndexError(f"No scripted turn for {key!r} at call index {index}")
+    raise IndexError(
+        f"no scripted turn for {kind} {key!r} at call index {index} ({len(sequence)} scripted)"
+    )
 
 
 def turns_by_agent(
@@ -130,10 +136,13 @@ def turns_by_agent(
     *,
     default: Turn | None = None,
 ) -> ScriptFn:
-    """Select by agent id and call index; missing/exhausted agents use the default."""
+    """Select by agent id and call index; missing/exhausted agents use the default.
+
+    Without a default, raise IndexError naming the agent, call index and scripted turn count.
+    """
 
     def select(ctx: ScriptCtx) -> Turn:
-        return _lookup_turn(turns, ctx.meta.agent_id, ctx.meta.call_index, default)
+        return _lookup_turn(turns, ctx.meta.agent_id, ctx.meta.call_index, default, kind="agent")
 
     return from_callable(select, renderer)
 
@@ -144,10 +153,14 @@ def by_role(
     *,
     default: Turn | None = None,
 ) -> ScriptFn:
-    """Select by role and the caller's call index, without a shared role cursor."""
+    """Select by role and the caller's call index, without a shared role cursor.
+
+    Missing/exhausted roles use the default. Without one, raise IndexError naming the
+    role, call index and scripted turn count.
+    """
 
     def select(ctx: ScriptCtx) -> Turn:
-        return _lookup_turn(turns, ctx.meta.role, ctx.meta.call_index, default)
+        return _lookup_turn(turns, ctx.meta.role, ctx.meta.call_index, default, kind="role")
 
     return from_callable(select, renderer)
 
