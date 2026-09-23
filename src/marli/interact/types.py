@@ -150,7 +150,7 @@ class Call:
 
 @dataclass(frozen=True)
 class SegmentInfo:
-    """Metadata of one token buffer. Buffers themselves live in the episode's npz sidecar."""
+    """Metadata of one token buffer. Buffers live in the tokens.jsonl sidecar (records.py)."""
 
     segment_id: str  # f"{agent_id}/g{n}" (deterministic)
     agent_id: str
