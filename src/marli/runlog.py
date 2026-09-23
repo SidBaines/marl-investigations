@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,8 @@ from marli.errors import DirtyTreeError
 
 @dataclass(frozen=True)
 class GitInfo:
+    """Commit/dirty are None outside a git checkout, without commits, or without git."""
+
     commit: str | None
     dirty: bool | None
 
@@ -31,7 +34,10 @@ def git_info(repo_dir: str | Path | None = None) -> GitInfo:
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=repo_dir
         )
         status = subprocess.run(
-            ["git", "status", "--porcelain"], capture_output=True, text=True, cwd=repo_dir
+            ["git", "--no-optional-locks", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            cwd=repo_dir,
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return GitInfo(commit=None, dirty=None)
@@ -56,10 +62,13 @@ def provenance(repo_dir: str | Path | None = None) -> dict[str, Any]:
 def require_clean_tree(repo_dir: str | Path | None = None) -> GitInfo:
     """Refuse training without clean git provenance unless explicitly allowed."""
     git = git_info(repo_dir)
-    if os.environ.get("MARLI_ALLOW_DIRTY") != "1" and (git.commit is None or git.dirty):
+    if git.commit is None or git.dirty:
         reason = "git commit is unavailable" if git.commit is None else "git tree is dirty"
-        raise DirtyTreeError(
-            f"{reason}: a checkpoint you can't map to a commit is a result you can't reproduce. "
-            "Commit your changes or set MARLI_ALLOW_DIRTY=1 to opt out."
-        )
+        if os.environ.get("MARLI_ALLOW_DIRTY") != "1":
+            raise DirtyTreeError(
+                f"{reason}: a checkpoint you can't map to a commit is a result "
+                "you can't reproduce. "
+                "Commit your changes or set MARLI_ALLOW_DIRTY=1 to opt out."
+            )
+        warnings.warn(f"{reason}: proceeding because MARLI_ALLOW_DIRTY=1", stacklevel=2)
     return git

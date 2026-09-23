@@ -103,6 +103,23 @@ def test_registry_unknown_keys_are_sorted(tmp_path: Path) -> None:
     assert str(caught.value) == "models registry entry 'qwen3_8b': unknown keys ['foo', 'zoo']"
 
 
+@pytest.mark.parametrize("key", ["name", "width"])
+def test_registry_rejects_init_false_keys(tmp_path: Path, key: str) -> None:
+    @dataclass
+    class Entry:
+        name: str = field(init=False, default="internal")
+        width: int = field(init=False, default=8)
+
+    path = tmp_path / "entry.yaml"
+    path.write_text("{}\n")
+    registry = Registry("entries", tmp_path, Entry)
+    assert registry.load("entry") == Entry()
+    path.write_text(f"{key}: 1\n")
+    with pytest.raises(ConfigError) as caught:
+        registry.load("entry")
+    assert str(caught.value) == f"entries registry entry 'entry': unknown keys ['{key}']"
+
+
 def test_registry_missing_required_fields(tmp_path: Path) -> None:
     (tmp_path / "entry.yaml").write_text("{}\n")
     with pytest.raises(ConfigError, match="entry.*missing required fields.*width"):
@@ -190,6 +207,24 @@ def test_function_registry_imports_lazily(monkeypatch: pytest.MonkeyPatch) -> No
 def test_function_registry_non_callable_import_rejected() -> None:
     with pytest.raises(ValueError, match="named callable"):
         FnRegistry("rewards").get("json:__name__")
+
+
+@pytest.mark.parametrize(
+    ("ref", "cause_type"),
+    [
+        ("no_such_module_xyz:f", ImportError),
+        ("json:no_such_attr", AttributeError),
+        (":", ValueError),
+    ],
+)
+def test_function_registry_resolution_errors_are_config_errors(
+    ref: str, cause_type: type[Exception]
+) -> None:
+    with pytest.raises(ConfigError) as caught:
+        FnRegistry("rewards").get(ref)
+    cause = caught.value.__cause__
+    assert isinstance(cause, cause_type)
+    assert str(caught.value) == f"cannot resolve rewards function {ref!r}: {cause}"
 
 
 def test_function_registry_unknown_name_lists_choices() -> None:
