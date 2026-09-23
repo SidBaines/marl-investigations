@@ -133,6 +133,13 @@ class DeltaRenderer(Protocol):
         arguments)."""
         ...
 
+    def suppress_thinking_prefix(self) -> list[int]:
+        """Observation tokens appended after the generation header to skip the reasoning
+        channel for harness-requested calls (compaction/carry summaries, forced finals),
+        in the template's own non-thinking form (Qwen3.5: close the prefilled think block;
+        gpt-oss: open the final channel). ``[]`` for formats without a reasoning channel."""
+        ...
+
     def parse(self, completion_ids: Sequence[int], tools: Sequence[ToolSpec] = ()) -> ParsedTurn:
         """Parse sampled ids (including the stop token, if any). ``tools`` lets formats
         with untyped parameter text (Qwen3.5 XML) type arguments by their JSON schema:

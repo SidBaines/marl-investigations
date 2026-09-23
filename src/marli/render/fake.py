@@ -152,6 +152,9 @@ class FakeRenderer:
             ids.append(S["eot"])
         return ids
 
+    def suppress_thinking_prefix(self) -> list[int]:
+        return []
+
     # -- parsing ---------------------------------------------------------------------
     def parse(self, completion_ids: Sequence[int], tools: Sequence[ToolSpec] = ()) -> ParsedTurn:
         ids = list(completion_ids)

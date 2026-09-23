@@ -10,7 +10,9 @@ eval rollouts, RL rollouts and tests.
         task: Task
         seating: dict[str, str]         # role -> policy_id
         policies: dict[str, Policy]     # policy_id -> TokenPolicy | ChatPolicy
-        renderers: dict[str, DeltaRenderer]  # policy_id -> renderer (token policies only)
+        # policy_id -> renderer FACTORY (token policies only): renderers are per-agent-lineage
+        # objects (they remember the tool specs they rendered), so each agent gets its own.
+        renderers: dict[str, Callable[[], DeltaRenderer]]
         limits: Limits
         schedule: str = "lockstep"      # lockstep | async
         delivery: DeliverySpec = DeliverySpec()
