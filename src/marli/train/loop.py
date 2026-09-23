@@ -242,15 +242,14 @@ async def _rollouts(
     learners: dict[str, Learner],
     spend: SpendGuard,
 ) -> list[tuple[Episode, dict[str, list[int]]]]:
-    if len({task.task_id for task in batch}) != len(batch):
-        raise ConfigError(
-            "an epoch wrap repeated a task within one batch; task_id/step group identities "
-            "require distinct batch tasks (reduce batch_tasks)"
-        )
     prefix = f"rollouts/step_{step:05d}"
     for filename in ("episodes.jsonl", "tokens.jsonl"):
         atomic_write_text(run.path(f"{prefix}/{filename}"), "")
-    pending = iter((task, idx) for task in batch for idx in range(cfg.group_size))
+    # (slot, task, idx): the batch slot keeps group ids unique when an epoch wrap
+    # (or batch_tasks > len(tasks)) puts the same task in one batch twice.
+    pending = iter(
+        (slot, task, idx) for slot, task in enumerate(batch) for idx in range(cfg.group_size)
+    )
     results: list[tuple[Episode, dict[str, list[int]]]] = []
     stopped: Exception | None = None
     sampling = {
@@ -267,7 +266,7 @@ async def _rollouts(
             item = next(pending, None)
             if item is None:
                 return
-            task, idx = item
+            slot, task, idx = item
             try:
                 spend.check(0, "next episode")
                 episode, buffers = await run_episode(
@@ -282,7 +281,7 @@ async def _rollouts(
                         schedule=cfg.schedule,
                         run_seed=derive_seed(cfg.seed, step),
                         episode_idx=idx,
-                        group_id=f"{task.task_id}/s{step}",
+                        group_id=f"{task.task_id}/s{step}/b{slot}",
                         config_hash=run.config_hash,
                         protocol_name=protocol_name,
                         backend=",".join(sorted({spec.backend for spec in cfg.learners.values()})),
@@ -330,8 +329,6 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
     tasks = read_tasks(taskset)
     if not tasks or len({task.task_id for task in tasks}) != len(tasks):
         raise ConfigError("training TaskSet must be non-empty with unique task_id values")
-    if cfg.batch_tasks > len(tasks):
-        raise ConfigError("batch_tasks exceeds distinct tasks; task_id/step groups would collide")
     runlog.require_clean_tree()
     provenance = runlog.provenance()
     latest = _latest_checkpoint(run)

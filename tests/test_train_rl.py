@@ -66,7 +66,7 @@ def test_cli_budget_exit_four_then_resume(
     original = loop.run_episode
 
     async def billed(spec: Any) -> Any:
-        if spec.group_id.endswith("/s1"):
+        if "/s1/" in spec.group_id:
             fake_setup.guards[-1].charge(2, "sample")
         return await original(spec)
 

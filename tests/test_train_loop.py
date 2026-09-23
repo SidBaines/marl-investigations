@@ -91,7 +91,7 @@ def rae_policy() -> ScriptedPolicy:
 
     def turn(ctx: ScriptCtx) -> Turn:
         group, episode = ctx.meta.episode_id.rsplit("/e", 1)
-        step = int(group.rsplit("/s", 1)[1])
+        step = int(group.rsplit("/s", 1)[1].split("/b", 1)[0])
         correct = (int(episode) % 2 == 0, True, False, int(episode) % 2 == 0)[step]
         return Turn(tool_calls=(("submit", {"answer": "5" if correct else "4"}),))
 
@@ -198,7 +198,7 @@ async def test_routing_versions_metrics_and_checkpoint(
         episodes = list(read_episodes(out / f"rollouts/step_{step:05d}", with_tokens=True))
         assert len(episodes) == 2
         for episode, buffers in episodes:
-            assert episode.group_id == f"{episode.task_id}/s{step}"
+            assert episode.group_id.startswith(f"{episode.task_id}/s{step}/b")
             assert {call.policy_version for call in episode.calls} == {step}
             assert buffers and episode.ok
     assert checkpoint.meta["provenance"]["git_commit"]
@@ -406,7 +406,7 @@ async def test_budget_checkpoints_last_complete_unsaved_step(
     out = tmp_path / "train"
 
     async def bill(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]:
-        if spec.group_id.endswith("/s1"):
+        if "/s1/" in spec.group_id:
             fake_setup.guards[-1].charge(2, "interrupted sampling")
         return await original(spec)
 
@@ -509,11 +509,12 @@ async def test_aggregate_training_budget_prevents_partial_update(
     assert result.status is RunStatus.RESUME and result.handle.step == 0
 
 
-async def test_duplicate_task_groups_fail_loudly(
+async def test_repeated_batch_tasks_get_distinct_groups(
     tmp_path: Path,
     fake_setup: FakeSetup,
 ) -> None:
-    cfg = config(make_taskset(tmp_path / "tasks", 1), batch_tasks=2)
-    with pytest.raises(ConfigError, match="groups would collide"):
-        await run_verb("train rl", cfg, out=tmp_path / "train")
-    assert not fake_setup.backends
+    cfg = config(make_taskset(tmp_path / "tasks", 1), batch_tasks=2, steps=1)
+    await run_verb("train rl", cfg, out=tmp_path / "train")
+    episodes = list(read_episodes(tmp_path / "train/rollouts/step_00000", with_tokens=False))
+    groups = {episode.group_id for episode, _ in episodes}
+    assert len(groups) == 2 and all(group.endswith(("/b0", "/b1")) for group in groups)

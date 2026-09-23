@@ -21,7 +21,7 @@ from marli.policy.base import ChatPolicy, TokenPolicy
 _VALID_FORMS = (
     "tinker:<base_model>[#sampler=<path>]; "
     "tinker@<url>|<base_model>[#sampler=<path>]; "
-    "ckpt:<path>[#step=<integer|final>]; "
+    "ckpt:<path>[#step=<integer|final>][&learner=<name>]; "
     "vllm:<url>#<model>; vllm:@<server.json>#<model>; "
     "api:<openai|anthropic|openrouter>/<model>; scripted:<module>:<attr>"
 )
@@ -36,11 +36,12 @@ class PolicyRef:
     provider: str | None = None
     sampler: str | None = None
     step: int | str | None = None
+    learner: str | None = None  # ckpt refs: which learner of a multi-learner checkpoint
 
     def __post_init__(self) -> None:
         allowed = {
             "tinker": ("base_url", "sampler"),
-            "ckpt": ("step",),
+            "ckpt": ("step", "learner"),
             "vllm": ("base_url", "server_json"),
             "api": ("provider",),
             "scripted": (),
@@ -48,10 +49,10 @@ class PolicyRef:
         try:
             if not isinstance(self.kind, str) or self.kind not in allowed:
                 raise ValueError(f"unknown policy kind {self.kind!r}")
-            for field in ("base_url", "server_json", "provider", "sampler", "step"):
+            for field in ("base_url", "server_json", "provider", "sampler", "step", "learner"):
                 if field not in allowed[self.kind] and getattr(self, field) is not None:
                     raise ValueError(f"{self.kind} refs do not accept {field}")
-            for field in ("target", "base_url", "server_json", "provider", "sampler"):
+            for field in ("target", "base_url", "server_json", "provider", "sampler", "learner"):
                 value = getattr(self, field)
                 if field != "target" and value is None:
                     continue
@@ -101,8 +102,10 @@ class PolicyRef:
             )
             return head if self.sampler is None else f"{head}#sampler={self.sampler}"
         if self.kind == "ckpt":
-            suffix = "" if self.step in (None, "final") else f"#step={self.step}"
-            return f"ckpt:{self.target}{suffix}"
+            keys = [] if self.step in (None, "final") else [f"step={self.step}"]
+            if self.learner is not None:
+                keys.append(f"learner={self.learner}")
+            return f"ckpt:{self.target}" + (f"#{'&'.join(keys)}" if keys else "")
         if self.kind == "vllm":
             server = f"@{self.server_json}" if self.server_json is not None else self.base_url
             return f"vllm:{server}#{self.target}"
@@ -173,19 +176,27 @@ def parse_ref(s: str, *, resolve_paths: bool = False) -> PolicyRef:
             if not target.strip():
                 raise ValueError("checkpoint path must be non-empty")
             step: int | str = "final"
+            learner: str | None = None
             if has_suffix:
-                key, separator, value = suffix.partition("=")
-                if key != "step" or not separator:
-                    raise ValueError("checkpoint suffix must be #step=<integer|final>")
-                if value != "final":
-                    if not value.isascii() or not value.isdecimal():
+                seen: set[str] = set()
+                for item in suffix.split("&"):
+                    key, separator, value = item.partition("=")
+                    if key not in ("step", "learner") or not separator or key in seen:
                         raise ValueError(
-                            "checkpoint step must be a non-negative integer or 'final'"
+                            "checkpoint suffix must be #step=<integer|final>[&learner=<name>]"
                         )
-                    step = int(value)
+                    seen.add(key)
+                    if key == "learner":
+                        learner = value
+                    elif value != "final":
+                        if not value.isascii() or not value.isdecimal():
+                            raise ValueError(
+                                "checkpoint step must be a non-negative integer or 'final'"
+                            )
+                        step = int(value)
             if resolve_paths and not os.path.isabs(target):
                 target = os.path.abspath(target)
-            return PolicyRef("ckpt", target, step=step)
+            return PolicyRef("ckpt", target, step=step, learner=learner)
         if kind == "vllm":
             _validate_model(suffix)
             if target.startswith("@"):
