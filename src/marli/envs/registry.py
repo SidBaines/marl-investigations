@@ -13,6 +13,7 @@ ENVS = FnRegistry("envs")
 
 
 def make_env(name: str, config: dict[str, Any], task: Task) -> Env:
+    from marli.envs import code_fn as _code_fn  # noqa: F401
     from marli.envs import math as _math  # noqa: F401
 
     return ENVS.get(name)(config, task)

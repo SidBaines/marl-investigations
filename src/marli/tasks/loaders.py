@@ -72,6 +72,13 @@ def load_tasks(
     """
     if max_n is not None and (type(max_n) is not int or max_n < 0):
         raise ValueError("max_n must be a non-negative integer or None")
+    if source.kind == "code":
+        from marli.tasks.code import load_code_tasks
+
+        tasks = load_code_tasks(source, split=split, loader=loader, meta=meta)
+        if shuffle:
+            random.Random(seed).shuffle(tasks)
+        return tasks if max_n is None else tasks[:max_n]
     if loader is None:
         from datasets import load_dataset
 
