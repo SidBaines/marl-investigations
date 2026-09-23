@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
+from marli.config import from_mappings
 from marli.errors import ConfigError
 from marli.interact.configs import PROTOCOL_CONFIGS, build_protocol, resolve_protocol
 from marli.interact.protocols.single import SingleConfig, SingleProtocol
@@ -43,19 +45,17 @@ def test_entry_files_are_named_by_stem() -> None:
     assert all(path.stem in PROTOCOL_CONFIGS.names() for path in directory.glob("*.yaml"))
 
 
+@dataclass
+class _Inner:
+    names: tuple[str, ...] = ()
+
+
+@dataclass
+class _Outer:
+    items: list[_Inner] = field(default_factory=list)
+    tags: tuple[str, ...] = ()
+
+
 def test_from_mappings_retuples_nested_dataclasses_in_lists() -> None:
-    from dataclasses import dataclass, field
-
-    from marli.config import from_mappings
-
-    @dataclass
-    class Inner:
-        names: tuple[str, ...] = ()
-
-    @dataclass
-    class Outer:
-        items: list[Inner] = field(default_factory=list)
-        tags: tuple[str, ...] = ()
-
-    out = from_mappings(Outer, {"items": [{"names": ["a"]}], "tags": ["x"]})
+    out = from_mappings(_Outer, {"items": [{"names": ["a"]}], "tags": ["x"]})
     assert out.items[0].names == ("a",) and out.tags == ("x",)
