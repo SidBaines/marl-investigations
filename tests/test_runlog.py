@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import warnings
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime
 from pathlib import Path
@@ -63,8 +64,17 @@ def test_dirty_guard_explicit_opt_out(repo: Path, monkeypatch: pytest.MonkeyPatc
     with pytest.raises(DirtyTreeError):
         require_clean_tree(repo)
     monkeypatch.setenv("MARLI_ALLOW_DIRTY", "1")
-    assert require_clean_tree(repo) == git_info(repo)
-    assert require_clean_tree(repo).dirty is True
+    with pytest.warns(UserWarning, match="git tree is dirty.*MARLI_ALLOW_DIRTY=1"):
+        info = require_clean_tree(repo)
+    assert info == git_info(repo)
+    assert info.dirty is True
+
+
+def test_clean_tree_opt_out_does_not_warn(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MARLI_ALLOW_DIRTY", "1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert require_clean_tree(repo) == git_info(repo)
 
 
 def test_default_repo_is_current_directory(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -74,15 +84,33 @@ def test_default_repo_is_current_directory(repo: Path, monkeypatch: pytest.Monke
 
 
 def test_non_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # pytest's temporary directory lives inside the checkout during sandbox-free runs.
-    # Stop git discovery before it can reach that parent repository.
+    # tmp_path may sit inside a git checkout (e.g. --basetemp under the repo);
+    # stop discovery at its parent.
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
     monkeypatch.delenv("MARLI_ALLOW_DIRTY", raising=False)
     assert git_info(tmp_path) == GitInfo(commit=None, dirty=None)
     with pytest.raises(DirtyTreeError, match="commit is unavailable.*can't reproduce"):
         require_clean_tree(tmp_path)
     monkeypatch.setenv("MARLI_ALLOW_DIRTY", "1")
-    assert require_clean_tree(tmp_path) == GitInfo(commit=None, dirty=None)
+    with pytest.warns(UserWarning, match="git commit is unavailable.*MARLI_ALLOW_DIRTY=1"):
+        assert require_clean_tree(tmp_path) == GitInfo(commit=None, dirty=None)
+
+
+def test_git_info_disables_optional_locks(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands = []
+
+    def fake_git(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        commands.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0, stdout="abc123\n" if "rev-parse" in argv else "", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_git)
+    assert git_info() == GitInfo(commit="abc123", dirty=False)
+    assert commands == [
+        ["git", "rev-parse", "HEAD"],
+        ["git", "--no-optional-locks", "status", "--porcelain"],
+    ]
 
 
 def test_git_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,10 +134,10 @@ def test_failed_git_command_refuses_training(
     monkeypatch: pytest.MonkeyPatch, failed_command: str
 ) -> None:
     def failed_git(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if argv[1] == failed_command:
+        if failed_command in argv:
             return subprocess.CompletedProcess(argv, 128, stdout="", stderr="git failed")
         return subprocess.CompletedProcess(
-            argv, 0, stdout="abc123\n" if argv[1] == "rev-parse" else "", stderr=""
+            argv, 0, stdout="abc123\n" if "rev-parse" in argv else "", stderr=""
         )
 
     monkeypatch.setattr(subprocess, "run", failed_git)
