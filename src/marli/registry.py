@@ -3,6 +3,8 @@
 YAML entries hold scalars, lists, and plain dictionaries; nested-dataclass
 conversion is deliberately out of scope. Function references and the catalog
 resolve lazily so enumeration does not pull in unused backend dependencies.
+Field types are not validated beyond __post_init__; entries should validate
+critical fields there.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ class Registry[T]:
             raise ConfigError(f"{context}: invalid YAML: {exc}") from exc
         if not isinstance(data, Mapping):
             raise ConfigError(f"{context}: expected a YAML mapping")
-        fields = {field.name: field for field in dataclasses.fields(self.cls)}
+        fields = {field.name: field for field in dataclasses.fields(self.cls) if field.init}
         unknown = sorted(data.keys() - fields.keys(), key=str)
         if unknown:
             raise ConfigError(f"{context}: unknown keys {unknown}")
@@ -68,8 +70,7 @@ class Registry[T]:
         required = [
             field.name
             for field in fields.values()
-            if field.init
-            and field.default is dataclasses.MISSING
+            if field.default is dataclasses.MISSING
             and field.default_factory is dataclasses.MISSING
             and field.name not in data
         ]
@@ -113,7 +114,10 @@ class FnRegistry[F: Callable[..., Any]]:
             raise ConfigError(
                 f"unknown {self.kind} function {ref!r}; available names: {self.names()}"
             )
-        function = _resolve(ref)
+        try:
+            function = _resolve(ref)
+        except (ImportError, AttributeError, ValueError) as exc:
+            raise ConfigError(f"cannot resolve {self.kind} function {ref!r}: {exc}") from exc
         if not callable(function) or getattr(function, "__name__", None) == "<lambda>":
             raise ConfigError(f"{self.kind} function {ref!r} must be a named callable")
         return function

@@ -7,13 +7,16 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields, make_dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Literal
 
 import pytest
+import yaml
 from omegaconf import MISSING
+from omegaconf.errors import MissingMandatoryValue, OmegaConfBaseException
 
 from marli.config import (
     compose,
@@ -40,6 +43,16 @@ from marli.errors import (
 class Optimizer(Enum):
     adam = "adam"
     sgd = "sgd"
+
+
+class BadOptimizer(Enum):
+    ADAM = "adam"
+    sgd = "sgd"
+
+
+@dataclass
+class BadEnumConfig:
+    optimizer: BadOptimizer = BadOptimizer.sgd
 
 
 @dataclass
@@ -122,8 +135,10 @@ def test_unknown_keys_are_config_errors(tmp_path: Path, key: str, source: str) -
         else:
             compose(Config, overrides=[f"{key}=1"])
     assert isinstance(caught.value, ValueError)
-    assert key in str(caught.value)
-    assert caught.value.__cause__ is not None
+    leaf = key.split(".")[-1]
+    cls_name = "TrainConfig" if "." in key else "Config"
+    assert str(caught.value) == f"invalid config key '{key}': Key '{leaf}' not in '{cls_name}'"
+    assert isinstance(caught.value.__cause__, OmegaConfBaseException)
 
 
 @pytest.mark.parametrize("source", ["yaml", "override"])
@@ -135,22 +150,45 @@ def test_type_validation_errors_name_key(tmp_path: Path, source: str) -> None:
             compose(Config, path)
         else:
             compose(Config, overrides=["train.lr=nope"])
-    assert caught.value.__cause__ is not None
+    assert str(caught.value) == (
+        "invalid config key 'train.lr': "
+        "Value 'nope' of type 'str' could not be converted to Float"
+    )
+    assert isinstance(caught.value.__cause__, OmegaConfBaseException)
 
 
 @pytest.mark.parametrize(
-    ("cls", "overrides", "key"),
+    ("cfg", "overrides", "key"),
     [
-        (RequiredConfig, [], "name"),
-        (RequiredConfig, ["name=run"], "task"),
-        (RequiredConfig, ["name=run", "task=???"], "task"),
-        (NestedRequiredConfig, [], "required.name"),
+        (RequiredConfig(MISSING), [], "name"),
+        (RequiredConfig("run"), ["name=run"], "task"),
+        (RequiredConfig("run"), ["name=run", "task=???"], "task"),
+        (NestedRequiredConfig(), [], "required.name"),
     ],
 )
-def test_missing_mandatory_values(cls: type, overrides: list[str], key: str) -> None:
-    with pytest.raises(ConfigError) as caught:
-        compose(cls, overrides=overrides)
-    assert key in str(caught.value)
+def test_missing_mandatory_values(
+    cfg: RequiredConfig | NestedRequiredConfig, overrides: list[str], key: str
+) -> None:
+    with pytest.raises(ConfigError) as composed:
+        compose(type(cfg), overrides=overrides)
+    with pytest.raises(ConfigError) as hashed:
+        config_hash(cfg)
+    assert str(composed.value) == str(hashed.value) == f"missing mandatory config key '{key}'"
+    assert isinstance(composed.value.__cause__, MissingMandatoryValue)
+    assert isinstance(hashed.value.__cause__, MissingMandatoryValue)
+
+
+@pytest.mark.parametrize("source", ["yaml", "override"])
+def test_missing_overlays_preserve_defaults(tmp_path: Path, source: str) -> None:
+    # OmegaConf merges ignore missing overlay values when the base has a value.
+    if source == "yaml":
+        path = tmp_path / "missing.yaml"
+        path.write_text("steps: ???\ntasks: ???\n")
+        cfg = compose(TrainConfig, path)
+    else:
+        cfg = compose(TrainConfig, overrides=["steps=???", "tasks=???"])
+    assert cfg == TrainConfig()
+    assert config_hash(cfg) == config_hash(TrainConfig())
 
 
 def test_post_init_errors_are_wrapped() -> None:
@@ -164,6 +202,16 @@ def test_missing_yaml_stays_file_not_found(tmp_path: Path) -> None:
         compose(Config, tmp_path / "absent.yaml")
 
 
+def test_invalid_yaml_is_config_error(tmp_path: Path) -> None:
+    path = tmp_path / "invalid.yaml"
+    path.write_text("train: [")
+    with pytest.raises(ConfigError) as caught:
+        compose(Config, path)
+    cause = caught.value.__cause__
+    assert isinstance(cause, yaml.YAMLError)
+    assert str(caught.value) == f"invalid YAML in {path}: {cause}"
+
+
 @pytest.mark.parametrize("invalid", [dict, {}, Config()])
 def test_compose_requires_dataclass_type(invalid: object) -> None:
     with pytest.raises(TypeError, match="dataclass type"):
@@ -174,6 +222,29 @@ def test_enum_from_yaml(tmp_path: Path) -> None:
     path = tmp_path / "enum.yaml"
     path.write_text("train:\n  optimizer: sgd\n")
     assert compose(Config, path).train.optimizer is Optimizer.sgd
+
+
+@pytest.mark.parametrize("operation", [compose, describe_config])
+@pytest.mark.parametrize(
+    ("cls", "key"),
+    [
+        (BadEnumConfig, "optimizer"),
+        (make_dataclass("NestedBadEnum", [("train", BadEnumConfig)]), "train.optimizer"),
+        (
+            make_dataclass("OptionalBadEnum", [("optimizer", BadOptimizer | None, None)]),
+            "optimizer",
+        ),
+        (make_dataclass("ListBadEnum", [("optimizers", list[BadOptimizer])]), "optimizers"),
+    ],
+)
+def test_enum_names_must_match_values(
+    operation: Callable[[type], object], cls: type, key: str
+) -> None:
+    with pytest.raises(TypeError) as caught:
+        operation(cls)
+    assert str(caught.value) == (
+        f"config field '{key}': enum BadOptimizer members must have name == value"
+    )
 
 
 def test_literal_is_not_supported() -> None:
@@ -297,6 +368,58 @@ def test_hash_stability_and_scientific_sensitivity() -> None:
     assert config_hash(cfg, input_digests=["aaa"]) != config_hash(cfg, input_digests=["bbb"])
 
 
+def test_hash_normalizes_direct_and_composed_configs() -> None:
+    direct = TrainConfig(lr=1)
+    assert config_hash(direct) == config_hash(compose(TrainConfig, overrides=["lr=1"]))
+    assert config_hash(Config(train=direct)) == config_hash(
+        compose(Config, overrides=["train.lr=1"])
+    )
+    assert type(direct.lr) is int
+
+    boolean_config = make_dataclass("BooleanConfig", [("enabled", bool, False)])
+    assert config_hash(boolean_config(enabled=1)) == config_hash(
+        compose(boolean_config, overrides=["enabled=1"])
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        (
+            "lr",
+            "nope",
+            "invalid config key 'lr': Value 'nope' of type 'str' could not be converted to Float",
+        ),
+        ("lr", -1, "train.lr must be positive"),
+    ],
+)
+def test_hash_validation_matches_compose(key: str, value: object, message: str) -> None:
+    cfg = TrainConfig()
+    setattr(cfg, key, value)
+    with pytest.raises(ConfigError) as hashed:
+        config_hash(cfg)
+    with pytest.raises(ConfigError) as composed:
+        compose(TrainConfig, overrides=[f"{key}={value}"])
+    assert str(hashed.value) == str(composed.value) == message
+    assert isinstance(hashed.value.__cause__, (OmegaConfBaseException, ValueError))
+    assert type(hashed.value.__cause__) is type(composed.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    ("cfg", "key"),
+    [
+        (TrainConfig(tasks=MISSING), "tasks"),
+        (Config(train=TrainConfig(tasks=MISSING)), "train.tasks"),
+    ],
+)
+def test_hash_rejects_missing_input_fields(cfg: TrainConfig | Config, key: str) -> None:
+    # Direct instances are normalized as-is, before input fields are excluded.
+    with pytest.raises(ConfigError) as caught:
+        config_hash(cfg)
+    assert str(caught.value) == f"missing mandatory config key '{key}'"
+    assert isinstance(caught.value.__cause__, MissingMandatoryValue)
+
+
 def test_hash_uses_canonical_json_and_ignores_field_order() -> None:
     first = make_dataclass("First", [("z", int, 2), ("a", str, "α")])
     second = make_dataclass("Second", [("a", str, "α"), ("z", int, 2)])
@@ -367,6 +490,11 @@ def test_describe_nested_config() -> None:
     assert rows["timeout"]["help"] is None
     json.dumps(schema)
 
+    tuple_config = make_dataclass("TupleConfig", [("shape", tuple[int, ...], (2, 3))])
+    (tuple_row,) = describe_config(tuple_config)
+    assert tuple_row["type"] == "tuple[int, ...]"
+    assert tuple_row["default"] == [2, 3]
+
 
 def test_describe_required_fields() -> None:
     schema = describe_config(RequiredConfig)
@@ -375,6 +503,19 @@ def test_describe_required_fields() -> None:
     nested = describe_config(NestedRequiredConfig)
     assert [row["name"] for row in nested] == ["required.name", "required.task"]
     assert all(row["required"] and row["default"] is None for row in nested)
+
+
+@pytest.mark.parametrize("default", [field(), field(default=MISSING), field(default="???")])
+def test_describe_required_nested_dataclass(default: object) -> None:
+    cls = make_dataclass("RequiredNested", [("settings", Config, default)])
+    schema = describe_config(cls)
+    assert [row["name"] for row in schema] == [
+        f"settings.{row['name']}" for row in describe_config(Config)
+    ]
+    assert all(row["required"] and row["default"] is None for row in schema)
+    with pytest.raises(ConfigError) as caught:
+        compose(cls)
+    assert str(caught.value) == "missing mandatory config key 'settings'"
 
 
 def test_describe_uses_nested_factory_defaults_and_parent_metadata() -> None:
