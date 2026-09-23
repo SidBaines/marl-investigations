@@ -188,3 +188,17 @@ Manifest produced: `scores.json`.
 | --- | --- | --- | --- | --- | --- | --- |
 | episodes | str \| None | null | false | false | true | EpisodeSet manifest or dir |
 | regrade | bool | false | false | false | false |  |
+
+### view
+
+Render saved multi-agent episodes as one self-contained HTML page.
+
+Manifest produced: `view.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| episodes | str \| None | null | false | false | true | episodes dir (eval rollout output) or its manifest |
+| episode_ids | list[str] | [] | false | false | false |  |
+| max_episodes | int | 20 | false | false | false |  |
+| max_chars_per_call | int | 20000 | false | false | false |  |
+| include_thinking | bool | true | false | false | false |  |
