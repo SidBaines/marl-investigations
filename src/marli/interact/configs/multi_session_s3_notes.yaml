@@ -1,0 +1,6 @@
+protocol: multi_session
+config:
+  sessions: 3
+  carry: notes
+  notes_cap_chars: 4000
+notes: 3 sessions; carry = private notes-to-self only.

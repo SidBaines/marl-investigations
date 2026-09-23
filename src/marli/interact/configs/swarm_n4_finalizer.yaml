@@ -1,0 +1,6 @@
+protocol: swarm
+config:
+  n_agents: 4
+  aggregation: finalizer
+  finalizer: separate
+notes: A fresh finalizer receives all four peers' latest scratchpads and submissions.

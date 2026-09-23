@@ -1,0 +1,17 @@
+name: dapo_math_17k
+hf_id: BytedTsinghua-SIA/DAPO-Math-17k
+split: train
+kind: math
+fields: {id: extra_info.index}
+prompt_path: prompt.0.content
+prompt_transform: dapo_strip_wrapper
+answer_path: reward_model.ground_truth
+answer_format: integer
+license: apache-2.0
+commit_text: false
+dedupe: true
+notes: >-
+  1,791,700 rows; 17,917 unique indices; 17,291 unique stripped prompts before
+  dropping conflicts. Drop all rows of the 11 prompts with conflicting answers;
+  keep the first row when answers agree, leaving 17,280 prompts.
+  Schema and counts verified on the HF Hub 2026-09-23.

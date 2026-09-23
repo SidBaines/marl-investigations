@@ -32,13 +32,13 @@ Loop (token policies; ``supports_delta=True``)::
         ledger.charge(...); parsed = renderer.parse(completion_ids)
         last_term = "stop" if completion_ids[-1] in renderer.stop_token_ids else "length"
         tool_msgs = []
-        async with scheduler.tool_phase(agent_id):  # only if any called tool is shared
-            for call in parsed.tool_calls (in order):  run tool -> tool message (truncated); stop
-            after a control tool
+        for call in parsed.tool_calls (in order):
+            # shared tools run in tool_phase; release it before a blocking tool
+            run tool -> tool message (truncated); stop after a control tool
         apply control effects: submit -> done(submission); end_session -> session boundary;
                                return_report -> done(report)
         no tool calls -> Limits.on_no_tool_call (nudge adds a user message next turn; end_agent;
-        final_text_as_answer)
+        final_text_as_answer; final_text_continue retains a provisional answer)
 
 Details that are part of the contract:
 
@@ -73,7 +73,8 @@ Details that are part of the contract:
 * COMPACT and CARRY reset context and proceed to ACT in the same ticket.
   Context reserves protect the final instruction and prefix; on ctx exhaustion
   pending observations are omitted from that final call to preserve its space.
-* System prompt n_agents is the role's count, or 0 for dynamic roles.
+* System prompt n_agents is the role's count, or 0 for dynamic roles. Budget
+  fields use the protocol-adjusted limits documented by RoleSpec.
 
 Constructor (M1-8)::
 
@@ -89,7 +90,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from contextlib import nullcontext
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
@@ -249,6 +250,10 @@ class AgentRuntime:
             agent_id=info.agent_id,
             role=info.role,
             n_agents=role.count or 0,
+            max_workers_per_call=limits.spawn.max_per_call,
+            max_workers_total=limits.spawn.max_total,
+            worker_tokens=limits.worker.max_gen_tokens,
+            session_tokens=limits.session.max_gen_tokens,
         )
         self.log = MessageLog()
         self.segment_id = ""
@@ -256,7 +261,6 @@ class AgentRuntime:
         self._reason = SegmentStart.SPAWN if info.parent else SegmentStart.START
         self._carry_from: str | None = None
         self._carry = ""
-        self._tail: list[int] = []
         self._fresh = True
         self._ctx_reserve = 0
         self._last_term = "stop"
@@ -271,6 +275,12 @@ class AgentRuntime:
         self.report: str | None = None
         self.error: str | None = None
         self.ended_by = "end_agent"
+        self._stop_reason: str | None = None
+
+    def request_stop(self, reason: str) -> None:
+        """Let an in-flight turn finish; honor the first stop at the next turn."""
+        if self._stop_reason is None:
+            self._stop_reason = reason
 
     def _sampling_spec(self, max_tokens: int) -> SamplingSpec:
         return SamplingSpec(
@@ -303,6 +313,12 @@ class AgentRuntime:
 
     def _initial(self, delivery: str | None) -> None:
         text = "\n\n".join(part for part in (self.first_message, self._carry, delivery) if part)
+        sessions = self.limits.session.max_sessions
+        if sessions > 1:
+            label = f"[Session {self._session + 1} of {sessions}]"
+            if self._session + 1 == sessions:
+                label += " — final session: you must submit before it ends"
+            text = label + "\n\n" + text
         self.log = MessageLog([Msg("user", text)])
         if self.renderer and self.limits.on_exhaust == "force_final":
             # An empty assistant measures the unsampled close and the next header
@@ -317,7 +333,11 @@ class AgentRuntime:
                 getattr(self.limits, self.role.limits_key).final_reserve
                 + len(final)
                 - len(base)
-                + len(self.renderer.forced_tool_prefix(self._final_tool))
+                + len(
+                    self.renderer.suppress_thinking_prefix()
+                    if self._text_final
+                    else self.renderer.forced_tool_prefix(self._final_tool)
+                )
             )
         self._last_term = "stop"
 
@@ -326,7 +346,16 @@ class AgentRuntime:
         return "return_report" if self.role.limits_key == "worker" else "submit"
 
     @property
+    def _text_final(self) -> bool:
+        return (
+            self.limits.on_no_tool_call == "final_text_continue"
+            and self._final_tool not in self.tools
+        )
+
+    @property
     def _final_instruction(self) -> str:
+        if self._session_pending and self._session + 1 == self.limits.session.max_sessions:
+            return "This is your last session. Submit your final answer now."
         return (
             "You have run out of budget. Return your report now."
             if self.role.limits_key == "worker"
@@ -347,7 +376,17 @@ class AgentRuntime:
         if carry.truncated:
             self.ledger.limit_hit(self.info.agent_id, "context.carry_truncated")
         self._carry = carry.text
-        self._tail = self.context.tail_prefill(self._buffer())
+        if reason == SegmentStart.SESSION and self.context.spec.kind == "tail" and self.renderer:
+            tail = self.context.tail_text(
+                [
+                    call.completion_ids
+                    for call in self.recorder.calls_of(self.info.agent_id)
+                    if call.session_idx == self._session
+                ],
+                self.renderer,
+            )
+            if tail:
+                self._carry = "\n\n".join(part for part in (self._carry, tail) if part)
         self._carry_from = self.segment_id or None
         self.segment_id = ""
         self._reason = reason
@@ -378,13 +417,10 @@ class AgentRuntime:
         if self.renderer is None:
             return []
         if self._fresh or not self.renderer.supports_delta:
-            return (
-                self.renderer.initial(
-                    self.system_prompt,
-                    self.tool_specs,
-                    self.log.messages + messages,
-                )
-                + self._tail
+            return self.renderer.initial(
+                self.system_prompt,
+                self.tool_specs,
+                self.log.messages + messages,
             )
         return self.renderer.continuation(self._last_term, messages)
 
@@ -408,8 +444,6 @@ class AgentRuntime:
     async def run(self) -> AgentResult:
         try:
             await self._loop()
-            if self.role.limits_key == "worker" and self.report is None and self.error is None:
-                self.report = f"[worker {self.info.agent_id}: no report]"
             return AgentResult(
                 self.info.agent_id,
                 self.submission,
@@ -417,6 +451,10 @@ class AgentRuntime:
                 self.ended_by,
                 self._session + 1,
             )
+        except asyncio.CancelledError:
+            if "episode.max_wall_s" in self.ledger.limits_hit().get("_episode", ()):
+                self.ended_by = "max_wall_s"
+            raise
         finally:
             self.recorder.add_event(
                 EventKind.DONE,
@@ -441,6 +479,19 @@ class AgentRuntime:
             messages = [] if fresh else self._observations(delivery)
             reads = self._reads + delivered_reads
             delta = self._prompt(messages)
+            if self._stop_reason is not None:
+                if self.submission is None and self.limits.on_exhaust == "force_final":
+                    await self._harness_call(
+                        ticket,
+                        Purpose.FINAL,
+                        "The protocol has stopped this agent. Submit your final answer now.",
+                        messages,
+                        reads,
+                        forced=True,
+                    )
+                if self.error is None:
+                    self.ended_by = self._stop_reason
+                return
             compact = not fresh and self.context.should_compact(self._prompt_len(delta))
             # A discarded delta cannot exhaust context before compaction gets a chance.
             allocation = self._allocate(
@@ -498,7 +549,11 @@ class AgentRuntime:
                     "episode.max_ticks": "max_ticks",
                     "ctx.max_ctx": "ctx",
                 }.get(allocation.exhausted, "budget")
-                if self.limits.on_exhaust == "force_final":
+                if (
+                    self.limits.on_exhaust == "force_final"
+                    and self.submission is None
+                    and self.report is None
+                ):
                     worker = self.role.limits_key == "worker"
                     if self.ended_by == "ctx":
                         messages = []
@@ -527,8 +582,13 @@ class AgentRuntime:
             if parsed.tool_calls:
                 self._n_nudges = 0
             elif self.limits.on_no_tool_call == "final_text_as_answer":
-                self.submission, self.ended_by = parsed.content, "submit"
+                if "return_report" in self.tools:
+                    self.report, self.ended_by = parsed.content, "report"
+                else:
+                    self.submission, self.ended_by = parsed.content, "submit"
                 return
+            elif self.limits.on_no_tool_call == "final_text_continue":
+                self.submission = parsed.content
             elif self.limits.on_no_tool_call == "end_agent":
                 return
             elif self._n_nudges >= self.limits.max_nudges:
@@ -537,7 +597,12 @@ class AgentRuntime:
             else:
                 self._n_nudges += 1
                 self._nudges = [
-                    Msg("user", "Please use a tool to act or submit your final answer.")
+                    Msg(
+                        "user",
+                        "Please use a tool or call return_report with your findings."
+                        if "return_report" in self.tools
+                        else "Please use a tool to act or submit your final answer.",
+                    )
                 ]
 
     def _apply_control(self, control: dict[str, Any]) -> bool:
@@ -578,7 +643,7 @@ class AgentRuntime:
             # (Qwen3.5 closes the prefilled think block; Harmony opens the commentary
             # channel), so only summary calls use suppress_thinking_prefix — adding both
             # would emit e.g. a second </think>.
-            if purpose in (Purpose.FINAL, Purpose.REPORT):
+            if purpose in (Purpose.FINAL, Purpose.REPORT) and not self._text_final:
                 prefix = self.renderer.forced_tool_prefix(
                     "submit" if purpose == Purpose.FINAL else "return_report",
                 )
@@ -601,6 +666,8 @@ class AgentRuntime:
         )
         ended_by = self.ended_by
         self._apply_control(control)
+        if parsed and self._text_final and purpose == Purpose.FINAL and not parsed.tool_calls:
+            self.submission = parsed.content
         if forced and purpose in (Purpose.FINAL, Purpose.REPORT) and not self.error:
             self.ended_by = ended_by
         return parsed
@@ -625,7 +692,6 @@ class AgentRuntime:
                 self._carry_from = self.segment_id or self._carry_from
                 reason = self._reason if self.renderer.supports_delta else SegmentStart.RERENDER
                 self._new_segment(delta + prefix, reason)
-        self._tail = []
         self._tool_messages, self._reads, self._nudges = [], [], []
         prompt_len = len(self._buffer())
         call_id = f"{self.recorder.episode_id}/{self.info.agent_id}/c{self._call_index}"
@@ -724,7 +790,14 @@ class AgentRuntime:
         control: dict[str, Any] = {}
         try:
             if parsed and purpose not in (Purpose.COMPACT, Purpose.CARRY):
-                tool_records, control = await self._execute_tools(parsed, ticket, call_id)
+                tool_records, control = await self._execute_tools(
+                    parsed,
+                    ticket,
+                    call_id,
+                    publish_seq=seq
+                    if purpose == Purpose.ACT and self.role.publish_final_text and parsed.content
+                    else None,
+                )
         finally:
             self.recorder.add_call(
                 Call(
@@ -761,16 +834,19 @@ class AgentRuntime:
         parsed: ParsedTurn,
         ticket: Ticket,
         call_id: str,
+        *,
+        publish_seq: int | None = None,
     ) -> tuple[list[ToolCallRecord], dict[str, Any]]:
         records: list[ToolCallRecord] = []
         control: dict[str, Any] = {}
-        shared = any(
+        shared = publish_seq is not None or any(
             call.ok and call.name in self.tools and self.tools[call.name].shared
             for call in parsed.tool_calls
         )
-        phase = self.scheduler.tool_phase(self.info.agent_id) if shared else nullcontext()
         stopped = False
-        async with phase:
+        async with AsyncExitStack() as phase:
+            if shared:
+                await phase.enter_async_context(self.scheduler.tool_phase(self.info.agent_id))
             for index, call in enumerate(parsed.tool_calls):
                 tool = self.tools.get(call.name) if call.ok else None
                 seq = self.recorder.add_event(
@@ -806,6 +882,17 @@ class AgentRuntime:
                         f"error: unknown tool {call.name}", f"unknown tool {call.name}"
                     )
                 else:
+                    # Async joins must release the episode mutex. Lockstep has
+                    # a single ordered phase per ticket: block() retires it when
+                    # workers start, while a rejected spawn retains seat order.
+                    if getattr(tool, "blocking", False) and self.scheduler.kind == "async":
+                        await phase.aclose()
+                        shared = False
+                    elif tool.shared and not shared:
+                        await phase.enter_async_context(
+                            self.scheduler.tool_phase(self.info.agent_id)
+                        )
+                        shared = True
                     result = await run_tool(tool, ctx, cast(dict[str, Any], call.arguments))
                     stopped = tool.control and result.error is None
                 writes = [
@@ -858,4 +945,25 @@ class AgentRuntime:
                     index=index,
                     error=result.error,
                 )
+            if publish_seq is not None:
+                if not shared:
+                    await phase.enter_async_context(self.scheduler.tool_phase(self.info.agent_id))
+                write = self.workspace.write(
+                    self.info.agent_id,
+                    "scratchpad",
+                    parsed.content,
+                    mode="overwrite",
+                    tick=ticket.tick,
+                    seq=publish_seq,
+                )
+                if not self.workspace.staged:
+                    self.recorder.add_write(write)
+                    self.recorder.add_event(
+                        EventKind.COMMIT,
+                        write.writer,
+                        ticket.tick,
+                        key=write.key,
+                        version=write.version,
+                    )
+                self.scheduler.notify_commit(self.info.agent_id)
         return records, control

@@ -1,0 +1,9 @@
+name: polaris_53k
+hf_id: POLARIS-Project/Polaris-Dataset-53K
+split: train
+kind: math
+fields: {prompt: problem, answer: answer, difficulty: difficulty}
+answer_format: latex
+license: apache-2.0
+commit_text: false
+notes: Difficulty is a 7B model pass rate, e.g. 7/8. Schema verified on the HF Hub 2026-09-23.

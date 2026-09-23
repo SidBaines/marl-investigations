@@ -17,7 +17,7 @@ from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TextIO, get_args, get_type_hints
+from typing import Any, TextIO
 
 from marli import config, handles
 from marli.errors import ConfigError, MarliError
@@ -61,7 +61,57 @@ class VerbSpec:
     help: str
 
 
-VERBS: dict[str, VerbSpec] = {}
+VERBS: dict[str, VerbSpec] = {
+    "data build": VerbSpec(
+        "data build",
+        "marli.data.build:build",
+        "marli.data.build:BuildConfig",
+        "taskset.json",
+        "Build a taskset from a source, optionally excluding overlapping prompts.",
+    ),
+    "data filter": VerbSpec(
+        "data filter",
+        "marli.data.filter:filter",
+        "marli.data.filter:FilterConfig",
+        "taskset.json",
+        "Filter a taskset by pass rates from saved rollouts.",
+    ),
+    "eval rollout": VerbSpec(
+        "eval rollout",
+        "marli.eval.rollout:rollout",
+        "marli.eval.rollout:RolloutConfig",
+        "episodes.json",
+        "Sample resumable episodes with bounded concurrency and a spend guard.",
+    ),
+    "eval score": VerbSpec(
+        "eval score",
+        "marli.eval.score:score",
+        "marli.eval.score:ScoreConfig",
+        "scores.json",
+        "Score saved episodes; optionally regrade with the environment verifier.",
+    ),
+    "eval report": VerbSpec(
+        "eval report",
+        "marli.eval.report:report",
+        "marli.eval.report:ReportConfig",
+        "report.json",
+        "Report Scores inputs with compute and paired task statistics.",
+    ),
+    "eval grid": VerbSpec(
+        "eval grid",
+        "marli.eval.grid:grid",
+        "marli.eval.grid:GridConfig",
+        "report.json",
+        "Run labelled rollout/score cells and combine their compute-aware report.",
+    ),
+    "view": VerbSpec(
+        "view",
+        "marli.viewer.verb:view",
+        "marli.viewer.verb:ViewConfig",
+        "view.json",
+        "Render saved multi-agent episodes as one self-contained HTML page.",
+    ),
+}
 BUILTINS: tuple[str, ...] = ("list", "describe", "inspect", "status")
 
 
@@ -112,23 +162,66 @@ class VerbResult:
     warnings: list[str]
 
 
-def _check_input_fields(cls: type, prefix: str = "", ancestors: tuple[type, ...] = ()) -> None:
-    if cls in ancestors:
-        return
-    hints = get_type_hints(cls)
-    for field in dataclasses.fields(cls):
-        name = f"{prefix}{field.name}"
-        if prefix and field.metadata.get("input"):
-            raise ConfigError(
-                f"nested input field {name!r} is not supported; use a top-level field"
-            )
-        pending = [hints[field.name]]
-        while pending:
-            annotation = pending.pop()
-            if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
-                _check_input_fields(annotation, f"{name}.", (*ancestors, cls))
+def input_paths(value: str) -> dict[str, str]:
+    """Parse one manifest or label=path entries separated by os.pathsep."""
+    if "=" not in value or Path(value).exists():
+        return {"": value}
+    entries: dict[str, str] = {}
+    for entry in value.split(os.pathsep):
+        label, sep, path = entry.partition("=")
+        if not sep or not label or not path or label in entries:
+            raise ConfigError("inputs require unique label=path entries joined by os.pathsep")
+        entries[label] = path
+    return entries
+
+
+def resolve_inputs(value: Any, name: str = "") -> tuple[Any, list[str]]:
+    """Copy nested configuration and hash each input's manifest at its field location.
+
+    Runtime subtrees belong to their owning child run, so their inputs do not
+    enter the parent's identity. Dict keys and list indices preserve placement.
+    """
+    digests: list[str] = []
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        changes = {}
+        for field in dataclasses.fields(value):
+            item = getattr(value, field.name)
+            key = f"{name}.{field.name}" if name else field.name
+            if field.metadata.get("runtime"):
+                continue
+            if field.metadata.get("input") and item is not None:
+                if isinstance(item, (str, Path)):
+                    paths = input_paths(str(item)) if isinstance(item, str) else {"": item}
+                    resolved = {}
+                    for label, path in paths.items():
+                        manifest = input_manifest(path, key)
+                        location = f"{key}[{label!r}]" if label else key
+                        digests.append(f"{location}={handles.sha256_file(manifest)}")
+                        resolved[label] = str(manifest)
+                    if isinstance(item, Path):
+                        changes[field.name] = Path(resolved[""])
+                    elif "" in resolved:
+                        changes[field.name] = resolved[""]
+                    else:
+                        changes[field.name] = os.pathsep.join(
+                            f"{label}={path}" for label, path in resolved.items()
+                        )
+                else:
+                    raise ConfigError(f"input field {key!r} requires a manifest path")
             else:
-                pending.extend(get_args(annotation))
+                changes[field.name], nested = resolve_inputs(item, key)
+                digests.extend(nested)
+        return dataclasses.replace(value, **changes), digests
+    if isinstance(value, (list, tuple, dict)):
+        items = value.items() if isinstance(value, dict) else enumerate(value)
+        copied = {}
+        for key, item in items:
+            copied[key], nested = resolve_inputs(item, f"{name}[{key!r}]")
+            digests.extend(nested)
+        if isinstance(value, dict):
+            return copied, digests
+        return type(value)(copied.values()), digests
+    return value, digests
 
 
 def input_manifest(value: str | Path, name: str) -> Path:
@@ -159,35 +252,42 @@ def input_manifest(value: str | Path, name: str) -> Path:
 async def run_verb(
     verb: str | VerbSpec, cfg: Any, *, out: str | Path, force: bool = False
 ) -> VerbResult:
-    """Resolve inputs and own the run until its completion manifest is durable."""
+    """Resolve inputs and own the run until its completion manifest is durable.
+
+    A verb module may define ``should_resume(handle, cfg) -> bool`` to reopen a
+    complete run, after RunDir has checked the unchanged configuration hash.
+    """
     spec = get_verb(verb) if isinstance(verb, str) else verb
     fn, cls = resolve(spec)
     if not isinstance(cfg, cls):
         raise TypeError(f"{spec.name} requires {cls.__name__}, got {type(cfg).__name__}")
-    _check_input_fields(type(cfg))
-    replacements = {}
-    digests = []
-    for field in dataclasses.fields(cfg):
-        value = getattr(cfg, field.name)
-        if field.metadata.get("input") and value is not None:
-            manifest = input_manifest(value, field.name)
-            replacements[field.name] = manifest if isinstance(value, Path) else str(manifest)
-            digests.append(f"{field.name}={handles.sha256_file(manifest)}")
-    cfg = dataclasses.replace(cfg, **replacements)
+    cfg, digests = resolve_inputs(cfg)
     h = config.config_hash(cfg, input_digests=digests)
     if out == "auto":
         out = Path(os.environ.get("MARLI_RUNS") or "runs") / spec.name.replace(" ", "-") / h[:12]
     out = Path(out).resolve()
+    if spec.name == "eval grid" and force:
+        from marli.eval.grid import force_changed_cells
+
+        cfg = force_changed_cells(cfg, out)
+        # A grid owns shared cell storage: --force never wipes its directory.
+        force = False
     caught: list[str] = []
+    parent_warnings = _warning_collector.get()
     token = _warning_collector.set(caught)
     try:
         with RunDir(
             out, kind=spec.name, manifest_name=spec.manifest, config_hash=h, force=force
         ) as run:
-            opening_status = run.status
-            if opening_status is RunStatus.COMPLETE:
+            if run.status is RunStatus.COMPLETE:
                 handle = handles.load_any(out / spec.manifest)
-            else:
+                should_resume = getattr(
+                    importlib.import_module(spec.fn.split(":")[0]), "should_resume", None
+                )
+                if should_resume is not None and should_resume(handle, cfg):
+                    run.reopen()
+            opening_status = run.status
+            if opening_status is not RunStatus.COMPLETE:
                 config.save(cfg, out / "config.yaml")
                 handle = await fn(cfg, run)
                 returned_manifest = getattr(handle, "MANIFEST", None)
@@ -198,9 +298,13 @@ async def run_verb(
                         f"with manifest {returned_manifest!r}"
                     )
                 handle = run.finalize(handle)
+            caught.extend(handle.meta.get("warnings", []))
     finally:
         _warning_collector.reset(token)
         caught = list(dict.fromkeys(caught))
-        for warning in caught:
-            logging.getLogger("marli").warning("%s", warning)
+        if parent_warnings is not None:
+            parent_warnings.extend(caught)
+        else:
+            for warning in caught:
+                logging.getLogger("marli").warning("%s", warning)
     return VerbResult(handle, opening_status, handle.manifest_path, h, caught)

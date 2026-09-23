@@ -1,0 +1,6 @@
+protocol: multi_session
+config:
+  sessions: 3
+  carry: tail
+  tail_tokens: 2048
+notes: 3 sessions ending on budget; carry = last 2048 tokens of parsed replies as text.

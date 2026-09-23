@@ -70,4 +70,4 @@ class Env(ABC):
         return None
 
 
-ENVS: Any = None  # FnRegistry("envs"): name -> factory(env_config, task) -> Env   (M2-5)
+from marli.envs.registry import ENVS as ENVS  # noqa: E402

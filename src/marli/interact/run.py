@@ -37,7 +37,8 @@ Lockstep records use logical (tick, seat_key, in-agent) order, independently
 of generation latency. Sequence references are normalized together before
 metrics are computed; async records retain their observed order. Replayability
 requires seated policies to declare deterministic=True (absent means False).
-System prompt templates use the role's count for n_agents, or 0 for dynamic roles.
+System prompt templates use the role's count for n_agents, or 0 for dynamic roles,
+and the protocol-adjusted session and worker budgets documented in RoleSpec.
 """
 
 from __future__ import annotations
@@ -100,7 +101,13 @@ def _validate(spec: EpisodeSpec) -> None:
     for role in roles:
         try:
             role.system_prompt.format(
-                agent_id=f"{role.role}0", role=role.role, n_agents=role.count or 0
+                agent_id=f"{role.role}0",
+                role=role.role,
+                n_agents=role.count or 0,
+                max_workers_per_call=spec.limits.spawn.max_per_call,
+                max_workers_total=spec.limits.spawn.max_total,
+                worker_tokens=spec.limits.worker.max_gen_tokens,
+                session_tokens=spec.limits.session.max_gen_tokens,
             )
         except (KeyError, ValueError, IndexError, AttributeError) as exc:
             raise ConfigError(f"role {role.role!r}: invalid system_prompt template: {exc}") from exc
@@ -143,6 +150,7 @@ def _validate(spec: EpisodeSpec) -> None:
 
 async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]:
     """Validate before spending, isolate backend failures, and always close the env."""
+    spec = replace(spec, limits=spec.protocol.adjust_limits(spec.limits))
     _validate(spec)
     clock = spec.clock if spec.clock is not None else SystemClock()
     group_id = spec.group_id or f"{spec.task.task_id}/{spec.config_hash[:8]}"
@@ -156,7 +164,8 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
             )
             for role in roles
         },
-        delivery=spec.delivery,
+        # A protocol preset owns delivery when it declares one.
+        delivery=getattr(spec.protocol, "delivery", None) or spec.delivery,
         staged=spec.schedule == "lockstep",
         notes_cap_chars=max((role.context.notes_cap_chars for role in roles), default=4000),
     )
@@ -208,10 +217,12 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
         errors.extend(
             runtime.error for runtime in io.runtimes.values() if runtime.error is not None
         )
+        submissions = {agent_id: runtime.submission for agent_id, runtime in io.runtimes.items()}
+        submissions.update(outcome.submissions)
         grades = {
-            agent_id: await spec.env.grade(runtime.submission)
-            for agent_id, runtime in io.runtimes.items()
-            if runtime.submission is not None
+            agent_id: await spec.env.grade(answer)
+            for agent_id, answer in submissions.items()
+            if answer is not None or agent_id in outcome.submissions
         }
         grades["_system"] = await spec.env.grade(outcome.final_answer)
         for key, hits in ledger.limits_hit().items():
