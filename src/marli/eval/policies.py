@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
@@ -78,6 +79,13 @@ async def build_policies(
     specs: dict[str, PolicySpec], *, spend: SpendGuard
 ) -> tuple[dict[str, Policy], dict[str, Callable[[], DeltaRenderer]]]:
     resolved = {name: resolve_spec(spec) for name, spec in specs.items()}
+    for name, (_, model, renderer) in resolved.items():
+        if model and renderer and renderer != model.renderer:
+            warnings.warn(
+                f"policy {name!r}: renderer {renderer!r} disagrees with model "
+                f"{model.name!r} default {model.renderer!r}",
+                stacklevel=2,
+            )
     policies: dict[str, Policy] = {}
     renderers: dict[str, Callable[[], DeltaRenderer]] = {}
     for name, (ref, model, renderer) in resolved.items():

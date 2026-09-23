@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -12,7 +13,8 @@ from marli.config import input_field, runtime_field, to_dict
 from marli.envs.registry import make_env
 from marli.errors import BudgetExceededError, ConfigError
 from marli.eval.policies import PolicySpec, build_policies, resolve_spec
-from marli.handles import Handle, InputRef, atomic_write_text, register_handle
+from marli.eval.store import compact, episode_id, read_episodes
+from marli.handles import Handle, InputRef, register_handle
 from marli.interact import records
 from marli.interact.agent import SamplingOverrides
 from marli.interact.configs import build_protocol, resolve_protocol
@@ -38,6 +40,7 @@ class RolloutConfig:
     run_seed: int = 0
     max_tasks: int | None = None
     record_tokens: bool = False
+    retry_failed: bool = runtime_field(True, help="rerun non-ok episodes on resume")
     concurrency: int = runtime_field(8, help="concurrent episodes")
     max_usd: float | None = runtime_field(None, help="spend guard for this run")
 
@@ -77,6 +80,11 @@ class EpisodeSet(Handle):
         return {"n": self.n, "n_failed": self.n_failed, "cost_usd": self.cost_usd}
 
 
+def should_resume(handle: EpisodeSet, cfg: RolloutConfig) -> bool:
+    """Completed sampling remains retryable while transient failures remain."""
+    return cfg.retry_failed and handle.n_failed > 0
+
+
 async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
     if cfg.tasks is None:
         raise ConfigError("rollout requires tasks")
@@ -86,6 +94,7 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
         raise ConfigError("TaskSet task_id values must be unique")
     name, _, protocol_config = resolve_protocol(cfg.protocol, cfg.protocol_config)
     protocol = build_protocol(cfg.protocol, cfg.protocol_config)
+    effective_limits = protocol.adjust_limits(cfg.limits)
     unknown_policies = set(cfg.seating.values()) - cfg.policies.keys()
     if unknown_policies:
         raise ConfigError(f"seating references unknown policies: {sorted(unknown_policies)}")
@@ -94,19 +103,12 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
             raise ConfigError(f"unseated role or unknown policy for {role.role!r}")
     for spec in cfg.policies.values():
         _, model, _ = resolve_spec(spec)
-        if model and cfg.limits.ctx.max_ctx > model.max_ctx:
+        if model and effective_limits.ctx.max_ctx > model.max_ctx:
             raise ConfigError(f"ctx.max_ctx exceeds model {model.name!r} max_ctx")
 
-    done = run.done_keys("episodes.jsonl", "episode_id")
-    saved = run.read_rows("episodes.jsonl")
-    # A crash between the token append and episode append leaves an orphan sidecar row.
-    if cfg.record_tokens:
-        tokens = {row["episode_id"]: row for row in run.read_rows("tokens.jsonl")}
-        atomic_write_text(
-            run.path("tokens.jsonl"),
-            "".join(json.dumps(tokens[row["episode_id"]]) + "\n" for row in saved),
-        )
-    run.path("episodes.jsonl").touch(exist_ok=True)
+    saved = compact(run, record_tokens=cfg.record_tokens)
+    latest = {row["episode_id"]: row for row in saved}
+    done = {key for key, row in latest.items() if row["ok"] or not cfg.retry_failed}
     recorded_cost = sum(call["usage"]["cost_usd"] for row in saved for call in row["calls"])
     previous_spend = recorded_cost
     if run.path("progress.json").exists():
@@ -116,29 +118,42 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
     spend = SpendGuard(cfg.max_usd)
     spend.charge(previous_spend, "previous attempts")
     policies, renderers = await build_policies(cfg.policies, spend=spend)
+    resolved_specs = {}
+    for key, spec in cfg.policies.items():
+        ref, model, renderer = resolve_spec(spec)
+        resolved_specs[key] = {
+            **to_dict(spec),
+            "ref": str(ref),
+            "model": model.name if model else ref.target,
+            "renderer": renderer or getattr(policies[key], "renderer_name", None),
+        }
     sampling = {
         role: SamplingOverrides(**to_dict(cfg.policies[policy].sampling))
         for role, policy in cfg.seating.items()
     }
     total = len(tasks) * cfg.episodes_per_task
-    failures = sum(not row["ok"] for row in saved)
     backend = ",".join(sorted({parse_ref(spec.ref).kind for spec in cfg.policies.values()}))
     pending = iter(
         (task, index)
         for task in tasks
         for index in range(cfg.episodes_per_task)
-        if f"{task.task_id}/{run.config_hash[:8]}/e{index}" not in done
+        if episode_id(task.task_id, run.config_hash, index) not in done
     )
     semaphore = asyncio.Semaphore(cfg.concurrency)
     stopped: Exception | None = None
 
     def progress() -> None:
         run.write_progress(
-            {"done": len(done), "total": total, "failures": failures, "spend": spend.summary()}
+            {
+                "done": len(done),
+                "total": total,
+                "failures": sum(not row["ok"] for row in latest.values()),
+                "spend": spend.summary(),
+            }
         )
 
     async def worker() -> None:
-        nonlocal failures, stopped
+        nonlocal stopped
         while stopped is None:
             item = next(pending, None)
             if item is None:
@@ -166,11 +181,18 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
                             sampling=sampling,
                         )
                     )
+                    if not episode.ok and any(
+                        "BudgetExceededError" in error or "budget limit $" in error
+                        for error in episode.errors
+                    ):
+                        raise BudgetExceededError("; ".join(episode.errors))
+                    # Preserve charged retries even if the process dies during the append.
+                    progress()
                     records.write_episode(
                         run.append_row, episode, buffers, record_tokens=cfg.record_tokens
                     )
                     done.add(episode.episode_id)
-                    failures += not episode.ok
+                    latest[episode.episode_id] = {"ok": episode.ok}
                     progress()
                     spend.check(0, "completed episode")
             except Exception as exc:
@@ -191,11 +213,15 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
     progress()
     if stopped is not None:
         raise stopped
+    saved = compact(run, record_tokens=cfg.record_tokens)
+    failures = sum(not row["ok"] for row in saved)
+    if failures:
+        warnings.warn(f"rollout has {failures} failed episodes; resume to retry", stacklevel=2)
     usage: dict[str, float] = {
         key: 0.0
         for key in ("prompt_tokens", "completion_tokens", "cached_prompt_tokens", "cost_usd")
     }
-    for episode, _ in records.read_episodes(run.out, with_tokens=False):
+    for episode in read_episodes(run.out):
         for call in episode.calls:
             for key in ("prompt_tokens", "completion_tokens", "cached_prompt_tokens", "cost_usd"):
                 usage[key] = usage.get(key, 0.0) + (getattr(call.usage, key) or 0)
@@ -204,7 +230,7 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
         inputs=(InputRef.of(taskset),),
         episodes="episodes.jsonl",
         tokens="tokens.jsonl" if cfg.record_tokens else None,
-        n=len(done),
+        n=len(saved),
         n_failed=failures,
         protocol=name,
         protocol_config=protocol_config,
@@ -218,6 +244,10 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
         cost_usd=max(spend.spent, usage.get("cost_usd", 0.0)),
         meta={
             "seating": cfg.seating,
-            "policy_specs": {k: to_dict(v) for k, v in cfg.policies.items()},
+            "policy_specs": resolved_specs,
+            "limits": to_dict(effective_limits),
+            "warnings": [f"rollout has {failures} failed episodes; resume to retry"]
+            if failures
+            else [],
         },
     )

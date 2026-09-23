@@ -11,8 +11,8 @@ from marli.config import input_field
 from marli.envs.registry import make_env
 from marli.errors import ConfigError
 from marli.eval.rollout import EpisodeSet
+from marli.eval.store import read_episodes
 from marli.handles import Handle, InputRef, register_handle
-from marli.interact.records import read_episodes
 from marli.interact.types import Episode
 from marli.rundir import RunDir
 from marli.tasks.taskset import TaskSet, read_tasks
@@ -45,7 +45,7 @@ async def score(cfg: ScoreConfig, run: RunDir) -> Scores:
     taskset = TaskSet.load(source.taskset)
     tasks = {task.task_id: task for task in read_tasks(taskset)}
     by_task: dict[str, list[Episode]] = defaultdict(list)
-    for episode, _ in read_episodes(source.root, with_tokens=False):
+    for episode in read_episodes(source.root):
         by_task[episode.task_id].append(episode)
     done = run.done_keys("scores.jsonl", "episode_id")
     run.path("scores.jsonl").touch(exist_ok=True)
@@ -54,7 +54,12 @@ async def score(cfg: ScoreConfig, run: RunDir) -> Scores:
         sort_keys=True,
     )
     harness = json.dumps(
-        {"taskset": taskset.sha256(), "env": source.env, "env_config": source.env_config},
+        {
+            "taskset": taskset.sha256(),
+            "env": source.env,
+            "env_config": source.env_config,
+            "regrade": cfg.regrade,
+        },
         sort_keys=True,
     )
     for task_id, episodes in sorted(by_task.items()):
@@ -99,6 +104,7 @@ async def score(cfg: ScoreConfig, run: RunDir) -> Scores:
                     "scores.jsonl",
                     {
                         **episode.metrics,
+                        "cost_usd": sum(call.usage.cost_usd for call in episode.calls),
                         "task_id": task_id,
                         "episode_id": episode.episode_id,
                         "episode_idx": episode.episode_idx,
@@ -119,4 +125,10 @@ async def score(cfg: ScoreConfig, run: RunDir) -> Scores:
         finally:
             if needs_env:
                 await env.teardown()
-    return Scores(root=run.out, inputs=(InputRef.of(source),), rows="scores.jsonl", n=len(done))
+    return Scores(
+        root=run.out,
+        inputs=(InputRef.of(source),),
+        rows="scores.jsonl",
+        n=len(done),
+        meta={"regrade": cfg.regrade, "cost_usd": source.cost_usd},
+    )
