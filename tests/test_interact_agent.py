@@ -726,3 +726,121 @@ async def test_role_permissions_restrict_reads() -> None:
     episode, _ = await run_episode(spec)
     assert not any(read.writer == "solver0" for call in episode.calls for read in call.reads)
     assert "secret" not in spec.policies["script"].calls[-1].prompt_text
+
+
+@pytest.mark.parametrize("schedule", ["lockstep", "async"])
+async def test_publish_final_text_records_visible_content_once_per_act(schedule: str) -> None:
+    protocol = RuntimeProtocol(count=2)
+    protocol.role = replace(protocol.role, publish_final_text=True)
+    spec = spec_for(
+        {
+            f"solver{i}": [
+                Turn(f"visible {i}", thinking=f"private {i}"),
+                Turn(f"revised {i}", tool_calls=(("submit", {"answer": "5"}),)),
+            ]
+            for i in range(2)
+        },
+        protocol,
+    )
+    spec.schedule = schedule
+    episode, _ = await run_episode(spec)
+    assert episode.ok
+    assert len([event for event in episode.events if event.kind == EventKind.COMMIT]) == 4
+    for i in range(2):
+        writes = [write for write in episode.workspace_log if write.writer == f"solver{i}"]
+        assert [write.content for write in writes] == [f"visible {i}", f"revised {i}"]
+        assert [write.version for write in writes] == [1, 2]
+        assert all("private" not in write.content for write in writes)
+        if schedule == "lockstep":
+            calls = [call for call in episode.calls if call.agent_id == f"solver{i}"]
+            assert calls[0].reads == ()
+            assert [(read.writer, read.version) for read in calls[1].reads] == [
+                (f"solver{1 - i}", 1)
+            ]
+
+
+async def test_publish_final_text_skips_empty_content_and_forced_calls() -> None:
+    protocol = RuntimeProtocol()
+    protocol.role = replace(protocol.role, publish_final_text=True)
+    limits = Limits(agent=AgentLimits(max_calls=1))
+    spec = spec_for({}, protocol, limits=limits)
+    renderer = FakeRenderer()
+
+    def script(ctx: ScriptCtx) -> list[int]:
+        if ctx.meta.purpose == "act":
+            return renderer.encode_completion(thinking="unpublished reasoning")
+        return (
+            renderer.encode_text('{"answer": "5"}}')
+            + [S["/call"]]
+            + renderer.encode_completion("final-only content")
+        )
+
+    spec.policies["script"] = ScriptedPolicy("script", renderer, script)
+    episode, _ = await run_episode(spec)
+    assert episode.outcome.final_answer == "5"
+    assert not episode.workspace_log
+    assert not any(event.kind == EventKind.COMMIT for event in episode.events)
+
+
+@pytest.mark.parametrize("on_exhaust", ["force_final", "none"])
+async def test_stop_request_before_first_turn_respects_exhaustion(on_exhaust: str) -> None:
+    class StoppedProtocol(RuntimeProtocol):
+        async def run(self, io: SystemIO) -> Outcome:
+            handle = await io.start_agent(
+                "solver", agent_id="solver0", seat_key=("solver", 0), first_message=io.task.prompt
+            )
+            io.stop(handle, "consensus")
+            io.stop(handle, "later reason")
+            result = await handle
+            self.results = [result]
+            io.stop(handle, "already done")
+            return Outcome(result.submission, {result.agent_id: result.submission}, "test")
+
+    protocol = StoppedProtocol()
+    spec = spec_for({}, protocol, limits=Limits(on_exhaust=on_exhaust))
+    renderer = FakeRenderer()
+
+    def script(ctx: ScriptCtx) -> list[int]:
+        assert ctx.meta.purpose == "final"
+        return renderer.encode_text('{"answer": "5"}}') + [S["/call"], S["eot"]]
+
+    spec.policies["script"] = ScriptedPolicy("script", renderer, script)
+    episode, _ = await run_episode(spec)
+    assert episode.ok and protocol.results[0].ended_by == "consensus"
+    assert len(episode.calls) == (1 if on_exhaust == "force_final" else 0)
+    assert episode.outcome.final_answer == ("5" if on_exhaust == "force_final" else None)
+    if episode.calls:
+        assert episode.calls[0].forced and episode.calls[0].purpose == Purpose.FINAL
+
+
+async def test_stop_with_existing_submission_does_not_sample() -> None:
+    class AnsweredProtocol(RuntimeProtocol):
+        async def run(self, io: SystemIO) -> Outcome:
+            handle = await io.start_agent(
+                "solver", agent_id="solver0", seat_key=("solver", 0), first_message=io.task.prompt
+            )
+            io.runtimes[handle.agent_id].submission = "5"
+            io.stop(handle, "consensus")
+            result = await handle
+            self.results = [result]
+            return Outcome(result.submission, {result.agent_id: result.submission}, "test")
+
+    protocol = AnsweredProtocol()
+    episode, _ = await run_episode(spec_for({}, protocol))
+    assert not episode.calls
+    assert episode.outcome.final_answer == "5" and protocol.results[0].ended_by == "consensus"
+
+
+async def test_publish_final_text_with_no_tools_keeps_answer_and_scratchpad() -> None:
+    protocol = RuntimeProtocol(tools=())
+    protocol.role = replace(protocol.role, publish_final_text=True)
+    spec = spec_for(
+        {"solver0": [Turn("visible answer", thinking="private reasoning")]},
+        protocol,
+        limits=Limits(on_no_tool_call="final_text_as_answer"),
+    )
+    episode, _ = await run_episode(spec)
+    assert episode.ok and episode.outcome.final_answer == "visible answer"
+    assert len(episode.calls) == len(episode.workspace_log) == 1
+    assert not episode.calls[0].tool_calls
+    assert episode.workspace_log[0].content == "visible answer"

@@ -145,7 +145,8 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
             )
             for role in roles
         },
-        delivery=spec.delivery,
+        # A protocol preset owns delivery when it declares one.
+        delivery=getattr(spec.protocol, "delivery", None) or spec.delivery,
         staged=spec.schedule == "lockstep",
         notes_cap_chars=max((role.context.notes_cap_chars for role in roles), default=4000),
     )
@@ -197,10 +198,14 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
         errors.extend(
             runtime.error for runtime in io.runtimes.values() if runtime.error is not None
         )
+        submissions = {
+            agent_id: runtime.submission for agent_id, runtime in io.runtimes.items()
+        }
+        submissions.update(outcome.submissions)
         grades = {
-            agent_id: await spec.env.grade(runtime.submission)
-            for agent_id, runtime in io.runtimes.items()
-            if runtime.submission is not None
+            agent_id: await spec.env.grade(answer)
+            for agent_id, answer in submissions.items()
+            if answer is not None or agent_id in outcome.submissions
         }
         grades["_system"] = await spec.env.grade(outcome.final_answer)
         for key, hits in ledger.limits_hit().items():

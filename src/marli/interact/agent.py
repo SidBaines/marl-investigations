@@ -256,6 +256,12 @@ class AgentRuntime:
         self.report: str | None = None
         self.error: str | None = None
         self.ended_by = "end_agent"
+        self._stop_reason: str | None = None
+
+    def request_stop(self, reason: str) -> None:
+        """Let an in-flight turn finish; honor the first stop at the next turn."""
+        if self._stop_reason is None:
+            self._stop_reason = reason
 
     def _sampling_spec(self, max_tokens: int) -> SamplingSpec:
         return SamplingSpec(
@@ -401,6 +407,19 @@ class AgentRuntime:
                 if fresh and self.renderer and self.renderer.supports_delta
                 else self._prompt(messages)
             )
+            if self._stop_reason is not None:
+                if self.submission is None and self.limits.on_exhaust == "force_final":
+                    await self._harness_call(
+                        ticket,
+                        Purpose.FINAL,
+                        "The protocol has stopped this agent. Submit your final answer now.",
+                        messages,
+                        reads,
+                        forced=True,
+                    )
+                if self.error is None:
+                    self.ended_by = self._stop_reason
+                return
             compact = self.context.should_compact(self._prompt_len(delta))
             # A discarded delta cannot exhaust context before compaction gets a chance.
             allocation = self._allocate(
@@ -682,7 +701,14 @@ class AgentRuntime:
         control: dict[str, Any] = {}
         try:
             if parsed and purpose not in (Purpose.COMPACT, Purpose.CARRY):
-                tool_records, control = await self._execute_tools(parsed, ticket, call_id)
+                tool_records, control = await self._execute_tools(
+                    parsed,
+                    ticket,
+                    call_id,
+                    publish_seq=seq
+                    if purpose == Purpose.ACT and self.role.publish_final_text and parsed.content
+                    else None,
+                )
         finally:
             self.recorder.add_call(
                 Call(
@@ -719,10 +745,12 @@ class AgentRuntime:
         parsed: ParsedTurn,
         ticket: Ticket,
         call_id: str,
+        *,
+        publish_seq: int | None = None,
     ) -> tuple[list[ToolCallRecord], dict[str, Any]]:
         records: list[ToolCallRecord] = []
         control: dict[str, Any] = {}
-        shared = any(
+        shared = publish_seq is not None or any(
             call.ok and call.name in self.tools and self.tools[call.name].shared
             for call in parsed.tool_calls
         )
@@ -816,4 +844,23 @@ class AgentRuntime:
                     index=index,
                     error=result.error,
                 )
+            if publish_seq is not None:
+                write = self.workspace.write(
+                    self.info.agent_id,
+                    "scratchpad",
+                    parsed.content,
+                    mode="overwrite",
+                    tick=ticket.tick,
+                    seq=publish_seq,
+                )
+                if not self.workspace.staged:
+                    self.recorder.add_write(write)
+                    self.recorder.add_event(
+                        EventKind.COMMIT,
+                        write.writer,
+                        ticket.tick,
+                        key=write.key,
+                        version=write.version,
+                    )
+                self.scheduler.notify_commit(self.info.agent_id)
         return records, control
