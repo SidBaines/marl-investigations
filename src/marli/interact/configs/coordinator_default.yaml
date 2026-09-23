@@ -1,4 +1,10 @@
-coordinator_tools: [spawn_workers, submit]
-worker_tools: [return_report]
-env_tools: []
-worker_scratchpads: false
+protocol: coordinator
+config:
+  coordinator_tools:
+  - spawn_workers
+  - submit
+  worker_tools:
+  - return_report
+  env_tools: []
+  worker_scratchpads: false
+notes: Coordinator spawns workers via spawn_workers; workers report back (no shared scratchpads).

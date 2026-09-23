@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -13,8 +12,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from _marli_test_envs import ArithEnv
 
-from marli.config import compose
 from marli.errors import ConfigError
+from marli.interact.configs import resolve_protocol
 from marli.interact.limits import AgentLimits, Ledger, Limits, SpawnLimits
 from marli.interact.protocols.coordinator import CoordinatorConfig, CoordinatorProtocol
 from marli.interact.records import compute_metrics
@@ -456,11 +455,10 @@ def test_config_forbids_worker_spawning(field: str) -> None:
     "name,scratchpads", [("coordinator_default", False), ("coordinator_scratch", True)]
 )
 def test_yaml_configs_compose(name: str, scratchpads: bool) -> None:
-    path = Path(__file__).resolve().parents[1] / "src/marli/interact/configs" / f"{name}.yaml"
-    config = compose(CoordinatorConfig, path)
-    assert config.worker_scratchpads == scratchpads
+    protocol_name, config, _ = resolve_protocol(name)
+    assert protocol_name == "coordinator" and config.worker_scratchpads == scratchpads
     coordinator, worker = CoordinatorProtocol(config).roles()
     assert ("write_scratchpad" in worker.tools) == scratchpads
     assert ("read_scratchpad" in coordinator.tools) == scratchpads
     with pytest.raises(ConfigError):
-        compose(CoordinatorConfig, path, overrides=["unknown_option=true"])
+        resolve_protocol(name, {"unknown_option": True})

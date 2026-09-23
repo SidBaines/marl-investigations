@@ -129,6 +129,7 @@ class _SpawnWorkers:
 @PROTOCOLS.register("coordinator")
 class CoordinatorProtocol(Protocol):
     name = "coordinator"
+    config_type = CoordinatorConfig
 
     def __init__(self, config: CoordinatorConfig | None = None) -> None:
         self.config = config if config is not None else CoordinatorConfig()
