@@ -35,3 +35,204 @@ eval rollouts, RL rollouts and tests.
 """
 
 from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
+
+from marli.envs.base import Env, Task
+from marli.errors import ConfigError
+from marli.interact.agent import SamplingOverrides
+from marli.interact.context import make_context_manager
+from marli.interact.limits import Ledger, Limits
+from marli.interact.records import Recorder, compute_metrics
+from marli.interact.scheduler import AsyncScheduler, Clock, LockstepScheduler, SystemClock
+from marli.interact.system import EpisodeSystem, Protocol
+from marli.interact.tools import TOOLS
+from marli.interact.types import Episode, Outcome
+from marli.interact.workspace import DeliverySpec, Permissions, Workspace
+from marli.policy.base import Policy, SamplingSpec, TokenPolicy, check_trainable_sampling
+from marli.policy.scripted import ScriptedChatPolicy, ScriptedPolicy
+from marli.render.base import DeltaRenderer
+
+
+@dataclass
+class EpisodeSpec:
+    protocol: Protocol
+    env: Env
+    task: Task
+    seating: dict[str, str]
+    policies: dict[str, Policy]
+    renderers: dict[str, Callable[[], DeltaRenderer]]
+    limits: Limits
+    schedule: str = "lockstep"
+    delivery: DeliverySpec = DeliverySpec()
+    run_seed: int = 0
+    episode_idx: int = 0
+    group_id: str = ""
+    config_hash: str = ""
+    protocol_name: str = ""
+    backend: str = ""
+    clock: Clock | None = None
+    # Role -> seat sampling controls (the contract's SamplingOverrides).
+    sampling: dict[str, SamplingOverrides] = field(default_factory=dict)
+
+
+def _validate(spec: EpisodeSpec) -> None:
+    spec.limits.__post_init__()
+    if spec.schedule not in {"lockstep", "async"}:
+        raise ConfigError("schedule must be lockstep or async")
+    if spec.delivery.mode not in {"notify", "push", "pull"}:
+        raise ConfigError("delivery.mode must be notify, push or pull")
+    if spec.delivery.view not in {"latest", "full"}:
+        raise ConfigError("delivery.view must be latest or full")
+    for name in ("push_max_chars", "index_first_line_chars"):
+        if getattr(spec.delivery, name) < 0:
+            raise ConfigError(f"delivery.{name} must be non-negative")
+    roles = spec.protocol.roles()
+    if len({role.role for role in roles}) != len(roles):
+        raise ConfigError("protocol.roles must have unique role names")
+    for role in roles:
+        if role.role not in spec.seating:
+            raise ConfigError(f"unseated role {role.role!r}")
+        policy_id = spec.seating[role.role]
+        if policy_id not in spec.policies:
+            raise ConfigError(f"role {role.role!r}: unknown policy {policy_id!r}")
+        policy = spec.policies[policy_id]
+        if isinstance(policy, TokenPolicy):
+            if policy_id not in spec.renderers:
+                raise ConfigError(f"policy {policy_id!r}: missing renderer factory")
+            renderer = spec.renderers[policy_id]()
+            if renderer.name != policy.renderer_name:
+                raise ConfigError(f"policy {policy_id!r}: renderer name mismatch")
+        elif policy.trainable:
+            raise ConfigError(f"trainable chat policy {policy_id!r} is not supported")
+        max_seq_len = getattr(policy, "max_seq_len", None)
+        if max_seq_len is not None and spec.limits.ctx.max_ctx > max_seq_len:
+            raise ConfigError(f"ctx.max_ctx exceeds policy {policy_id!r} max_seq_len")
+        sampling = spec.sampling.get(role.role, SamplingOverrides())
+        if policy.trainable:
+            check_trainable_sampling(
+                SamplingSpec(
+                    spec.limits.call.max_tokens,
+                    sampling.temperature,
+                    sampling.top_p,
+                    sampling.top_k,
+                ),
+                policy_id=policy_id,
+            )
+        if role.limits_key not in {"agent", "worker"}:
+            raise ConfigError(f"role {role.role!r}: limits_key must be agent or worker")
+        make_context_manager(role.context, spec.limits)
+        available = set(TOOLS.names()) | {tool.spec.name for tool in spec.env.tools(role.role)}
+        for name in role.tools:
+            if name not in available:
+                raise ConfigError(f"role {role.role!r}: unknown tool {name!r}")
+
+
+async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]:
+    """Validate before spending, isolate backend failures, and always close the env."""
+    _validate(spec)
+    clock = spec.clock if spec.clock is not None else SystemClock()
+    group_id = spec.group_id or f"{spec.task.task_id}/{spec.config_hash[:8]}"
+    recorder = Recorder(f"{group_id}/e{spec.episode_idx}", clock=clock)
+    roles = spec.protocol.roles()
+    workspace = Workspace(
+        roles={},
+        permissions={
+            role.role: Permissions(notes=role.context.kind in {"notes", "both"}) for role in roles
+        },
+        delivery=spec.delivery,
+        staged=spec.schedule == "lockstep",
+        notes_cap_chars=max((role.context.notes_cap_chars for role in roles), default=4000),
+    )
+    scheduler_type = LockstepScheduler if spec.schedule == "lockstep" else AsyncScheduler
+    scheduler = scheduler_type(workspace, recorder, clock=clock)
+    ledger = Ledger(
+        spec.limits,
+        schedule=spec.schedule,
+        expected_agents=max(1, sum(role.count or 0 for role in roles)),
+    )
+    io = EpisodeSystem(
+        spec, workspace=workspace, scheduler=scheduler, ledger=ledger, recorder=recorder
+    )
+    runner: asyncio.Task[Outcome] | None = None
+    timer: asyncio.Task[None] | None = None
+    errors: list[str] = []
+
+    async def drive() -> Outcome:
+        outcome = await spec.protocol.run(io)
+        await io.wait(io.handles)
+        return outcome
+
+    try:
+        await spec.env.setup()
+        deadline = clock.now() + spec.limits.episode.max_wall_s
+
+        async def expire() -> None:
+            await clock.sleep(max(0.0, deadline - clock.now()))
+
+        runner = asyncio.create_task(drive())
+        timer = asyncio.create_task(expire())
+        done, _ = await asyncio.wait({runner, timer}, return_when=asyncio.FIRST_COMPLETED)
+        if runner in done:
+            outcome = runner.result()
+        else:
+            errors.append("episode wall-clock limit")
+            ledger.limit_hit("_episode", "episode.max_wall_s")
+            runner.cancel()
+            for handle in io.handles:
+                handle.task.cancel()
+            await asyncio.gather(
+                runner, *(handle.task for handle in io.handles), return_exceptions=True
+            )
+            outcome = Outcome(
+                None,
+                {key: runtime.submission for key, runtime in io.runtimes.items()},
+                spec.protocol.name,
+            )
+        errors.extend(
+            runtime.error for runtime in io.runtimes.values() if runtime.error is not None
+        )
+        grades = {
+            agent_id: await spec.env.grade(runtime.submission)
+            for agent_id, runtime in io.runtimes.items()
+            if runtime.submission is not None
+        }
+        grades["_system"] = await spec.env.grade(outcome.final_answer)
+        for key, hits in ledger.limits_hit().items():
+            for limit in hits:
+                recorder.limit_hit(key, limit)
+        episode, buffers = recorder.build(
+            group_id=group_id,
+            episode_idx=spec.episode_idx,
+            task_id=spec.task.task_id,
+            protocol=spec.protocol_name or spec.protocol.name,
+            config_hash=spec.config_hash,
+            backend=spec.backend,
+            outcome=outcome,
+            grades=grades,
+            metrics={},
+            replayable=spec.schedule == "lockstep"
+            and all(
+                getattr(
+                    policy,
+                    "deterministic",
+                    isinstance(policy, (ScriptedPolicy, ScriptedChatPolicy)),
+                )
+                for policy in spec.policies.values()
+            ),
+            ok=not errors,
+            errors=tuple(errors),
+        )
+        return replace(episode, metrics=compute_metrics(episode, buffers)), buffers
+    finally:
+        tasks = [handle.task for handle in io.handles]
+        tasks.extend(task for task in (runner, timer) if task is not None)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            await spec.env.teardown()
