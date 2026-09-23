@@ -9,11 +9,16 @@ Per-call allocation (``Ledger.allocate``)::
     max_tokens = min(call.max_tokens,
                      agent_remaining - agent.final_reserve,
                      session_remaining - session.carry_reserve   (multi-session agents),
-                     episode_share,                              (lockstep: episode_remaining //
+                     episode_share - agent.final_reserve,         (lockstep: episode_remaining //
                      n_active at tick start;
                                                                   async: fixed per-agent share
                                                                   assigned at registration)
-                     ctx.max_ctx - prompt_len)
+                     ctx.max_ctx - prompt_len - ctx_reserve)
+
+FINAL/REPORT use the unreduced episode share and no ctx reserve. The runtime
+computes ctx_reserve once per segment when forcing finals is enabled: the
+final token reserve plus the instruction delta and forced tool prefix.
+Multiple calls in one lockstep ticket consume the same seat's tick share.
 
 If the result is < ``min_call_tokens`` the call is not made and the limit that
 bound it is reported as *exhausted*. Then ``on_exhaust`` decides:
@@ -140,8 +145,11 @@ class Limits:
                 raise ConfigError(f"{name} must be a positive integer")
         for name in ("agent", "worker"):
             block = getattr(self, name)
-            if self.on_exhaust == "force_final" and block.final_reserve <= 0:
-                raise ConfigError(f"{name}.final_reserve must be > 0 when on_exhaust=force_final")
+            if self.on_exhaust == "force_final" and block.final_reserve < self.call.min_call_tokens:
+                raise ConfigError(
+                    f"{name}.final_reserve must be >= call.min_call_tokens "
+                    "when on_exhaust=force_final"
+                )
             if block.final_reserve >= block.max_gen_tokens:
                 raise ConfigError(f"{name}.final_reserve must be < {name}.max_gen_tokens")
         if self.session.carry_reserve >= self.session.max_gen_tokens:
@@ -165,7 +173,8 @@ class Ledger:
     Methods (M1-8):
       register(agent_id, *, kind: "agent" | "worker", parent: str | None) -> None
       start_session(agent_id) -> None
-      allocate(agent_id, *, prompt_len: int, purpose: Purpose, tick: int | None, n_active: int) ->
+      allocate(agent_id, *, prompt_len: int, purpose: Purpose, tick: int | None, n_active: int,
+               ctx_reserve: int = 0) ->
       Allocation
       charge(agent_id, *, gen_tokens: int, purpose: Purpose) -> None   # after each call
       reserve_workers(parent_id, k: int) -> int                        # returns how many fit (0..k)
@@ -231,6 +240,7 @@ class Ledger:
         purpose: Purpose,
         tick: int | None,
         n_active: int,
+        ctx_reserve: int = 0,
     ) -> Allocation:
         state = self._agents[agent_id]
         block = getattr(self.limits, state.kind)
@@ -276,7 +286,11 @@ class Ledger:
                 self._tick_reserved = {
                     key: account.reserved for key, account in self._agents.items()
                 }
-            share = self._tick_share
+            share = (
+                self._tick_share
+                - (state.tokens - self._tick_tokens.get(agent_id, state.tokens))
+                - max(0, state.reserved - self._tick_reserved.get(agent_id, 0))
+            )
             if state.parent is not None:
                 share = state.share - state.tokens
             else:
@@ -285,8 +299,14 @@ class Ledger:
             share = state.share - state.tokens - state.reserved
         candidates.extend(
             [
-                ("episode.max_gen_tokens", min(remaining, share)),
-                ("ctx.max_ctx", self.limits.ctx.max_ctx - prompt_len),
+                (
+                    "episode.max_gen_tokens",
+                    min(remaining, share) - (0 if final else block.final_reserve),
+                ),
+                (
+                    "ctx.max_ctx",
+                    self.limits.ctx.max_ctx - prompt_len - (0 if final else ctx_reserve),
+                ),
             ]
         )
         name, available = min(candidates, key=lambda item: item[1])
@@ -320,8 +340,8 @@ class Ledger:
         elif self._tick is not None:
             # Other seats may still spend their allocations from this tick. A spawn
             # can reserve only its parent's unspent share, never those in-flight tokens.
-            spent_this_tick = state.tokens - self._tick_tokens[parent_id]
-            reserved_this_tick = max(0, state.reserved - self._tick_reserved[parent_id])
+            spent_this_tick = state.tokens - self._tick_tokens.get(parent_id, state.tokens)
+            reserved_this_tick = max(0, state.reserved - self._tick_reserved.get(parent_id, 0))
             remaining = min(remaining, self._tick_share - spent_this_tick - reserved_this_tick)
         else:
             remaining //= max(self.n_active, 1)
