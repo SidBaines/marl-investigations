@@ -88,11 +88,24 @@ def test_unknown_verb_lists_known_verbs() -> None:
 
 
 @pytest.mark.parametrize("cls", [fake.NestedConfig, fake.OptionalNestedConfig])
-async def test_nested_inputs_are_rejected(tmp_path: Path, cls: type) -> None:
+async def test_nested_inputs_are_resolved(
+    tmp_path: Path, cls: type, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = fake.DummyHandle(root=tmp_path / "source")
+    source.save()
     spec = dataclasses.replace(fake.SPEC, config=f"_marli_fake_verbs:{cls.__name__}")
-    with pytest.raises(ConfigError, match="nested input field.*child.source.*not supported"):
-        await verbs.run_verb(spec, cls(), out=tmp_path / "out")
-    assert not (tmp_path / "out").exists()
+
+    async def nested(cfg: fake.NestedConfig | fake.OptionalNestedConfig, run: RunDir) -> Handle:
+        assert cfg.child is not None
+        assert cfg.child.source == str(source.manifest_path)
+        return fake.DummyHandle(root=run.out)
+
+    monkeypatch.setattr(fake, "echo", nested)
+    cfg = cls(child=fake.EchoConfig(source=str(source.root)))
+    result = await verbs.run_verb(spec, cfg, out=tmp_path / "out")
+    assert result.config_hash == config.config_hash(
+        cfg, input_digests=[f"child.source={source.sha256()}"]
+    )
 
 
 @pytest.mark.parametrize("count", [0, 2])
@@ -309,3 +322,97 @@ def test_manifest_search_skips_large_and_unreadable_files(
 
     monkeypatch.setattr(Path, operation, fail)
     assert verbs.input_manifest(tmp_path, "source") == source.manifest_path
+
+
+@dataclasses.dataclass
+class CollectionInputs:
+    children: list[fake.EchoConfig] = dataclasses.field(default_factory=list)
+    mapping: dict[str, fake.EchoConfig] = dataclasses.field(default_factory=dict)
+
+
+async def test_nested_input_digests_cover_lists_dicts_and_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from marli.errors import HashMismatchError
+
+    source = fake.DummyHandle(root=tmp_path / "source")
+    source.save()
+    cfg = CollectionInputs(
+        [fake.EchoConfig(source=str(source.root))],
+        {"a": fake.EchoConfig(source=str(source.manifest_path))},
+    )
+
+    async def echo(cfg: CollectionInputs, run: RunDir) -> Handle:
+        assert cfg.children[0].source == cfg.mapping["a"].source == str(source.manifest_path)
+        return fake.DummyHandle(root=run.out)
+
+    monkeypatch.setattr(verbs, "resolve", lambda spec: (echo, CollectionInputs))
+    result = await verbs.run_verb(fake.SPEC, cfg, out=tmp_path / "out")
+    digest = sha256_file(source.manifest_path)
+    assert result.config_hash == config.config_hash(
+        cfg,
+        input_digests=[
+            f"children[0].source={digest}",
+            f"mapping['a'].source={digest}",
+        ],
+    )
+    source.manifest_path.write_text(source.manifest_path.read_text() + "\n")
+    with pytest.raises(HashMismatchError):
+        await verbs.run_verb(fake.SPEC, cfg, out=tmp_path / "out")
+
+
+async def test_nested_verb_warnings_reach_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(warnings, "showwarning", verbs._showwarning)
+    original = fake.echo
+
+    async def nested(cfg: fake.EchoConfig, run: RunDir) -> Handle:
+        if cfg.message == "parent":
+            await verbs.run_verb(fake.SPEC, fake.EchoConfig(message="child"), out=run.path("child"))
+        else:
+            warnings.warn("child degraded", stacklevel=1)
+        return await original(cfg, run)
+
+    monkeypatch.setattr(fake, "echo", nested)
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        result = await verbs.run_verb(
+            fake.SPEC, fake.EchoConfig(message="parent"), out=tmp_path / "out"
+        )
+    assert result.warnings == ["child degraded"]
+
+
+async def test_resume_hook_never_bypasses_hash_and_recovers_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from marli.errors import HashMismatchError
+
+    cfg = fake.EchoConfig()
+    await verbs.run_verb(fake.SPEC, cfg, out=tmp_path)
+    calls = []
+
+    def should_resume(handle: Handle, cfg: fake.EchoConfig) -> bool:
+        calls.append(handle)
+        return True
+
+    monkeypatch.setattr(fake, "should_resume", should_resume, raising=False)
+    with pytest.raises(HashMismatchError):
+        await verbs.run_verb(fake.SPEC, dataclasses.replace(cfg, message="changed"), out=tmp_path)
+    assert not calls
+    original = fake.echo
+
+    async def crash(cfg: fake.EchoConfig, run: RunDir) -> Handle:
+        assert run.status is RunStatus.RESUME
+        assert not run.path(fake.SPEC.manifest).exists()
+        raise RuntimeError("interrupted reopened run")
+
+    monkeypatch.setattr(fake, "echo", crash)
+    with pytest.raises(RuntimeError, match="interrupted reopened"):
+        await verbs.run_verb(fake.SPEC, cfg, out=tmp_path)
+    monkeypatch.setattr(fake, "echo", original)
+    result = await verbs.run_verb(fake.SPEC, cfg, out=tmp_path)
+    assert result.status is RunStatus.RESUME
+    assert len(result.handle.file("rows").read_text().splitlines()) == cfg.n

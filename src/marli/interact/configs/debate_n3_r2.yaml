@@ -1,0 +1,5 @@
+protocol: debate
+config:
+  n_agents: 3
+  rounds: 2
+notes: Three peers debate for two lockstep rounds, publishing replies and voting on final answers.

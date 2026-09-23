@@ -37,7 +37,8 @@ Lockstep records use logical (tick, seat_key, in-agent) order, independently
 of generation latency. Sequence references are normalized together before
 metrics are computed; async records retain their observed order. Replayability
 requires seated policies to declare deterministic=True (absent means False).
-System prompt templates use the role's count for n_agents, or 0 for dynamic roles.
+System prompt templates use the role's count for n_agents, or 0 for dynamic roles,
+and the protocol-adjusted session and worker budgets documented in RoleSpec.
 """
 
 from __future__ import annotations
@@ -100,7 +101,13 @@ def _validate(spec: EpisodeSpec) -> None:
     for role in roles:
         try:
             role.system_prompt.format(
-                agent_id=f"{role.role}0", role=role.role, n_agents=role.count or 0
+                agent_id=f"{role.role}0",
+                role=role.role,
+                n_agents=role.count or 0,
+                max_workers_per_call=spec.limits.spawn.max_per_call,
+                max_workers_total=spec.limits.spawn.max_total,
+                worker_tokens=spec.limits.worker.max_gen_tokens,
+                session_tokens=spec.limits.session.max_gen_tokens,
             )
         except (KeyError, ValueError, IndexError, AttributeError) as exc:
             raise ConfigError(f"role {role.role!r}: invalid system_prompt template: {exc}") from exc

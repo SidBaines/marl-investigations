@@ -15,7 +15,8 @@ Per-call allocation (``Ledger.allocate``)::
                                                                   assigned at registration)
                      ctx.max_ctx - prompt_len - ctx_reserve)
 
-FINAL/REPORT use the unreduced episode share and no ctx reserve. The runtime
+FINAL/REPORT use the unreduced episode share and no ctx reserve or session cap;
+their agent reserve is outside the compute divided between sessions. The runtime
 computes ctx_reserve once per segment when forcing finals is enabled: the
 final token reserve plus the instruction delta and forced tool prefix.
 Multiple calls in one lockstep ticket consume the same seat's tick share.
@@ -28,7 +29,7 @@ bound it is reported as *exhausted*. Then ``on_exhaust`` decides:
   plus the renderer's ``forced_tool_prefix("submit")`` (both observation tokens)
   so the model only completes the answer arguments. Workers use
   ``return_report`` instead (purpose REPORT); a worker that still fails
-  returns ``[worker <id>: no report]`` to its coordinator.
+  returns ``[worker <id>: no report (<ended_by>)]`` to its coordinator.
 - ``none``: the agent simply stops with no submission.
 
 Spawning k workers reserves ``k * worker.max_gen_tokens`` from the spawning
@@ -116,7 +117,7 @@ class Limits:
     on_exhaust: str = doc_field("force_final", help="force_final | none")
     on_no_tool_call: str = doc_field(
         "nudge",
-        help="what to do when a turn makes no tool call: nudge | end_agent | final_text_as_answer",
+        help="no-tool turn: nudge | end_agent | final_text_as_answer | final_text_continue",
     )
     max_nudges: int = doc_field(2, help="consecutive nudges before the agent is ended")
     tool_output_chars: int = doc_field(
@@ -126,8 +127,16 @@ class Limits:
     def __post_init__(self) -> None:
         if self.on_exhaust not in {"force_final", "none"}:
             raise ConfigError("on_exhaust must be force_final or none")
-        if self.on_no_tool_call not in {"nudge", "end_agent", "final_text_as_answer"}:
-            raise ConfigError("on_no_tool_call must be nudge, end_agent or final_text_as_answer")
+        if self.on_no_tool_call not in {
+            "nudge",
+            "end_agent",
+            "final_text_as_answer",
+            "final_text_continue",
+        }:
+            raise ConfigError(
+                "on_no_tool_call must be nudge, end_agent, final_text_as_answer "
+                "or final_text_continue"
+            )
         for block in ("call", "agent", "worker", "session", "episode", "spawn", "ctx"):
             for item in fields(getattr(self, block)):
                 value = getattr(getattr(self, block), item.name)
@@ -263,7 +272,8 @@ class Ledger:
         )
         if final:
             candidates.append((f"{state.kind}.final_reserve", block.final_reserve))
-        if self.limits.session.max_sessions > 1:
+        # Final/report tokens belong to the agent reserve outside session budgets.
+        if self.limits.session.max_sessions > 1 and not final:
             candidates.append(
                 (
                     "session.max_gen_tokens",

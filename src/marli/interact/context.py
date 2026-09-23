@@ -21,9 +21,11 @@ Owned by the agent runtime; each decides *when* the context is reset and
   persist in the workspace. At a session boundary the new session's first
   user message includes the current notes (capped). No extra call.
 - ``both``: notes tools + a compaction summary at session end.
-- ``tail(m)`` (Delethink-style baseline): at a reset, the last ``m`` ids of the
-  ending segment are spliced into the new segment after the generation header
-  as prefill (observation tokens).
+- ``tail(m)``: parse the ending session's own sampled completions, keeping
+  thinking and visible content without tool markup or stop tokens. Decode the
+  last ``m`` plain-text tokens into a ``[Tail of your previous session]`` block
+  in the next session's first user message. It is an observation, survives
+  re-rendering, and never injects raw conversation structure as a prefill.
 - Session carry (multi-session): at session end the runtime makes a
   ``purpose=CARRY`` call (for ``compaction``/``both``) asking for a summary for
   "your next session"; with budget exhaustion this call is forced and uses
@@ -45,6 +47,7 @@ from typing import Protocol
 from marli.errors import ConfigError
 from marli.interact.limits import Limits
 from marli.interact.system import ContextSpec
+from marli.render.base import DeltaRenderer
 
 
 @dataclass(frozen=True)
@@ -87,8 +90,12 @@ class ContextManager(Protocol):
         """
         ...
 
-    def tail_prefill(self, ending_segment_ids: Sequence[int]) -> list[int]:
-        """Copy the final tail_tokens ids, or return [] unless kind is tail."""
+    def tail_prefill(self, text_ids: Sequence[int]) -> list[int]:
+        """Select tail_tokens plain-text ids; the runtime never uses these as prefill."""
+        ...
+
+    def tail_text(self, completions: Sequence[Sequence[int]], renderer: DeltaRenderer) -> str:
+        """Format the ending session's parsed reply tail as an observation."""
         ...
 
     @property
@@ -114,11 +121,14 @@ class _ContextManager:
     def compaction_instruction(self) -> str:
         if self.spec.kind not in ("compaction", "both"):
             return ""
-        return (
+        opening = (
             "Your context is almost full. It will now be cleared and replaced by the "
             "summary you write in this reply; afterwards you will see only the original "
-            "task and this summary. "
-        ) + self._summary_instruction()
+            "task and this summary"
+        )
+        if self.spec.kind == "both":
+            opening += " plus your saved notes; don't repeat them"
+        return opening + ". " + self._summary_instruction()
 
     def session_carry_instruction(self) -> str | None:
         if self.spec.kind not in ("compaction", "both"):
@@ -164,10 +174,22 @@ class _ContextManager:
             parts.append(f"[{label}]\n{content}")
         return CarryText(text="\n\n".join(parts), truncated=truncated)
 
-    def tail_prefill(self, ending_segment_ids: Sequence[int]) -> list[int]:
+    def tail_prefill(self, text_ids: Sequence[int]) -> list[int]:
         if self.spec.kind != "tail":
             return []
-        return list(ending_segment_ids[-self.spec.tail_tokens :])
+        return list(text_ids[-self.spec.tail_tokens :])
+
+    def tail_text(self, completions: Sequence[Sequence[int]], renderer: DeltaRenderer) -> str:
+        if self.spec.kind != "tail":
+            return ""
+        parts = []
+        for ids in completions:
+            parsed = renderer.parse(ids)
+            parts.extend(text for text in (parsed.thinking, parsed.content) if text)
+        if not parts:
+            return ""
+        ids = self.tail_prefill(renderer.encode_text("\n\n".join(parts)))
+        return "[Tail of your previous session]\n" + renderer.decode(ids)
 
     @property
     def has_notes_tools(self) -> bool:

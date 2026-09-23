@@ -217,6 +217,23 @@ class RunDir:
         self._require_open()
         return {row[key] for row in self.read_rows(rel)}
 
+    def reopen(self) -> None:
+        """Invalidate completion under the lock, preserving the existing run identity.
+
+        Only a verb's resume hook should request this transition. The unchanged
+        run record permits recovery if execution fails before the next finalize.
+        """
+        self._require_open()
+        if self.status is not RunStatus.COMPLETE:
+            raise MarliError(f"run directory is not complete: {self.out}")
+        self.path(self.manifest_name).unlink()
+        directory_fd = os.open(self.out, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        self.status = RunStatus.RESUME
+
     def write_progress(self, data: Mapping[str, Any]) -> None:
         """Atomically publish the latest progress with a UTC update timestamp."""
         self._require_open()
