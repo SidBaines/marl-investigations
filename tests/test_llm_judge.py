@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import warnings
 
 import httpx
 import pytest
@@ -96,16 +97,63 @@ async def test_retries_and_exhaustion(
         return httpx.Response(int(failure))
 
     monkeypatch.setattr(asyncio, "sleep", sleep)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        result = await anthropic_judge(
-            client,
-            sem,
-            {},
-            model=DEFAULT_JUDGE_MODEL,
-            system="rubric",
-            user="submission",
-        )
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            result = await anthropic_judge(
+                client,
+                sem,
+                {},
+                model=DEFAULT_JUDGE_MODEL,
+                system="rubric",
+                user="submission",
+            )
+    if exhaust:
+        status = {"transport": "None", "malformed": "200"}.get(failure, failure)
+        assert [str(w.message) for w in recorded] == [
+            f"judge request failed after 4 attempts; last status: {status}"
+        ]
+    else:
+        assert not recorded
     assert result == (None if exhaust else "NO")
     assert calls == 4
     assert sleeps == [2, 4, 6]
     assert not sem.locked()
+
+
+@pytest.mark.parametrize("last_failure", ["http", "transport"])
+async def test_exhaustion_warning_reports_last_status_without_headers(
+    monkeypatch: pytest.MonkeyPatch, last_failure: str
+) -> None:
+    calls = 0
+    secret = "fake-judge-secret"
+
+    async def sleep(delay: float) -> None:
+        pass
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 4 and last_failure == "transport":
+            raise httpx.ReadTimeout(f"headers: {dict(request.headers)}")
+        return httpx.Response(429 if calls < 4 else 503, text=secret, headers={"x-api-key": secret})
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        with pytest.warns(UserWarning) as recorded:
+            result = await anthropic_judge(
+                client,
+                asyncio.Semaphore(1),
+                {"x-api-key": secret},
+                model=DEFAULT_JUDGE_MODEL,
+                system="rubric",
+                user="submission",
+            )
+    assert result is None
+    assert calls == 4
+    status = "None" if last_failure == "transport" else "503"
+    assert len(recorded) == 1
+    message = str(recorded[0].message)
+    assert message == f"judge request failed after 4 attempts; last status: {status}"
+    assert secret not in message
+    assert "x-api-key" not in message

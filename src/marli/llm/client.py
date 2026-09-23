@@ -11,12 +11,15 @@ the canonical payload before wire translation. Credentials stay in headers.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import os
+import random
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import TracebackType
 from typing import Any
 
 import httpx
@@ -40,6 +43,10 @@ _ANTHROPIC_PASSTHROUGH = {
 
 class UnsupportedRequestError(RuntimeError):
     """A request the provider cannot support; retrying it unchanged cannot help."""
+
+    def __init__(self, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -71,6 +78,11 @@ class Endpoint:
             key = os.environ.get(self.api_key_env)
             if not key:
                 raise ValueError(f"missing API key environment variable {self.api_key_env!r}")
+            if key != key.strip() or not key.isascii() or not key.isprintable():
+                raise ValueError(
+                    f"API key environment variable {self.api_key_env!r} contains whitespace "
+                    "or non-printable/non-ASCII characters"
+                )
         if self.provider == "anthropic":
             headers = {"anthropic-version": ANTHROPIC_VERSION}
             if key:
@@ -107,7 +119,9 @@ def to_anthropic(payload: dict[str, Any]) -> dict[str, Any]:
                 function = tool["function"]
                 translated = {
                     "name": function["name"],
-                    "input_schema": function["parameters"],
+                    "input_schema": function.get(
+                        "parameters", {"type": "object", "properties": {}}
+                    ),
                 }
                 if "description" in function:
                     translated["description"] = function["description"]
@@ -128,7 +142,8 @@ def to_anthropic(payload: dict[str, Any]) -> dict[str, Any]:
     for message in payload["messages"]:
         role, content = message["role"], message.get("content")
         calls = message.get("tool_calls") if role == "assistant" else None
-        if content is None and calls:
+        thinking = message.get("thinking_blocks") if role == "assistant" else None
+        if content is None and (calls or thinking):
             content = ""
         if not isinstance(content, str):
             raise UnsupportedRequestError(
@@ -148,9 +163,11 @@ def to_anthropic(payload: dict[str, Any]) -> dict[str, Any]:
             else:
                 messages.append({"role": "user", "content": [block]})
         elif role in ("user", "assistant"):
-            if calls:
-                blocks = [{"type": "text", "text": content}] if content else []
-                for call in calls:
+            if calls or thinking is not None:
+                blocks = list(thinking or [])
+                if content:
+                    blocks.append({"type": "text", "text": content})
+                for call in calls or []:
                     if call.get("type") != "function":
                         raise UnsupportedRequestError("anthropic tool calls must be functions")
                     function = call["function"]
@@ -190,7 +207,10 @@ def to_anthropic(payload: dict[str, Any]) -> dict[str, Any]:
 def from_anthropic(data: dict[str, Any]) -> dict[str, Any]:
     """Normalize text, tool use and thinking without discarding provider usage."""
     if data.get("type") == "error" or data.get("error"):
-        raise UnsupportedRequestError("anthropic error response")
+        error = data.get("error") or {}
+        raise UnsupportedRequestError(
+            f"anthropic error response: {error.get('type')}: {error.get('message')}"
+        )
     blocks = data.get("content", [])
     message: dict[str, Any] = {
         "role": "assistant",
@@ -210,14 +230,26 @@ def from_anthropic(data: dict[str, Any]) -> dict[str, Any]:
     thinking = [b.get("thinking", "") for b in blocks if b.get("type") == "thinking"]
     if thinking:
         message["reasoning_content"] = "".join(thinking)
+    thinking_blocks = [
+        block for block in blocks if block.get("type") in ("thinking", "redacted_thinking")
+    ]
+    if thinking_blocks:
+        message["thinking_blocks"] = thinking_blocks
     stop = data.get("stop_reason")
+    finish_reason = {
+        "end_turn": "stop",
+        "stop_sequence": "stop",
+        "max_tokens": "length",
+        "tool_use": "tool_calls",
+        "refusal": "content_filter",
+    }.get(stop, stop)
     return {
         "id": data.get("id"),
         "model": data.get("model"),
         "choices": [
             {
                 "message": message,
-                "finish_reason": "tool_calls" if stop == "tool_use" else stop,
+                "finish_reason": finish_reason,
             }
         ],
         "usage": data.get("usage", {}),
@@ -225,15 +257,17 @@ def from_anthropic(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def usage_of(response: dict[str, Any]) -> dict[str, int | float | None]:
-    """Extract comparable counts and reported cost; unavailable cache/cost is None.
+    """Extract comparable counts and cost; unavailable fields remain None.
 
     Anthropic's input count excludes cache creation and reads, so those are
     added back to obtain the full prompt count. The response itself is unchanged.
     """
     usage = response.get("usage") or {}
+    if not usage:
+        warnings.warn("response is missing usage; token counts and cost are unknown", stacklevel=2)
     details = usage.get("prompt_tokens_details") or {}
     prompt = usage.get("prompt_tokens")
-    if prompt is None:
+    if prompt is None and usage.get("input_tokens") is not None:
         prompt = sum(
             usage.get(key, 0) or 0
             for key in (
@@ -244,7 +278,7 @@ def usage_of(response: dict[str, Any]) -> dict[str, int | float | None]:
         )
     return {
         "prompt_tokens": prompt,
-        "completion_tokens": usage.get("completion_tokens", usage.get("output_tokens", 0)),
+        "completion_tokens": usage.get("completion_tokens", usage.get("output_tokens")),
         "cached_prompt_tokens": details.get("cached_tokens", usage.get("cache_read_input_tokens")),
         "cost_usd": usage.get("cost"),
     }
@@ -281,12 +315,16 @@ def _load_cache_records(path: Path) -> list[dict[str, Any]]:
 
 @dataclass
 class ChatClient:
-    """Raw httpx transport with bounded retries and explicitly salted caching."""
+    """Raw httpx transport with bounded attempts and explicitly salted caching.
+
+    ``max_retries`` limits attempts, excluding token-parameter negotiation.
+    Read timeouts permit only one retry because abandoned generations are billed.
+    """
 
     endpoint: Endpoint
     concurrency: int = 32
     max_retries: int = 6
-    timeout: float = 120.0
+    timeout: float = 600.0
     cache: str = "off"
     cache_path: Path | None = None
     request_semaphore: asyncio.Semaphore | None = field(default=None, repr=False)
@@ -312,7 +350,13 @@ class ChatClient:
         if self.cache == "disk" and self.cache_path is not None and self.cache_path.exists():
             for record in _load_cache_records(self.cache_path):
                 self._cache[record["key"]] = record["response"]
-        self._http = httpx.AsyncClient(timeout=self.timeout)
+        self._http = httpx.AsyncClient(
+            timeout=self.timeout,
+            limits=httpx.Limits(
+                max_connections=self.concurrency,
+                max_keepalive_connections=self.concurrency,
+            ),
+        )
 
     @classmethod
     def openrouter(cls, model: str, **kw: Any) -> ChatClient:
@@ -356,6 +400,17 @@ class ChatClient:
 
     async def aclose(self) -> None:
         await self._http.aclose()
+
+    async def __aenter__(self) -> ChatClient:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.aclose()
 
     @staticmethod
     def _key(payload: dict[str, Any]) -> str:
@@ -402,12 +457,16 @@ class ChatClient:
         if self.cache != "off":
             key = self._key({"route": route, "payload": payload, "cache_salt": cache_salt})
             if key in self._cache:
-                return self._cache[key]
+                return copy.deepcopy(self._cache[key])
 
         delay = 1.0
         last_error = ""
+        attempts = 0
+        read_timeouts = 0
         async with self._sem:
-            for attempt in range(self.max_retries):
+            while attempts < self.max_retries:
+                attempts += 1
+                retry_headers = None
                 send_body = body
                 if self._use_max_completion_tokens and "max_tokens" in body:
                     send_body = dict(body)
@@ -415,13 +474,27 @@ class ChatClient:
                 headers = self.endpoint.headers()
                 try:
                     response = await self._http.post(url, json=send_body, headers=headers)
+                except (
+                    httpx.LocalProtocolError,
+                    httpx.UnsupportedProtocol,
+                    httpx.InvalidURL,
+                ) as exc:
+                    raise UnsupportedRequestError(_redact(str(exc), headers)) from None
+                except httpx.ReadTimeout as exc:
+                    read_timeouts += 1
+                    last_error = (
+                        f"ReadTimeout (timeout={self.timeout}s): {_redact(str(exc), headers)}; "
+                        "consider raising timeout; each abandoned generation is billed"
+                    )
+                    if read_timeouts >= 2:
+                        break
                 except httpx.HTTPError as exc:
                     last_error = _redact(str(exc), headers)
                 else:
                     if response.status_code in RETRYABLE_STATUS:
-                        last_error = _redact(
-                            f"HTTP {response.status_code}: {response.text}", headers
-                        )
+                        retry_headers = response.headers
+                        detail = _redact(response.text, headers)[:200]
+                        last_error = f"HTTP {response.status_code}: {detail!r}"
                     elif (
                         self.endpoint.provider == "openai"
                         and response.status_code == 400
@@ -430,14 +503,13 @@ class ChatClient:
                     ):
                         # Concurrent first requests must each retry their own 400.
                         self._use_max_completion_tokens = True
-                        last_error = "server wants max_completion_tokens; retrying"
+                        attempts -= 1
                         continue
-                    elif response.status_code >= 400:
+                    elif response.status_code >= 300:
+                        detail = _redact(response.text, headers)[:200]
                         raise UnsupportedRequestError(
-                            _redact(
-                                f"HTTP {response.status_code}: {response.text}",
-                                headers,
-                            )
+                            f"HTTP {response.status_code}: {detail!r}",
+                            status_code=response.status_code,
                         )
                     else:
                         try:
@@ -451,23 +523,48 @@ class ChatClient:
                             else:
                                 if self.endpoint.provider == "anthropic":
                                     data = from_anthropic(data)
+                                else:
+                                    for choice in data.get("choices") or []:
+                                        message = choice.get("message") or {}
+                                        if (
+                                            "reasoning" in message
+                                            and "reasoning_content" not in message
+                                        ):
+                                            message["reasoning_content"] = message["reasoning"]
                                 if key is not None and _has_completion(data):
                                     await self._store(key, data)
                                 return data
-                if attempt + 1 < self.max_retries:
-                    await asyncio.sleep(delay)
-                    delay = min(delay * 2, 30)
-        raise RuntimeError(f"chat request failed after {self.max_retries} retries: {last_error}")
+                if attempts < self.max_retries:
+                    await asyncio.sleep(_retry_delay(delay, retry_headers))
+                    delay = min(delay * 2, 60)
+        raise RuntimeError(f"chat request failed after {attempts} attempts: {last_error}")
 
     async def _store(self, key: str, response: dict[str, Any]) -> None:
+        response = copy.deepcopy(response)
         async with self._cache_lock:
             if self.cache == "disk" and self.cache_path is not None:
-                self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-                with self.cache_path.open("a", encoding="utf-8") as cache_file:
-                    cache_file.write(json.dumps({"key": key, "response": response}) + "\n")
-                    cache_file.flush()
-                    os.fsync(cache_file.fileno())
+                await asyncio.to_thread(_append_cache_record, self.cache_path, key, response)
             self._cache[key] = response
+
+
+def _append_cache_record(path: Path, key: str, response: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as cache_file:
+        cache_file.write(json.dumps({"key": key, "response": response}) + "\n")
+        cache_file.flush()
+        os.fsync(cache_file.fileno())
+
+
+def _retry_delay(delay: float, headers: httpx.Headers | None) -> float:
+    if headers is not None:
+        for name, scale in (("retry-after-ms", 0.001), ("retry-after", 1.0)):
+            try:
+                seconds = float(headers[name]) * scale
+            except (KeyError, ValueError):
+                continue
+            if seconds >= 0:
+                return min(max(seconds, delay), 60)
+    return min(delay * random.uniform(0.5, 1.5), 60)
 
 
 def _redact(detail: str, headers: dict[str, str]) -> str:

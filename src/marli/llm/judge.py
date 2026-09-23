@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import warnings
 from typing import Any
 
 import httpx
@@ -47,6 +48,7 @@ async def anthropic_judge(
         body["temperature"] = temperature
     async with sem:
         for attempt in range(4):
+            status: int | None = None
             try:
                 response = await client.post(
                     ANTHROPIC_URL,
@@ -54,10 +56,15 @@ async def anthropic_judge(
                     headers=headers,
                     timeout=60,
                 )
+                status = response.status_code
                 response.raise_for_status()
                 return response.json()["content"][0]["text"]
             except Exception:
                 if attempt == 3:
+                    warnings.warn(
+                        f"judge request failed after 4 attempts; last status: {status}",
+                        stacklevel=2,
+                    )
                     return None
                 await asyncio.sleep(2 * (attempt + 1))
     return None
