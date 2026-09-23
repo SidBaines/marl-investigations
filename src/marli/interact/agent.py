@@ -7,7 +7,7 @@ managers, policies) is injected.
 
 Loop (token policies; ``supports_delta=True``)::
 
-    seg = new_segment(START | SPAWN | SESSION)
+    seg = pending_segment(START | SPAWN | SESSION)  # recorded lazily at the first call
     buf = renderer.initial(system_prompt, tool_specs, [user(first_message + first_delivery)])
     last_term = None
     while True:
@@ -18,7 +18,7 @@ Loop (token policies; ``supports_delta=True``)::
             buf += renderer.continuation(last_term, tool_msgs +
             [user(delivery_text)]*bool(delivery_text)
                                          + nudge_msgs)
-        if context.should_compact(len(buf)):                          # context.py: compaction/tail
+        if last_term is not None and context.should_compact(len(buf)):
             buf, seg = await context.compact(...)                     # purpose=COMPACT call, new
             segment
         alloc = ledger.allocate(agent_id, prompt_len=len(buf), ...)
@@ -29,7 +29,8 @@ Loop (token policies; ``supports_delta=True``)::
                                                        seed=seed)
         record Call(prompt_len=len(buf), completion_ids=sample.completion_ids, ...); buf +=
         completion_ids
-        ledger.charge(...); parsed = renderer.parse(completion_ids); last_term = parsed.termination
+        ledger.charge(...); parsed = renderer.parse(completion_ids)
+        last_term = "stop" if completion_ids[-1] in renderer.stop_token_ids else "length"
         tool_msgs = []
         async with scheduler.tool_phase(agent_id):  # only if any called tool is shared
             for call in parsed.tool_calls (in order):  run tool -> tool message (truncated); stop
@@ -60,9 +61,19 @@ Details that are part of the contract:
   makes the carry call (context.py), starts a new SESSION segment
   ``initial(system, tools, [user(first_message + carry_text)])`` and
   continues. ``submit`` ends the whole agent.
-* Errors from the policy backend (after its retries) end the agent with
+* Backends must raise BackendError for transport/API failures after retries.
+  These end the agent with
   ``ended_by="error"`` and mark the episode not-ok; they never crash the
-  episode's other agents.
+  episode's other agents. Other exceptions propagate, including spend/config
+  errors and programming errors.
+* A segment is fresh until its first completion. Its recorder buffer is
+  created at the first call, so harness instructions belong in initial(),
+  before the generation header. Fresh segments never compact; an oversized
+  initial prompt follows on_exhaust, ending with "ctx" if even FINAL cannot fit.
+* COMPACT and CARRY reset context and proceed to ACT in the same ticket.
+  Context reserves protect the final instruction and prefix; on ctx exhaustion
+  pending observations are omitted from that final call to preserve its space.
+* System prompt n_agents is the role's count, or 0 for dynamic roles.
 
 Constructor (M1-8)::
 
@@ -82,7 +93,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
-from marli.errors import ConfigError
+from marli.errors import BackendError, ConfigError
 from marli.interact.context import ContextManager
 from marli.interact.limits import Allocation, Ledger, Limits
 from marli.interact.records import Recorder
@@ -130,15 +141,18 @@ class MessageLog:
 
     messages: list[Msg] = field(default_factory=list)
 
-    def assistant(self, parsed: ParsedTurn) -> None:
+    def assistant(self, parsed: ParsedTurn, call_id: str) -> None:
         self.messages.append(
             Msg(
                 "assistant",
                 parsed.content,
                 tool_calls=tuple(
-                    ToolCall(call.name, call.arguments, call.id)
-                    for call in parsed.tool_calls
-                    if call.ok and call.name is not None and call.arguments is not None
+                    ToolCall(
+                        call.name or "unparsed",
+                        call.arguments or {},
+                        call.id or f"{call_id}/t{index}",
+                    )
+                    for index, call in enumerate(parsed.tool_calls)
                 ),
                 thinking=parsed.thinking,
             )
@@ -210,15 +224,15 @@ class AgentRuntime:
         self.episode_idx = episode_idx
         self.sampling = sampling
         tool_ctx = ToolCtx(
-            info.agent_id,
-            info.role,
-            None,
-            0,
-            workspace,
-            sandbox,
-            scheduler,
-            system,
-            ledger,
+            agent_id=info.agent_id,
+            role=info.role,
+            tick=None,
+            seq=0,
+            workspace=workspace,
+            sandbox=sandbox,
+            scheduler=scheduler,
+            system=system,
+            ledger=ledger,
         )
         self.tools = {tool.spec.name: tool for tool in role_tools(role, tools, context, tool_ctx)}
         self.tool_specs = [tool.spec for tool in self.tools.values()]
@@ -234,7 +248,7 @@ class AgentRuntime:
         self.system_prompt = role.system_prompt.format(
             agent_id=info.agent_id,
             role=info.role,
-            n_agents=ledger.expected_agents,
+            n_agents=role.count or 0,
         )
         self.log = MessageLog()
         self.segment_id = ""
@@ -244,6 +258,7 @@ class AgentRuntime:
         self._carry = ""
         self._tail: list[int] = []
         self._fresh = True
+        self._ctx_reserve = 0
         self._last_term = "stop"
         self._tool_messages: list[Msg] = []
         self._reads: list[WorkspaceRead] = []
@@ -275,13 +290,13 @@ class AgentRuntime:
         self._segment_index += 1
         self.recorder.new_segment(
             SegmentInfo(
-                self.segment_id,
-                self.info.agent_id,
-                self._session,
-                reason,
-                self._carry_from,
-                self.renderer.name,
-                self.renderer.tokenizer_sha,
+                segment_id=self.segment_id,
+                agent_id=self.info.agent_id,
+                session_idx=self._session,
+                start_reason=reason,
+                carry_from=self._carry_from,
+                renderer=self.renderer.name,
+                tokenizer_sha=self.renderer.tokenizer_sha,
             ),
             ids,
         )
@@ -289,11 +304,34 @@ class AgentRuntime:
     def _initial(self, delivery: str | None) -> None:
         text = "\n\n".join(part for part in (self.first_message, self._carry, delivery) if part)
         self.log = MessageLog([Msg("user", text)])
-        if self.renderer and self.renderer.supports_delta:
-            ids = self.renderer.initial(self.system_prompt, self.tool_specs, self.log.messages)
-            self._new_segment(ids + self._tail, self._reason)
-        self._fresh = False
+        if self.renderer and self.limits.on_exhaust == "force_final":
+            # An empty assistant measures the unsampled close and the next header
+            # without asking continuation() to follow a nonexistent completion.
+            base = self.renderer.initial(self.system_prompt, self.tool_specs, self.log.messages)
+            final = self.renderer.initial(
+                self.system_prompt,
+                self.tool_specs,
+                self.log.messages + [Msg("assistant", ""), Msg("user", self._final_instruction)],
+            )
+            self._ctx_reserve = (
+                getattr(self.limits, self.role.limits_key).final_reserve
+                + len(final)
+                - len(base)
+                + len(self.renderer.forced_tool_prefix(self._final_tool))
+            )
         self._last_term = "stop"
+
+    @property
+    def _final_tool(self) -> str:
+        return "return_report" if self.role.limits_key == "worker" else "submit"
+
+    @property
+    def _final_instruction(self) -> str:
+        return (
+            "You have run out of budget. Return your report now."
+            if self.role.limits_key == "worker"
+            else "You have run out of budget. Submit your final answer now."
+        )
 
     def _reset(self, reason: SegmentStart, summary: str | None = None) -> None:
         notes = None
@@ -303,12 +341,15 @@ class AgentRuntime:
             notes = view.own_staged.get("notes")
             if notes is None:
                 notes, _ = self.workspace.read(self.info.agent_id, self.info.agent_id, "notes")
-        carry = self.context.carry_text(summary=summary, notes=notes)
+        carry = self.context.carry_text(
+            summary=summary, notes=notes, session=reason == SegmentStart.SESSION
+        )
         if carry.truncated:
             self.ledger.limit_hit(self.info.agent_id, "context.carry_truncated")
         self._carry = carry.text
         self._tail = self.context.tail_prefill(self._buffer())
         self._carry_from = self.segment_id or None
+        self.segment_id = ""
         self._reason = reason
         self._fresh = True
         self._tool_messages = []
@@ -336,7 +377,7 @@ class AgentRuntime:
     def _prompt(self, messages: list[Msg]) -> list[int]:
         if self.renderer is None:
             return []
-        if not self.renderer.supports_delta:
+        if self._fresh or not self.renderer.supports_delta:
             return (
                 self.renderer.initial(
                     self.system_prompt,
@@ -350,7 +391,9 @@ class AgentRuntime:
     def _prompt_len(self, delta: list[int]) -> int:
         if self.renderer is None:
             return 0
-        return len(delta) + (len(self._buffer()) if self.renderer.supports_delta else 0)
+        return len(delta) + (
+            len(self._buffer()) if self.renderer.supports_delta and not self._fresh else 0
+        )
 
     def _allocate(self, ticket: Ticket, length: int, purpose: Purpose) -> Allocation:
         return self.ledger.allocate(
@@ -359,6 +402,7 @@ class AgentRuntime:
             purpose=purpose,
             tick=ticket.tick,
             n_active=self.ledger.n_active,
+            ctx_reserve=self._ctx_reserve,
         )
 
     async def run(self) -> AgentResult:
@@ -396,12 +440,8 @@ class AgentRuntime:
                 self._initial(delivery)
             messages = [] if fresh else self._observations(delivery)
             reads = self._reads + delivered_reads
-            delta = (
-                []
-                if fresh and self.renderer and self.renderer.supports_delta
-                else self._prompt(messages)
-            )
-            compact = self.context.should_compact(self._prompt_len(delta))
+            delta = self._prompt(messages)
+            compact = not fresh and self.context.should_compact(self._prompt_len(delta))
             # A discarded delta cannot exhaust context before compaction gets a chance.
             allocation = self._allocate(
                 ticket,
@@ -418,23 +458,18 @@ class AgentRuntime:
                             ticket,
                             Purpose.CARRY,
                             instruction,
-                            messages,
-                            reads,
+                            [],
+                            delivered_reads if fresh else [],
                             forced=not self._session_pending,
                         )
                         if self.error:
                             return
                         summary = parsed.content if parsed else None
                     self._reset(SegmentStart.SESSION, summary)
-                    # One scheduler ticket gates at most one call.
-                    if instruction is not None:
-                        continue
                     self._initial(delivery)
                     compact = False
                     messages, reads = [], delivered_reads
-                    delta = (
-                        [] if self.renderer and self.renderer.supports_delta else self._prompt([])
-                    )
+                    delta = self._prompt([])
                     allocation = self._allocate(ticket, self._prompt_len(delta), Purpose.ACT)
                 else:
                     self.ledger.limit_hit(self.info.agent_id, "session.max_sessions")
@@ -450,25 +485,28 @@ class AgentRuntime:
                 )
                 if parsed is not None:
                     self._reset(SegmentStart.COMPACTION, parsed.content)
-                    continue
-                if self.error:
+                    self._initial(delivery)
+                    messages, reads = [], delivered_reads
+                    delta = self._prompt([])
+                    allocation = self._allocate(ticket, self._prompt_len(delta), Purpose.ACT)
+                elif self.error:
                     return
-                allocation = Allocation(0, "ctx.max_ctx")
+                else:
+                    allocation = Allocation(0, "ctx.max_ctx")
             if allocation.exhausted:
-                self.ended_by = (
-                    "max_ticks" if allocation.exhausted == "episode.max_ticks" else "budget"
-                )
+                self.ended_by = {
+                    "episode.max_ticks": "max_ticks",
+                    "ctx.max_ctx": "ctx",
+                }.get(allocation.exhausted, "budget")
                 if self.limits.on_exhaust == "force_final":
                     worker = self.role.limits_key == "worker"
-                    instruction = (
-                        "You have run out of budget. Return your report now."
-                        if worker
-                        else "You have run out of budget. Submit your final answer now."
-                    )
+                    if self.ended_by == "ctx":
+                        messages = []
+                        reads = reads if self._fresh else []
                     await self._harness_call(
                         ticket,
                         Purpose.REPORT if worker else Purpose.FINAL,
-                        instruction,
+                        self._final_instruction,
                         messages,
                         reads,
                         forced=True,
@@ -528,6 +566,10 @@ class AgentRuntime:
         *,
         forced: bool,
     ) -> ParsedTurn | None:
+        if not messages and self.log.messages and self.log.messages[-1].tool_calls:
+            # Dropping pending results must also drop their declarations from
+            # semantic history. The sampled token buffer remains untouched.
+            self.log.messages[-1] = replace(self.log.messages[-1], tool_calls=())
         messages = messages + [Msg("user", instruction)]
         delta = self._prompt(messages)
         prefix: list[int] = []
@@ -557,7 +599,10 @@ class AgentRuntime:
             allocation,
             forced=forced,
         )
+        ended_by = self.ended_by
         self._apply_control(control)
+        if forced and purpose in (Purpose.FINAL, Purpose.REPORT) and not self.error:
+            self.ended_by = ended_by
         return parsed
 
     async def _call(
@@ -574,11 +619,12 @@ class AgentRuntime:
     ) -> tuple[ParsedTurn | None, dict[str, Any]]:
         self.log.messages.extend(messages)
         if self.renderer:
-            if self.renderer.supports_delta:
+            if self.renderer.supports_delta and not self._fresh:
                 self.recorder.extend(self.segment_id, delta + prefix)
             else:
                 self._carry_from = self.segment_id or self._carry_from
-                self._new_segment(delta + prefix, SegmentStart.RERENDER)
+                reason = self._reason if self.renderer.supports_delta else SegmentStart.RERENDER
+                self._new_segment(delta + prefix, reason)
         self._tail = []
         self._tool_messages, self._reads, self._nudges = [], [], []
         prompt_len = len(self._buffer())
@@ -638,16 +684,7 @@ class AgentRuntime:
         except asyncio.CancelledError as exc:
             cancelled = exc
             self.ended_by = "budget"
-        except (
-            TypeError,
-            ValueError,
-            LookupError,
-            AttributeError,
-            AssertionError,
-            NotImplementedError,
-        ):
-            raise
-        except Exception as exc:
+        except BackendError as exc:
             self.error = f"{self.info.agent_id}: {type(exc).__name__}: {exc}"
             self.ended_by = "error"
         else:
@@ -667,8 +704,13 @@ class AgentRuntime:
                 gen_tokens=len(ids) if self.renderer else usage.completion_tokens,
                 purpose=purpose,
             )
-            self._last_term = parsed.termination
-            self.log.assistant(parsed)
+            self._fresh = False
+            self._last_term = (
+                ("stop" if ids and ids[-1] in self.renderer.stop_token_ids else "length")
+                if self.renderer
+                else parsed.termination
+            )
+            self.log.assistant(parsed, call_id)
         self._call_index += 1
         self.recorder.add_event(
             EventKind.CALL_END,
@@ -686,28 +728,28 @@ class AgentRuntime:
         finally:
             self.recorder.add_call(
                 Call(
-                    call_id,
-                    self.recorder.episode_id,
-                    self.info.agent_id,
-                    self.info.role,
-                    self.info.policy_id,
-                    version,
-                    self.segment_id,
-                    prompt_len,
-                    ids,
-                    logprobs,
-                    text,
-                    Termination(parsed.termination) if parsed else Termination.ERROR,
-                    purpose,
-                    forced,
-                    tuple(tool_records),
-                    tuple(reads),
-                    ticket.tick,
-                    seq,
-                    self._session,
-                    seed,
-                    usage,
-                    timing,
+                    call_id=call_id,
+                    episode_id=self.recorder.episode_id,
+                    agent_id=self.info.agent_id,
+                    role=self.info.role,
+                    policy_id=self.info.policy_id,
+                    policy_version=version,
+                    segment_id=self.segment_id,
+                    prompt_len=prompt_len,
+                    completion_ids=ids,
+                    logprobs=logprobs,
+                    text=text,
+                    termination=Termination(parsed.termination) if parsed else Termination.ERROR,
+                    purpose=purpose,
+                    forced=forced,
+                    tool_calls=tuple(tool_records),
+                    reads=tuple(reads),
+                    tick=ticket.tick,
+                    seq=seq,
+                    session_idx=self._session,
+                    seed=seed,
+                    usage=usage,
+                    timing=timing,
                 )
             )
         if cancelled is not None:
@@ -740,15 +782,15 @@ class AgentRuntime:
                     name=call.name,
                 )
                 ctx = ToolCtx(
-                    self.info.agent_id,
-                    self.info.role,
-                    ticket.tick,
-                    seq,
-                    self.workspace,
-                    self.sandbox,
-                    self.scheduler,
-                    self.system,
-                    self.ledger,
+                    agent_id=self.info.agent_id,
+                    role=self.info.role,
+                    tick=ticket.tick,
+                    seq=seq,
+                    workspace=self.workspace,
+                    sandbox=self.sandbox,
+                    scheduler=self.scheduler,
+                    system=self.system,
+                    ledger=self.ledger,
                 )
                 before = len(self.workspace.log())
                 if stopped:
@@ -765,7 +807,7 @@ class AgentRuntime:
                     )
                 else:
                     result = await run_tool(tool, ctx, cast(dict[str, Any], call.arguments))
-                    stopped = tool.control
+                    stopped = tool.control and result.error is None
                 writes = [
                     write
                     for write in self.workspace.log()[before:]
