@@ -9,8 +9,8 @@ Each study contains:
 - `README.md`: question, hypothesis, design/arms, exact commands run, results
   summary with n and CIs, deviations from the design, and spend.
 - `configs/`: YAML passed to `marli` verbs.
-- `run.sh`: the canonical chain of `marli` CLI calls, or `run.py` awaiting
-  library verbs when the chain needs logic.
+- `run.sh`: the canonical chain of `marli` CLI calls, or a `run.py` that
+  `await`s library verbs when the chain needs logic.
 - `results/`: small committed deliverables (`results.jsonl`, `RESULTS.md`,
   `figures/`).
 - `out/`: gitignored bytes such as episodes and checkpoints.

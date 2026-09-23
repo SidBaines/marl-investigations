@@ -47,7 +47,7 @@ at experiment wrap-up; nothing enters any other way.
   `timestamp` (last substantive update). Source pages add `source_date` and
   `status` (`firm` / `partial` / `pilot`).
 - **Epistemic status is load-bearing.** Mark claims `[firm]` (multi-seed /
-  multi-substrate, CI-backed), `[partial]` (single seed or ~1–2 SE),
+  multi-model or multi-benchmark, CI-backed), `[partial]` (single seed or ~1–2 SE),
   `[pilot]` (anecdotal, one cell), or `[open]` where strength matters. A wiki
   that flattens a 1-seed pilot and a 38-cell sweep into the same voice is
   worse than no wiki.

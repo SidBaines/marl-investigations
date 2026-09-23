@@ -24,7 +24,7 @@ by `run.sh` (or `run.py`).
 
 Report aggregate results with n and CIs, paired lift, generated and
 critical-path tokens per episode, and LM calls; link small deliverables in
-`results/` and leave raw bytes in `out/` without committing gated text.
+`results/`. Raw episodes stay in gitignored `out/`; never commit gated benchmark text.
 
 ## Deviations from the design
 

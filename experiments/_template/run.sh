@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-STUDY="$(cd "$(dirname "$0")" && basename "$PWD")"
-cd "$(dirname "$0")/../.."
-OUT="experiments/$STUDY/out"
+# Works wherever this study dir lives (including nested sub-studies).
+HERE="$(cd "$(dirname "$0")" >/dev/null && pwd)"
+cd "$(git -C "$HERE" rev-parse --show-toplevel)"
+OUT="$HERE/out"
+CONFIGS="$HERE/configs"
 
-# These verbs land in later milestones; this is a commented example only.
-# Fill in model/protocol/seating configs before use. Every paid step needs
-# an explicit max_usd budget and Sid's confirmation before launch.
-# Chain verbs via the manifest in the single JSON line each prints:
-# TASKS=$(uv run marli data build gsm8k split=test max_n=100 --out "$OUT/tasks" | jq -r .manifest)
-# EPISODES=$(uv run marli eval rollout --tasks "$TASKS" max_usd=1 --out "$OUT/episodes" | jq -r .manifest)
+# Example chain (the verbs land in later milestones). Every paid step needs an
+# explicit max_usd budget and Sid's confirmation before launch. Each verb
+# prints exactly one JSON line; chain on its "manifest" field:
+#
+# TASKS=$(uv run marli data build aime_2025 --out "$OUT/tasks" | jq -r .manifest)
+# EPISODES=$(uv run marli eval rollout "$CONFIGS/rollout.yaml" --tasks "$TASKS" \
+#     protocol=swarm seating.by_role.peer=<policy-ref> max_usd=1 --out "$OUT/episodes" | jq -r .manifest)
+# uv run marli eval report --episodes "$EPISODES" --out "$OUT/report"
