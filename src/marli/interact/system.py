@@ -62,6 +62,8 @@ class RoleSpec:
     # workspace permissions (read others / readable roles / write own scratchpad);
     # None = the default Permissions(). ``notes`` is always derived from ``context``.
     permissions: Permissions | None = None
+    # Publish visible ACT replies via the same staged workspace path as tools.
+    publish_final_text: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,6 +105,27 @@ class SystemIO(ABC):
     @abstractmethod
     # env verifier-equivalence key (votes)
     def canonicalize(self, answer: str | None) -> str | None: ...
+
+    @abstractmethod
+    async def vote(
+        self, submissions: dict[str, str | None]
+    ) -> tuple[str | None, dict[str, int]]:
+        """Greedily cluster by verifier equivalence; exclude None and seed ties.
+
+        Each cluster compares new answers to its first member. Return a winning
+        first member's raw answer and counts keyed by each first member's
+        canonical answer (or its raw answer when canonical returns None).
+        """
+        ...
+
+    @abstractmethod
+    def stop(self, handle: Any, reason: str) -> None:
+        """Request termination at the next turn, forcing FINAL if unanswered.
+
+        The runtime respects on_exhaust and records reason as ended_by. Already
+        submitted agents finish without another call; completed handles are a no-op.
+        """
+        ...
 
 
 class Protocol(ABC):
@@ -260,3 +283,30 @@ class EpisodeSystem(SystemIO):
 
     def canonicalize(self, answer: str | None) -> str | None:
         return self.env.canonical(answer)
+
+    async def vote(
+        self, submissions: dict[str, str | None]
+    ) -> tuple[str | None, dict[str, int]]:
+        clusters: list[list[str]] = []
+        for answer in submissions.values():
+            if answer is None:
+                continue
+            for cluster in clusters:
+                if await self.env.same_answer(answer, cluster[0]):
+                    cluster.append(answer)
+                    break
+            else:
+                clusters.append([answer])
+        if not clusters:
+            return None, {}
+        votes = {}
+        for cluster in clusters:
+            key = self.env.canonical(cluster[0])
+            votes[cluster[0] if key is None else key] = len(cluster)
+        largest = max(map(len, clusters))
+        winners = [cluster[0] for cluster in clusters if len(cluster) == largest]
+        return (winners[0] if len(winners) == 1 else self.rng.choice(winners)), votes
+
+    def stop(self, handle: AgentHandle, reason: str) -> None:
+        if not handle.task.done():
+            self.runtimes[handle.agent_id].request_stop(reason)

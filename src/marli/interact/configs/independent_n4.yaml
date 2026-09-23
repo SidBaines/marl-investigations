@@ -1,0 +1,4 @@
+protocol: independent
+config:
+  n_agents: 4
+notes: Four independent samples plus vote (SC@4), with no cross-peer tools or deliveries.
