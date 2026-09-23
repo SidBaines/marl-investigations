@@ -31,7 +31,7 @@ from marli.seeds import derive_seed
 if TYPE_CHECKING:
     from marli.envs.base import Env
     from marli.interact.agent import AgentRuntime
-    from marli.interact.limits import Ledger
+    from marli.interact.limits import Ledger, Limits
     from marli.interact.records import Recorder
     from marli.interact.run import EpisodeSpec
     from marli.interact.scheduler import Scheduler
@@ -113,6 +113,15 @@ class Protocol(ABC):
 
     @abstractmethod
     async def run(self, io: SystemIO) -> Outcome: ...
+
+    def adjust_limits(self, limits: Limits) -> Limits:
+        """Return the episode limits this protocol runs under (default: unchanged).
+
+        Protocol *shape* that the runtime reads from ``Limits`` (e.g. the number
+        of sessions) is set here from the protocol config, so callers configure
+        it once. Must not mutate ``limits``; applied before validation.
+        """
+        return limits
 
 
 PROTOCOLS: FnRegistry = FnRegistry("protocols")  # name -> factory(config) -> Protocol

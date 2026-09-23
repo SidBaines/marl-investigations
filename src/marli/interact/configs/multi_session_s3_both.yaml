@@ -1,5 +1,7 @@
-# Compose as MultiSessionConfig; pair with limits.session.max_sessions=3.
-sessions: 3
-carry: both
-compact_threshold: 0
-notes_cap_chars: 4000
+protocol: multi_session
+config:
+  sessions: 3
+  carry: both
+  compact_threshold: 0
+  notes_cap_chars: 4000
+notes: 3 sessions; carry = session-end summary + private notes.

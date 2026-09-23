@@ -9,14 +9,13 @@ Session counts come from the runtime's call/segment records in compute_metrics.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import cast
+from dataclasses import dataclass, replace
 
 from marli.errors import ConfigError
+from marli.interact.limits import Limits
 from marli.interact.system import (
     PROTOCOLS,
     ContextSpec,
-    EpisodeSystem,
     Protocol,
     RoleSpec,
     SystemIO,
@@ -65,6 +64,7 @@ class MultiSessionConfig:
 @PROTOCOLS.register("multi_session")
 class MultiSessionProtocol(Protocol):
     name = "multi_session"
+    config_type = MultiSessionConfig
 
     def __init__(self, config: MultiSessionConfig | None = None) -> None:
         self.config = config if config is not None else MultiSessionConfig()
@@ -116,13 +116,11 @@ class MultiSessionProtocol(Protocol):
             )
         ]
 
+    def adjust_limits(self, limits: Limits) -> Limits:
+        """The protocol owns the session count; budgets stay in ``Limits``."""
+        return replace(limits, session=replace(limits.session, max_sessions=self.config.sessions))
+
     async def run(self, io: SystemIO) -> Outcome:
-        limits = cast(EpisodeSystem, io).spec.limits
-        if limits.session.max_sessions != self.config.sessions:
-            raise ConfigError(
-                f"multi_session.sessions={self.config.sessions} must match "
-                f"limits.session.max_sessions={limits.session.max_sessions}"
-            )
         handle = await io.start_agent(
             "solver",
             agent_id="solver0",

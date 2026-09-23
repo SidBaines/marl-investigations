@@ -11,6 +11,7 @@ from _marli_test_envs import ArithEnv
 
 from marli.config import compose
 from marli.errors import ConfigError
+from marli.interact.configs import resolve_protocol
 from marli.interact.limits import CallLimits, Limits, SessionLimits
 from marli.interact.protocols.multi_session import MultiSessionConfig, MultiSessionProtocol
 from marli.interact.run import EpisodeSpec, run_episode
@@ -274,14 +275,19 @@ async def test_notes_cap_is_applied_to_workspace_and_carry(carry: str) -> None:
     assert f"[Your notes]\n{NOTES[-10:]}" in spec.policies["script"].calls[-1].prompt_text
 
 
-async def test_session_limit_mismatch_fails_before_sampling_without_mutation() -> None:
-    spec = make_spec(MultiSessionConfig(), [])
-    spec.limits.session.max_sessions = 2
-    with pytest.raises(ConfigError, match=r"sessions=3.*limits.session.max_sessions=2"):
-        await run_episode(spec)
-    assert spec.policies["script"].calls == []
-    assert spec.limits.session.max_sessions == 2
-    assert spec.env.teardown_count == 1
+async def test_protocol_sets_session_count_without_mutating_caller_limits() -> None:
+    spec = make_spec(
+        MultiSessionConfig(sessions=2),
+        [
+            Turn(tool_calls=(("end_session", {}),)),
+            Turn(SUMMARY),
+            Turn(tool_calls=(("submit", {"answer": "5"}),)),
+        ],
+    )
+    spec.limits.session.max_sessions = 7
+    episode, _ = await run_episode(spec)
+    assert episode.outcome.final_answer == "5" and episode.metrics["n_sessions"] == 2
+    assert spec.limits.session.max_sessions == 7
 
 
 @pytest.mark.parametrize(
@@ -312,7 +318,7 @@ def test_unknown_config_keys_rejected() -> None:
 
 @pytest.mark.parametrize("carry", CARRY_MODES)
 async def test_three_session_presets_run(carry: str) -> None:
-    config = compose(MultiSessionConfig, CONFIGS / f"multi_session_s3_{carry}.yaml")
+    config = resolve_protocol(f"multi_session_s3_{carry}")[1]
     assert config.sessions == 3 and config.carry == carry
     turns: list[Turn] = []
     for _ in range(2):
@@ -326,7 +332,7 @@ async def test_three_session_presets_run(carry: str) -> None:
 
 
 async def test_self_refine_preset_carries_candidate_for_second_session() -> None:
-    config = compose(MultiSessionConfig, CONFIGS / "self_refine_s2.yaml")
+    config = resolve_protocol("self_refine_s2")[1]
     assert config.sessions == 2 and config.carry == "notes"
     spec = make_spec(
         config,
