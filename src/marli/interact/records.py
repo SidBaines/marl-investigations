@@ -2,9 +2,11 @@
 
 ``Recorder`` is shared by every agent of one episode; the rollout layer turns
 it into an :class:`~marli.interact.types.Episode`. Token buffers are stored in
-an ``.npz`` sidecar (one int32 array per segment, key = segment_id) that is
-written and fsynced **before** the episode's JSONL row, so a row on disk
-always has its tokens (crash-safety; see rundir.py).
+a ``tokens.jsonl`` sidecar next to ``episodes.jsonl`` — one row per episode,
+``{"episode_id": ..., "segments": {segment_id: base64(int32 little-endian)}}``
+(stdlib only; ~5.3 chars/token) — appended and fsynced **before** the
+episode's own row, so a row on disk always has its tokens (crash-safety; see
+rundir.py). Eval runs may skip tokens (``record_tokens=False``).
 
 Compute metrics (``compute_metrics(episode, buffers) -> dict[str, float]``,
 all computed offline from records so every protocol is measured identically):

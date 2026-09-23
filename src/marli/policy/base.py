@@ -64,6 +64,20 @@ class Sample:
     usage: Usage = Usage()
 
 
+@dataclass(frozen=True)
+class CallMeta:
+    """Who is calling — for logging, scripted test policies and per-agent routing.
+
+    Backends must not change *what* they sample based on this (except scripted
+    policies, which exist to be deterministic functions of it)."""
+
+    episode_id: str = ""
+    agent_id: str = ""
+    role: str = ""
+    call_index: int = 0  # 0-based index of this call among the agent's calls
+    purpose: str = "act"  # interact.types.Purpose value
+
+
 @runtime_checkable
 class TokenPolicy(Protocol):
     policy_id: str
@@ -71,7 +85,12 @@ class TokenPolicy(Protocol):
     renderer_name: str  # must match the agent's renderer (validated at seating time)
 
     async def sample(
-        self, prompt_ids: Sequence[int], spec: SamplingSpec, *, seed: int
+        self,
+        prompt_ids: Sequence[int],
+        spec: SamplingSpec,
+        *,
+        seed: int,
+        meta: CallMeta | None = None,
     ) -> Sample: ...
 
 
@@ -99,8 +118,9 @@ class ChatPolicy(Protocol):
         max_tokens: int,
         temperature: float,
         seed: int,
-        # REQUIRED and per call: identical prompts must not collapse to one sample
+        # REQUIRED and per call: identical prompts must not collapse to one sample.
         cache_salt: str,
+        meta: CallMeta | None = None,
     ) -> ChatReply: ...
 
 
