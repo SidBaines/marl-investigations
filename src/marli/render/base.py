@@ -2,23 +2,42 @@
 
 Agents keep an append-only token buffer per segment. A renderer turns chat
 messages into token ids in two steps: ``initial`` renders the first prompt
-(system + tools + messages, ending with the assistant generation header);
-``continuation`` renders only what comes *after* a sampled completion (closing
-the previous turn if it ended on ``length``, the new tool results / pushed
-messages, and the next generation header). The sampled ids themselves are
-appended verbatim by the agent runtime — the renderer never re-renders them.
-This is what keeps "datums use exactly the ids the policy saw" true and makes
-one datum per segment possible.
+(system + tools + messages, ending with the assistant generation header and
+any generation prefill such as Qwen3.5's ``<think>\n``); ``continuation``
+renders only what comes *after* a sampled completion (closing the previous turn
+if it ended on ``length``, the new tool results / delivered messages, and the
+next generation header). The sampled ids themselves are appended verbatim by
+the agent runtime — the renderer never re-renders them. This keeps "datums use
+exactly the ids the policy saw" true and makes one datum per segment possible.
 
-Renderers whose delta output has not passed parity tests against the model's
-reference chat template set ``supports_delta = False``; the runtime then starts
-a new segment per call, re-rendering the full message history with
-``initial`` (``SegmentStart.RERENDER``). That is chosen per renderer at config
-time, never per call.
+**Canonical format = the model's own HF chat template**, not tinker-cookbook's
+renderers: a 2026-09-23 prototype showed the cookbook's Qwen3.5 renderer
+deviates from the HF template (unwrapped tool JSON in the system prompt,
+history thinking stripped so re-renders don't prefix-extend what was sampled)
+and its XML tool-call parser coerces string parameters (``"4"`` → ``4``).
+Concrete renderers therefore build ``initial`` with
+``tokenizer.apply_chat_template`` and ``continuation`` by rendering the new
+messages after a *sentinel* assistant turn and slicing after the sentinel's
+end-of-turn special token (turn boundaries are special tokens, so slices
+tokenize independently); gpt-oss uses the official ``openai_harmony``
+encoding. Parity tests compare ``initial + completion + continuation`` against
+``apply_chat_template`` of the equivalent full conversation.
 
-Concrete renderers wrap tinker-cookbook renderers (``render/qwen3.py``,
-``render/qwen3_5.py``, ``render/gpt_oss.py``); ``render/fake.py`` is a
-character-level renderer for CPU tests.
+Renderers whose delta output has not passed parity tests set
+``supports_delta = False``; the runtime then starts a new segment per call,
+re-rendering the full message history with ``initial``
+(``SegmentStart.RERENDER``). Chosen per renderer at config time, never per call.
+
+``delivery_role`` says how the runtime injects workspace deliveries
+(notify/push text): ``"tool"`` = as an extra tool-result message after the
+turn's tool results (Qwen templates group consecutive tool responses, and tool
+responses do not reset "last user query", so reasoning stays in-distribution);
+``"append_tool"`` = appended to the content of the turn's last tool result
+(formats where uncalled tool messages are invalid, e.g. Harmony); ``"user"`` =
+as a user message. When the previous turn made no tool call, deliveries always
+go in a user message.
+
+``render/fake.py`` is a character-level renderer for CPU tests.
 """
 
 from __future__ import annotations
@@ -92,6 +111,7 @@ class DeltaRenderer(Protocol):
     supports_delta: bool
     tokenizer_sha: str
     stop_token_ids: tuple[int, ...]  # ids that end an assistant turn (included in completions)
+    delivery_role: str  # "tool" | "append_tool" | "user" (see module docstring)
 
     def initial(
         self, system: str | None, tools: Sequence[ToolSpec], msgs: Sequence[Msg]
@@ -113,8 +133,10 @@ class DeltaRenderer(Protocol):
         arguments)."""
         ...
 
-    def parse(self, completion_ids: Sequence[int]) -> ParsedTurn:
-        """Parse sampled ids (including the stop token, if any)."""
+    def parse(self, completion_ids: Sequence[int], tools: Sequence[ToolSpec] = ()) -> ParsedTurn:
+        """Parse sampled ids (including the stop token, if any). ``tools`` lets formats
+        with untyped parameter text (Qwen3.5 XML) type arguments by their JSON schema:
+        string-typed parameters keep the raw text; others are JSON-decoded when possible."""
         ...
 
     def decode(self, ids: Sequence[int]) -> str: ...

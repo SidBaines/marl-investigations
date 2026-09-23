@@ -54,6 +54,7 @@ class FakeRenderer:
     supports_delta = True
     tokenizer_sha = hashlib.sha256(("fake-v1:" + ",".join(SPECIALS)).encode()).hexdigest()[:16]
     stop_token_ids = (S["eot"],)
+    delivery_role = "tool"
 
     # -- rendering -----------------------------------------------------------------
     def initial(
@@ -152,7 +153,7 @@ class FakeRenderer:
         return ids
 
     # -- parsing ---------------------------------------------------------------------
-    def parse(self, completion_ids: Sequence[int]) -> ParsedTurn:
+    def parse(self, completion_ids: Sequence[int], tools: Sequence[ToolSpec] = ()) -> ParsedTurn:
         ids = list(completion_ids)
         termination = "stop"
         if ids and ids[-1] == S["eot"]:
