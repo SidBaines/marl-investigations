@@ -263,3 +263,17 @@ def test_episode_reserve_and_same_ticket_calls_cannot_spend_another_seats_share(
     assert alloc(ledger, active=2).exhausted == "episode.max_gen_tokens"
     assert alloc(ledger, purpose=Purpose.FINAL, active=2).max_tokens == 10
     assert alloc(ledger, "b", active=2).max_tokens == 40
+
+
+@pytest.mark.parametrize("schedule", ["lockstep", "async"])
+def test_all_or_nothing_reservation_leaves_no_partial_reserve(schedule: str) -> None:
+    cfg = limits()
+    cfg.episode.max_gen_tokens = 100
+    cfg.session = replace(cfg.session, max_sessions=1)
+    ledger = Ledger(cfg, schedule=schedule)
+    ledger.register("a", kind="agent")
+    before = alloc(ledger).max_tokens
+    assert ledger.reserve_workers("a", 3, all_or_nothing=True) == 2
+    assert alloc(ledger).max_tokens == before  # nothing reserved
+    assert ledger.reserve_workers("a", 2, all_or_nothing=True) == 2
+    assert alloc(ledger).max_tokens == 10

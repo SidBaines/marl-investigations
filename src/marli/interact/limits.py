@@ -326,7 +326,12 @@ class Ledger:
             owner.reserved -= gen_tokens
             owner.share -= gen_tokens
 
-    def reserve_workers(self, parent_id: str, k: int) -> int:
+    def reserve_workers(self, parent_id: str, k: int, *, all_or_nothing: bool = False) -> int:
+        """Reserve budget for up to ``k`` workers; return how many are affordable.
+
+        With ``all_or_nothing`` nothing is reserved unless all ``k`` fit (the
+        return value still says how many would have fit, for the error message).
+        """
         state = self._agents[parent_id]
         if state.kind == "worker":
             self.limit_hit(parent_id, "spawn.max_depth")
@@ -354,6 +359,8 @@ class Ledger:
         count = min(k, available)
         if count < k:
             self.limit_hit(parent_id, name)
+            if all_or_nothing:
+                return count
         state.reserved += count * self.limits.worker.max_gen_tokens
         state.pending_workers += count
         state.workers += count
