@@ -16,7 +16,7 @@ from typing import Literal
 import pytest
 import yaml
 from omegaconf import MISSING
-from omegaconf.errors import OmegaConfBaseException
+from omegaconf.errors import MissingMandatoryValue, OmegaConfBaseException
 
 from marli.config import (
     compose,
@@ -158,19 +158,37 @@ def test_type_validation_errors_name_key(tmp_path: Path, source: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("cls", "overrides", "key"),
+    ("cfg", "overrides", "key"),
     [
-        (RequiredConfig, [], "name"),
-        (RequiredConfig, ["name=run"], "task"),
-        (RequiredConfig, ["name=run", "task=???"], "task"),
-        (NestedRequiredConfig, [], "required.name"),
+        (RequiredConfig(MISSING), [], "name"),
+        (RequiredConfig("run"), ["name=run"], "task"),
+        (RequiredConfig("run"), ["name=run", "task=???"], "task"),
+        (NestedRequiredConfig(), [], "required.name"),
     ],
 )
-def test_missing_mandatory_values(cls: type, overrides: list[str], key: str) -> None:
-    with pytest.raises(ConfigError) as caught:
-        compose(cls, overrides=overrides)
-    assert str(caught.value) == f"missing mandatory config key '{key}'"
-    assert isinstance(caught.value.__cause__, OmegaConfBaseException)
+def test_missing_mandatory_values(
+    cfg: RequiredConfig | NestedRequiredConfig, overrides: list[str], key: str
+) -> None:
+    with pytest.raises(ConfigError) as composed:
+        compose(type(cfg), overrides=overrides)
+    with pytest.raises(ConfigError) as hashed:
+        config_hash(cfg)
+    assert str(composed.value) == str(hashed.value) == f"missing mandatory config key '{key}'"
+    assert isinstance(composed.value.__cause__, MissingMandatoryValue)
+    assert isinstance(hashed.value.__cause__, MissingMandatoryValue)
+
+
+@pytest.mark.parametrize("source", ["yaml", "override"])
+def test_missing_overlays_preserve_defaults(tmp_path: Path, source: str) -> None:
+    # OmegaConf merges ignore missing overlay values when the base has a value.
+    if source == "yaml":
+        path = tmp_path / "missing.yaml"
+        path.write_text("steps: ???\ntasks: ???\n")
+        cfg = compose(TrainConfig, path)
+    else:
+        cfg = compose(TrainConfig, overrides=["steps=???", "tasks=???"])
+    assert cfg == TrainConfig()
+    assert config_hash(cfg) == config_hash(TrainConfig())
 
 
 def test_post_init_errors_are_wrapped() -> None:
@@ -373,7 +391,6 @@ def test_hash_normalizes_direct_and_composed_configs() -> None:
             "invalid config key 'lr': Value 'nope' of type 'str' could not be converted to Float",
         ),
         ("lr", -1, "train.lr must be positive"),
-        ("tasks", MISSING, "missing mandatory config key 'tasks'"),
     ],
 )
 def test_hash_validation_matches_compose(key: str, value: object, message: str) -> None:
@@ -386,6 +403,21 @@ def test_hash_validation_matches_compose(key: str, value: object, message: str) 
     assert str(hashed.value) == str(composed.value) == message
     assert isinstance(hashed.value.__cause__, (OmegaConfBaseException, ValueError))
     assert type(hashed.value.__cause__) is type(composed.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    ("cfg", "key"),
+    [
+        (TrainConfig(tasks=MISSING), "tasks"),
+        (Config(train=TrainConfig(tasks=MISSING)), "train.tasks"),
+    ],
+)
+def test_hash_rejects_missing_input_fields(cfg: TrainConfig | Config, key: str) -> None:
+    # Direct instances are normalized as-is, before input fields are excluded.
+    with pytest.raises(ConfigError) as caught:
+        config_hash(cfg)
+    assert str(caught.value) == f"missing mandatory config key '{key}'"
+    assert isinstance(caught.value.__cause__, MissingMandatoryValue)
 
 
 def test_hash_uses_canonical_json_and_ignores_field_order() -> None:
