@@ -46,12 +46,14 @@ class LearnerSpec:
     backend: str = doc_field("tinker", help="tinker | local | fake")
     rank: int = 32
     learning_rate: float = 1e-5
-    # optimizer (AdamW) — defaults follow tinker-cookbook RL recipes
+    # optimizer (AdamW) — defaults follow tinker-cookbook RL recipes (train_step)
     beta1: float = 0.9
     beta2: float = 0.95
     eps: float = 1e-8
     weight_decay: float = 0.0
-    grad_clip: float = 1.0
+    # 0 = no clipping (cookbook default). The RL loss is sum-reduced, so a small
+    # clip would fire every step and divide out credit.loss_agg's global scale.
+    grad_clip: float = 0.0
     loss: str = doc_field("importance_sampling", help="importance_sampling | ppo")
     init_from: str | None = doc_field(None, help="checkpoint manifest (state) to resume/warm-start")
 
