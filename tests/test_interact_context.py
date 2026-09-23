@@ -287,7 +287,10 @@ def test_enabled_compaction_reserve_must_cover_summary(kind: str, reserve: int) 
 @pytest.mark.parametrize("carry_reserve", [0, -1, 31])
 @pytest.mark.parametrize("threshold", [0, 64])
 def test_summary_carry_requires_reserve(kind: str, carry_reserve: int, threshold: int) -> None:
-    with pytest.raises(ConfigError, match=r"session\.carry_reserve.*cover the summary") as caught:
+    # a negative reserve is rejected by Limits validation (non-negative), others by coverage
+    with pytest.raises(
+        ConfigError, match=r"session\.carry_reserve.*(cover the summary|non-negative)"
+    ) as caught:
         make_context_manager(
             ContextSpec(kind=kind, compact_threshold=threshold),
             Limits(session=SessionLimits(carry_reserve=carry_reserve, carry_max_tokens=32)),

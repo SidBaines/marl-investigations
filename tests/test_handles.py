@@ -189,9 +189,7 @@ def test_load_rejects_missing_manifest_version(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("operation", ["load", "save"])
 @pytest.mark.parametrize("content", [b"{", b"not JSON", b"\xff", b"[]", b"null", b"1", b'"text"'])
-def test_invalid_manifest_is_config_error(
-    tmp_path: Path, operation: str, content: bytes
-) -> None:
+def test_invalid_manifest_is_config_error(tmp_path: Path, operation: str, content: bytes) -> None:
     handle = TinyHandle(root=tmp_path)
     path = handle.manifest_path
     path.write_bytes(content)

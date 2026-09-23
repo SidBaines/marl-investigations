@@ -159,7 +159,7 @@ def role_tools(
     resolved: list[Tool] = []
     for name in dict.fromkeys(names):
         if name in TOOLS.names():
-            resolved.append(TOOLS.get(name)(ctx))
+            resolved.append(TOOLS.get(name)())
         elif name in available:
             resolved.append(available[name])
         else:
