@@ -9,11 +9,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar, Self
+from uuid import uuid4
 
 from marli import __version__
 from marli.config import to_dict
@@ -33,12 +33,10 @@ def atomic_write_text(path: str | Path, text: str) -> None:
     """Durably replace a UTF-8 file using a temporary file on the same filesystem."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
+    temporary = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.tmp-", delete=False
-        ) as stream:
-            temporary = Path(stream.name)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
@@ -49,8 +47,17 @@ def atomic_write_text(path: str | Path, text: str) -> None:
         finally:
             os.close(directory_fd)
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        temporary.unlink(missing_ok=True)
+
+
+def _read_manifest(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ConfigError(f"{path}: invalid manifest JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigError(f"{path}: manifest must be a JSON object")
+    return data
 
 
 def _input_path(path: Path) -> str:
@@ -124,7 +131,10 @@ class Handle:
         """Resolve a declared path field to this handle's own bytes."""
         if name not in self.PATH_FIELDS:
             raise ConfigError(f"{type(self).__name__} has no path field {name!r}")
-        return self.root / getattr(self, name)
+        value = getattr(self, name)
+        if value is None:
+            raise ConfigError(f"{self.manifest_path}: path field {name!r} is None")
+        return self.root / value
 
     def summary(self) -> dict[str, Any]:
         """Extra fields for a verb's one-line CLI result."""
@@ -136,7 +146,10 @@ class Handle:
         del data["root"]
         root = self.root.resolve()
         for name in self.PATH_FIELDS:
-            path = (root / getattr(self, name)).resolve()
+            value = getattr(self, name)
+            if value is None:
+                continue
+            path = (root / value).resolve()
             if not path.is_relative_to(root):
                 raise ConfigError(
                     f"path field {name!r} resolves outside handle root {root}: {path}"
@@ -144,7 +157,10 @@ class Handle:
             data[name] = path.relative_to(root).as_posix()
         path = self.manifest_path
         if path.exists():
-            created_at = json.loads(path.read_text(encoding="utf-8"))["created_at"]
+            existing = _read_manifest(path)
+            if "created_at" not in existing:
+                raise ConfigError(f"{path}: manifest is missing created_at")
+            created_at = existing["created_at"]
         else:
             created_at = datetime.now(UTC).isoformat(timespec="seconds")
         data.update(
@@ -169,14 +185,17 @@ class Handle:
         if path.is_dir():
             path /= cls.MANIFEST
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = _read_manifest(path)
         except FileNotFoundError as exc:
             raise FileNotFoundError(
                 f"manifest not found: {path}; use {cls.__name__}.at(path) for ad-hoc data"
             ) from exc
         if data.get("kind") != cls.KIND:
             raise ConfigError(f"{path}: expected kind {cls.KIND!r}, got {data.get('kind')!r}")
-        if data["manifest_version"] > MANIFEST_VERSION:
+        version = data.get("manifest_version")
+        if type(version) is not int:
+            raise ConfigError(f"{path}: manifest_version must be an integer, got {version!r}")
+        if version > MANIFEST_VERSION:
             raise ConfigError(
                 f"{path}: manifest_version {data['manifest_version']} is newer than "
                 f"supported version {MANIFEST_VERSION}"
@@ -186,8 +205,11 @@ class Handle:
         if unknown:
             raise ConfigError(f"{path}: unknown manifest keys {sorted(unknown)}")
         values = {name: value for name, value in data.items() if name in names}
-        values["inputs"] = tuple(InputRef(**ref) for ref in values.get("inputs", ()))
-        return cls(root=path.resolve().parent, **values)
+        try:
+            values["inputs"] = tuple(InputRef(**ref) for ref in values.get("inputs", ()))
+            return cls(root=path.resolve().parent, **values)
+        except TypeError as exc:
+            raise ConfigError(f"{path}: invalid manifest fields: {exc}") from exc
 
     @classmethod
     def at(cls, path: str | Path, **fields: Any) -> Self:
@@ -220,38 +242,45 @@ def load_any(path: str | Path) -> Handle:
 
 
 def inspect_chain(path: str | Path) -> dict[str, Any]:
-    """Inspect generic manifest provenance, marking changed, missing, or revisited inputs."""
-    seen: set[Path] = set()
+    """Inspect each provenance edge, marking changed, missing, invalid, or cyclic inputs."""
+    ancestors: set[Path] = set()
 
     def visit(path: Path) -> dict[str, Any]:
         path = path.resolve()
-        if path in seen:
+        if path in ancestors:
             return {"path": str(path), "cycle": True}
-        seen.add(path)
         content = path.read_bytes()
-        data = json.loads(content)
+        digest = hashlib.sha256(content).hexdigest()
+        try:
+            data = json.loads(content)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {"path": str(path), "sha256": digest, "invalid": True}
         children = []
-        for item in data.get("inputs", []):
-            ref = InputRef(**item)
-            child_path = ref.resolve()
-            if not child_path.exists():
-                child = {
-                    "kind": ref.kind,
-                    "path": str(child_path),
-                    "recorded_sha256": ref.sha256,
-                    "missing": True,
-                }
-            else:
-                child = visit(child_path)
-                if not child.get("cycle"):
-                    child.update(
-                        recorded_sha256=ref.sha256, sha256_ok=child["sha256"] == ref.sha256
-                    )
-            children.append(child)
+        ancestors.add(path)
+        try:
+            for item in data.get("inputs", []):
+                ref = InputRef(**item)
+                child_path = ref.resolve()
+                if not child_path.exists():
+                    child = {
+                        "kind": ref.kind,
+                        "path": str(child_path),
+                        "recorded_sha256": ref.sha256,
+                        "missing": True,
+                    }
+                else:
+                    child = visit(child_path)
+                    if not child.get("cycle"):
+                        child.update(
+                            recorded_sha256=ref.sha256, sha256_ok=child["sha256"] == ref.sha256
+                        )
+                children.append(child)
+        finally:
+            ancestors.discard(path)
         return {
             "kind": data["kind"],
             "path": str(path),
-            "sha256": hashlib.sha256(content).hexdigest(),
+            "sha256": digest,
             "config_hash": data.get("config_hash"),
             "meta": data.get("meta", {}),
             "inputs": children,

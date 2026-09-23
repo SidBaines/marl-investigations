@@ -70,6 +70,14 @@ class RunDir:
             except BlockingIOError as exc:
                 raise RunDirLockedError(f"run directory is locked: {self.out}") from exc
             if self.force:
+                # Invalidate completion before deleting any of the bytes it describes.
+                self.path(self.manifest_name).unlink(missing_ok=True)
+                (control / "run.json").unlink(missing_ok=True)
+                directory_fd = os.open(self.out, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
                 # Never unlink the locked inode: a new lock file would permit a second owner.
                 for child in self.out.iterdir():
                     if child == control:
@@ -134,11 +142,9 @@ class RunDir:
     def close(self) -> None:
         """Release ownership; closing an already closed run is harmless."""
         if self._lock_fd is not None:
-            try:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-            finally:
-                os.close(self._lock_fd)
-                self._lock_fd = None
+            # An explicit unlock would also release a forked process's shared lock.
+            os.close(self._lock_fd)
+            self._lock_fd = None
 
     def __enter__(self) -> RunDir:
         self.open()
@@ -153,13 +159,24 @@ class RunDir:
         self.close()
 
     def path(self, rel: str) -> Path:
-        return self.out / rel
+        path = self.out / rel
+        if Path(rel).is_absolute() or not path.resolve().is_relative_to(self.out):
+            raise ConfigError(f"{self.out}: run path must stay relative to the run dir: {rel!r}")
+        return path
 
     def append_row(self, rel: str, row: Mapping[str, Any]) -> None:
         """Append and sync one complete JSONL row."""
         self._require_open()
+        if self.status is RunStatus.COMPLETE:
+            raise MarliError(f"run directory is complete: {self.out}; cannot append rows")
         text = json.dumps(dict(row), sort_keys=True, ensure_ascii=False) + "\n"
         path = self.path(rel)
+        if path.exists():
+            with path.open("rb") as stream:
+                size = os.fstat(stream.fileno()).st_size
+                torn = size > 0 and os.pread(stream.fileno(), 1, size - 1) != b"\n"
+            if torn:
+                self.read_rows(rel)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as stream:
             stream.write(text)
@@ -203,6 +220,8 @@ class RunDir:
     def write_progress(self, data: Mapping[str, Any]) -> None:
         """Atomically publish the latest progress with a UTC update timestamp."""
         self._require_open()
+        if self.status is RunStatus.COMPLETE:
+            raise MarliError(f"run directory is complete: {self.out}; cannot write progress")
         record = {**data, "updated_at": datetime.now(UTC).isoformat(timespec="seconds")}
         atomic_write_text(
             self.path("progress.json"),

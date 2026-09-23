@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 from dataclasses import FrozenInstanceError, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -127,6 +129,25 @@ def test_file_requires_path_field(tmp_path: Path, name: str) -> None:
         TinyHandle(root=tmp_path).file(name)
 
 
+def test_optional_path_field_can_be_absent(tmp_path: Path) -> None:
+    @dataclass(frozen=True, kw_only=True)
+    class OptionalHandle(Handle):
+        KIND: ClassVar[str] = "test_task_b_optional"
+        MANIFEST: ClassVar[str] = "optional.json"
+        PATH_FIELDS: ClassVar[tuple[str, ...]] = ("state",)
+        state: str | None = None
+
+    handle = OptionalHandle(root=tmp_path)
+    path = handle.save()
+    assert json.loads(path.read_text())["state"] is None
+    loaded = OptionalHandle.load(path)
+    assert loaded == handle
+    with pytest.raises(ConfigError, match="state.*None"):
+        loaded.file("state")
+    replace(handle, state=str(tmp_path / "state.bin")).save()
+    assert OptionalHandle.load(path).file("state") == tmp_path / "state.bin"
+
+
 @pytest.mark.parametrize(
     ("updates", "message"),
     [
@@ -141,6 +162,93 @@ def test_load_rejects_schema_drift(tmp_path: Path, updates: dict[str, Any], mess
     path.write_text(json.dumps({**data, **updates}))
     with pytest.raises(ConfigError, match=message):
         TinyHandle.load(path)
+
+
+@pytest.mark.parametrize("version", [None, "1", 1.0, True, False, [], {}])
+def test_load_rejects_noninteger_manifest_version(tmp_path: Path, version: Any) -> None:
+    path = TinyHandle(root=tmp_path).save()
+    data = json.loads(path.read_text())
+    data["manifest_version"] = version
+    path.write_text(json.dumps(data))
+    with pytest.raises(ConfigError, match="manifest_version") as caught:
+        TinyHandle.load(path)
+    assert str(path) in str(caught.value)
+    assert caught.value.exit_code == 2
+
+
+def test_load_rejects_missing_manifest_version(tmp_path: Path) -> None:
+    path = TinyHandle(root=tmp_path).save()
+    data = json.loads(path.read_text())
+    del data["manifest_version"]
+    path.write_text(json.dumps(data))
+    with pytest.raises(ConfigError, match="manifest_version") as caught:
+        TinyHandle.load(path)
+    assert str(path) in str(caught.value)
+    assert caught.value.exit_code == 2
+
+
+@pytest.mark.parametrize("operation", ["load", "save"])
+@pytest.mark.parametrize("content", [b"{", b"not JSON", b"\xff", b"[]", b"null", b"1", b'"text"'])
+def test_invalid_manifest_is_config_error(
+    tmp_path: Path, operation: str, content: bytes
+) -> None:
+    handle = TinyHandle(root=tmp_path)
+    path = handle.manifest_path
+    path.write_bytes(content)
+    with pytest.raises(ConfigError) as caught:
+        if operation == "load":
+            TinyHandle.load(path)
+        else:
+            handle.save()
+    assert str(path) in str(caught.value)
+    assert caught.value.exit_code == 2
+    assert path.read_bytes() == content
+
+
+def test_load_rejects_missing_required_field(tmp_path: Path) -> None:
+    @dataclass(frozen=True, kw_only=True)
+    class RequiredHandle(TinyHandle):
+        required: str
+
+    path = RequiredHandle(root=tmp_path, required="present").save()
+    data = json.loads(path.read_text())
+    del data["required"]
+    path.write_text(json.dumps(data))
+    with pytest.raises(ConfigError, match="required") as caught:
+        RequiredHandle.load(path)
+    assert str(path) in str(caught.value)
+    assert caught.value.exit_code == 2
+
+
+@pytest.mark.parametrize("change", ["extra", "kind", "path", "sha256"])
+def test_load_rejects_input_ref_schema_drift(tmp_path: Path, change: str) -> None:
+    source = TinyHandle(root=tmp_path / "source")
+    source.save()
+    path = TinyHandle(root=tmp_path / "result", inputs=(InputRef.of(source),)).save()
+    data = json.loads(path.read_text())
+    if change == "extra":
+        data["inputs"][0]["extra"] = "unexpected"
+    else:
+        del data["inputs"][0][change]
+    path.write_text(json.dumps(data))
+    with pytest.raises(ConfigError, match=change) as caught:
+        TinyHandle.load(path)
+    assert str(path) in str(caught.value)
+    assert caught.value.exit_code == 2
+
+
+def test_save_rejects_missing_created_at(tmp_path: Path) -> None:
+    handle = TinyHandle(root=tmp_path)
+    path = handle.save()
+    data = json.loads(path.read_text())
+    del data["created_at"]
+    content = json.dumps(data)
+    path.write_text(content)
+    with pytest.raises(ConfigError, match="created_at") as caught:
+        handle.save()
+    assert str(path) in str(caught.value)
+    assert caught.value.exit_code == 2
+    assert path.read_text() == content
 
 
 @pytest.mark.parametrize("use_directory", [False, True])
@@ -297,6 +405,54 @@ def test_inspect_chain_cycle(tmp_path: Path) -> None:
     assert tree["inputs"][0]["inputs"][0]["inputs"] == [
         {"path": str(third.manifest_path), "cycle": True}
     ]
+
+
+def test_inspect_chain_checks_each_edge_of_diamond(tmp_path: Path) -> None:
+    taskset, checkpoint, evaluation = make_chain(tmp_path)
+    original_sha = taskset.sha256()
+    replace(taskset, n=99).save()
+    replace(evaluation, inputs=(InputRef.of(taskset), InputRef.of(checkpoint))).save()
+    tree = inspect_chain(evaluation.manifest_path)
+    direct = tree["inputs"][0]
+    indirect = tree["inputs"][1]["inputs"][0]
+    assert direct["sha256_ok"] is True
+    assert direct["recorded_sha256"] == taskset.sha256()
+    assert indirect["sha256_ok"] is False
+    assert indirect["recorded_sha256"] == original_sha
+    assert direct["sha256"] == indirect["sha256"] == taskset.sha256()
+    pending = [tree]
+    while pending:
+        node = pending.pop()
+        assert "cycle" not in node
+        pending.extend(node["inputs"])
+
+
+@pytest.mark.parametrize("content", [b"not JSON", b'{"kind":', b"\xff"])
+def test_inspect_chain_reports_non_json_input(tmp_path: Path, content: bytes) -> None:
+    first, _, third = make_chain(tmp_path)
+    original_sha = first.sha256()
+    first.manifest_path.write_bytes(content)
+    leaf = inspect_chain(third.manifest_path)["inputs"][0]["inputs"][0]
+    assert leaf["path"] == str(first.manifest_path)
+    assert leaf["invalid"] is True
+    assert leaf["sha256_ok"] is False
+    assert leaf["recorded_sha256"] == original_sha
+    assert leaf["sha256"] == hashlib.sha256(content).hexdigest()
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_atomic_write_respects_umask(tmp_path: Path, existing: bool) -> None:
+    path = tmp_path / "file.txt"
+    if existing:
+        path.write_text("original\n")
+        path.chmod(0o644)
+    old_umask = os.umask(0o022)
+    try:
+        atomic_write_text(path, "replacement\n")
+    finally:
+        os.umask(old_umask)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+    assert path.read_text() == "replacement\n"
 
 
 def test_atomic_write_leaves_no_temporary_files(tmp_path: Path) -> None:
