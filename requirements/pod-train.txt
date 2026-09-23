@@ -1,0 +1,11 @@
+# Learner-only CUDA 12.8 environment. vLLM gets its own venv, pinned separately
+# in requirements/pod-vllm.txt (M4-2); align its torch/CUDA ABI before pod tests.
+# The repository lock's torch 2.14 default uses CUDA 13, so do not reuse it here.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.10.0+cu128
+transformers==5.5.4
+peft==0.21.0
+accelerate==1.15.0
+safetensors==0.8.0
+# Optional flash-attn: build against this torch/CUDA stack on the pod.
+# The learner defaults to PyTorch SDPA and does not require flash-attn.
