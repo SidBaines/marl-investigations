@@ -15,6 +15,14 @@ from marli.render.fake import FakeRenderer
 KINDS = ("none", "compaction", "notes", "both", "tail")
 
 
+def test_in_session_summary_label_distinguishes_earlier_work_from_previous_session() -> None:
+    manager = make_context_manager(ContextSpec(kind="compaction"), Limits())
+    assert manager.carry_text(summary="five", notes=None, session=False).text == (
+        "[Summary of your earlier work]\nfive"
+    )
+    assert manager.carry_text(summary="five", notes=None).text == "[Previous session summary]\nfive"
+
+
 @pytest.mark.parametrize(
     ("kind", "compacts", "has_notes", "expected_text"),
     [

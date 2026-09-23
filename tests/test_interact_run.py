@@ -31,6 +31,7 @@ def single_spec() -> EpisodeSpec:
         renderer, {"solver0": [Turn(tool_calls=(("submit", {"answer": " 05 "}),))]}
     )
     policy = ScriptedPolicy("script", renderer, script)
+    policy.deterministic = True
     return EpisodeSpec(
         SingleProtocol(),
         env,
@@ -100,6 +101,7 @@ async def test_chat_single_records_usage_and_unique_cache_salt() -> None:
         )
 
     policy = ScriptedChatPolicy("chat", reply)
+    policy.deterministic = True
     spec.seating = {"solver": "chat"}
     spec.policies = {"chat": policy}
     spec.renderers = {}
@@ -375,3 +377,57 @@ async def test_vote_compares_only_first_cluster_members_and_raw_key_fallback() -
     assert episode.outcome.final_answer == "1"
     assert episode.outcome.votes == {"1": 2, "3": 1}
     assert env.pairs == [("2", "1"), ("3", "1")]
+
+
+@pytest.mark.parametrize(
+    "prompt", ['Answer as {"answer": ...}.', "{unknown}", "{", "{n_agents:bad}"]
+)
+async def test_system_prompt_format_validation_precedes_env_setup(prompt: str) -> None:
+    spec = single_spec()
+    spec.protocol = SingleProtocol(SingleConfig(system_prompt=prompt))
+    with pytest.raises(ConfigError, match="system_prompt"):
+        await run_episode(spec)
+    assert spec.env.setup_count == spec.env.teardown_count == 0
+    assert not spec.policies["script"].calls
+
+
+async def test_system_prompt_n_agents_is_role_count() -> None:
+    class TwoRoles(SingleProtocol):
+        def roles(self) -> list[RoleSpec]:
+            (solver,) = super().roles()
+            return [
+                replace(solver, count=3, system_prompt="Solvers: {n_agents}."),
+                replace(solver, role="idle", count=7),
+            ]
+
+    spec = single_spec()
+    spec.protocol = TwoRoles()
+    spec.seating["idle"] = "script"
+    episode, buffers = await run_episode(spec)
+    (call,) = episode.calls
+    (ctx,) = spec.policies["script"].calls
+    assert "Solvers: 3." in ctx.prompt_text
+    assert buffers[call.segment_id] == list(ctx.prompt_ids + call.completion_ids)
+
+
+@pytest.mark.parametrize("deterministic", [None, False, True])
+async def test_determinism_is_duck_typed_and_only_seated_policies_are_checked(
+    deterministic: bool | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec = single_spec()
+    seated = spec.policies["script"]
+    if deterministic is None:  # a policy without the attribute is not replayable
+        del seated.deterministic
+        monkeypatch.delattr(type(seated), "deterministic")
+    else:
+        seated.deterministic = deterministic
+    unused = ScriptedChatPolicy("unused", lambda messages, meta: None)
+    unused.trainable = True
+    unused.max_seq_len = 1
+    unused.deterministic = False
+    spec.policies["unused"] = unused
+    episode, buffers = await run_episode(spec)
+    assert episode.replayable is (deterministic is True)
+    assert not unused.calls
+    (call,) = episode.calls
+    assert buffers[call.segment_id] == list(seated.calls[0].prompt_ids + call.completion_ids)
