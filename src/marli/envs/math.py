@@ -46,6 +46,8 @@ class MathEnvConfig:
     def __post_init__(self) -> None:
         if not math.isfinite(self.python_timeout_s) or self.python_timeout_s <= 0:
             raise ValueError("python_timeout_s must be positive and finite")
+        if self.answer_format not in (None, "integer", "latex"):
+            raise ValueError("answer_format must be 'integer' or 'latex'")
 
 
 class _PythonTool:
@@ -68,7 +70,10 @@ class _PythonTool:
     async def __call__(self, ctx: ToolCtx, *, code: str) -> ToolResult:
         if ctx.sandbox is None:
             raise ToolError("python requires an active episode sandbox")
-        result = await ctx.sandbox.exec(["python3", "-c", code], timeout_s=self.timeout_s)
+        try:
+            result = await ctx.sandbox.exec(["python3", "-"], timeout_s=self.timeout_s, stdin=code)
+        except (ValueError, OSError) as exc:
+            raise ToolError(f"python execution failed: {exc}") from exc
         return ToolResult(json.dumps(asdict(result)))
 
 
@@ -85,8 +90,12 @@ class MathEnv(Env):
         self.config = config
         self.task = task
         self.answer_format = (
-            config.answer_format if config.answer_format is not None else task.meta["answer_format"]
+            config.answer_format
+            if config.answer_format is not None
+            else task.meta.get("answer_format")
         )
+        if self.answer_format not in ("integer", "latex"):
+            raise ValueError("answer_format must be 'integer' or 'latex'")
         self._sandbox: SubprocessSandbox | None = None
 
     async def setup(self) -> None:
@@ -124,14 +133,12 @@ class MathEnv(Env):
     def canonical(self, submission: str | None) -> str | None:
         if submission is None:
             return None
-        from marli.tasks.verifiers import extract_boxed, normalize_answer
+        from marli.tasks.verifiers import _integer_key, normalize_answer
 
-        boxed = extract_boxed(submission)
-        answer = boxed if boxed is not None else submission
-        try:
-            return str(int(answer.strip()))
-        except ValueError:
-            return normalize_answer(answer)
+        answer = normalize_answer(submission)
+        if not answer:
+            return None
+        return (_integer_key(answer) or answer) if self.answer_format == "integer" else answer
 
     async def same_answer(self, a: str | None, b: str | None) -> bool:
         if a is None or b is None:
