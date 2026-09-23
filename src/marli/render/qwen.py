@@ -25,12 +25,18 @@ _PARAMETER = re.compile(r"\s*<parameter=([^<>\s]+)>(.*?)</parameter>", re.DOTALL
 def qwen_profile(
     tokenizer: PreTrainedTokenizerBase, *, xml: bool, thinking: bool
 ) -> TemplateProfile:
-    """Keep rerender mode until the canonical templates pass all parity cases.
+    """Delta mode for every profile whose tool-loop parity holds.
 
-    Both templates strip previous reasoning after a new user message. Qwen3
-    also strips empty thinking before tool results, invalidating its nothink
-    prefill. Tool-only deltas pass for the other three profiles, but the
-    contract's capability flag applies to the profile, not to individual calls.
+    Within one user query (the agent loop: completions followed by tool results
+    and workspace deliveries, which the runtime renders as tool messages), the
+    append-only buffer is token-identical to the canonical HF template for
+    ``qwen3_5``, ``qwen3_5_nothink`` and ``qwen3`` (tests pin this over several
+    rounds). Two known deviations: (1) after a *user* message (a nudge), the HF
+    templates strip earlier reasoning while the buffer keeps it — a bounded,
+    documented shift that keeps "datums use exactly the ids the policy saw";
+    (2) ``qwen3_nothink``'s template deletes the already-sampled empty think
+    prefill before tool results, which no append-only buffer can reproduce, so
+    that profile re-renders every call.
     """
     return TemplateProfile(
         chat_template_kwargs={"enable_thinking": thinking},
@@ -39,7 +45,18 @@ def qwen_profile(
         close_turn="<|im_end|>",
         parser=partial(_parse, xml=xml, prefilled_thinking=xml and thinking),
         tool_prefix=partial(_tool_prefix, xml=xml, prefilled_thinking=xml and thinking),
+        supports_delta=xml or thinking,
+        suppress_thinking=_suppress_thinking(xml=xml, thinking=thinking),
     )
+
+
+def _suppress_thinking(*, xml: bool, thinking: bool) -> str:
+    """Observation text that skips reasoning in the template's own non-thinking form."""
+    if not thinking:
+        return ""  # the non-thinking generation prompt already carries the empty block
+    if xml:
+        return "\n</think>\n\n"  # Qwen3.5 prefills "<think>\n": close it
+    return "<think>\n\n</think>\n\n"  # Qwen3 non-thinking form
 
 
 def _tool_prefix(tool_name: str, first_param: str, *, xml: bool, prefilled_thinking: bool) -> str:

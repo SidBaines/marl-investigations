@@ -33,6 +33,7 @@ class TemplateProfile:
     parser: Callable[[str, Sequence[ToolSpec], str], ParsedTurn]
     tool_prefix: Callable[[str, str], str]
     supports_delta: bool = False
+    suppress_thinking: str = ""
 
 
 class HFTemplateRenderer:
@@ -104,6 +105,11 @@ class HFTemplateRenderer:
         if last_termination != "stop":
             delta = self.profile.close_turn + delta
         return self.encode_text(delta)
+
+    def suppress_thinking_prefix(self) -> list[int]:
+        """Tokens that skip the reasoning channel for harness-requested calls."""
+        text = self.profile.suppress_thinking
+        return self.encode_text(text) if text else []
 
     def forced_tool_prefix(self, tool_name: str, first_param: str | None = None) -> list[int]:
         if first_param is None:

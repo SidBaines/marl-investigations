@@ -171,7 +171,8 @@ def test_user_message_rewrites_history(renderer: HFTemplateRenderer) -> None:
     thinking = "<think>\n" + assistant["reasoning_content"] + "\n</think>\n\n"
     # Pin the exact rewrite; simply appending the new messages cannot reproduce it.
     assert renderer.decode(buf).replace(thinking, "", 1) == full
-    assert not renderer.supports_delta
+    # Known, documented deviation: the buffer keeps earlier reasoning after a user message.
+    assert renderer.supports_delta == (renderer.name != "qwen3_nothink")
 
 
 def test_second_round_delta_parity(renderer: HFTemplateRenderer) -> None:
@@ -481,3 +482,18 @@ def test_registry_caches_by_hf_id(
     three = get_renderer("qwen3", hf_id="local/test-2")
     assert one is not two and two is not three
     assert loads == ["local/test-1", "local/test-2"]
+
+
+def test_delta_support_per_profile(renderer: HFTemplateRenderer) -> None:
+    assert renderer.supports_delta == (renderer.name != "qwen3_nothink")
+
+
+def test_suppress_thinking_prefix(renderer: HFTemplateRenderer) -> None:
+    text = renderer.decode(renderer.suppress_thinking_prefix())
+    expected = {
+        "qwen3_5": "\n</think>\n\n",
+        "qwen3_5_nothink": "",
+        "qwen3": "<think>\n\n</think>\n\n",
+        "qwen3_nothink": "",
+    }[renderer.name]
+    assert text == expected
