@@ -3,6 +3,9 @@
 SymPy may hang in native code and math-verify installs main-thread signal handlers.
 Each symbolic check therefore runs in a fresh-interpreter process pool with a hard
 per-task timeout; no symbolic work runs on the event loop or in a thread.
+Forkserver re-imports ``__main__``, so caller scripts need an
+``if __name__ == "__main__":`` guard. math-verify's default ``float_rounding=6``
+is retained: decimals rounded to six places can match exact irrational golds.
 """
 
 from __future__ import annotations
@@ -10,10 +13,14 @@ from __future__ import annotations
 import asyncio
 import multiprocessing
 import re
+from concurrent.futures import Future
 from contextlib import suppress
 from math import isfinite
+from threading import Lock
 from types import TracebackType
 from typing import TYPE_CHECKING, Self
+
+from marli.errors import ConfigError
 
 if TYPE_CHECKING:
     from pebble import ProcessPool
@@ -48,13 +55,47 @@ def extract_boxed(text: str) -> str | None:
     return None
 
 
+def _light_normalize(s: str) -> str:
+    """Extract an answer without changing its interior mathematical notation."""
+    boxed = extract_boxed(s)
+    answer = (s if boxed is None else boxed).strip()
+    while True:
+        for left, right in (("$$", "$$"), ("$", "$"), (r"\(", r"\)"), (r"\[", r"\]")):
+            if (
+                len(answer) >= len(left) + len(right)
+                and answer.startswith(left)
+                and answer.endswith(right)
+            ):
+                answer = answer[len(left) : -len(right)].strip()
+                break
+        else:
+            return answer
+
+
+def _safe_prediction(answer: str) -> bool:
+    if any(delimiter in answer for delimiter in ("$", r"\(", r"\)", r"\[", r"\]")):
+        return False
+    depth = 0
+    # Escaped braces denote literal set braces, not TeX grouping syntax.
+    for token in re.findall(r"\\.|[{}]", answer):
+        if token == "{":
+            depth += 1
+        elif token == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 def normalize_answer(s: str) -> str:
     r"""Remove presentation syntax, without performing symbolic simplification.
 
-    Select the last boxed answer if present, remove whitespace, outer math
+    Select the last boxed answer if present, remove presentation whitespace, outer math
     delimiters ($, $$, \(...\), \[...\]), a trailing period, \text{} wrappers,
-    and \left/\right sizing commands. Strip commas only from a plain integer
-    with groups of three digits, so tuple and decimal commas remain meaningful.
+    and \left/\right sizing commands. Plain integer thousands groups of exactly
+    three digits may use commas, spaces, or \, separators (one style per number).
+    Other whitespace between digits stays as a space: ``7 0`` is never ``70``.
+    Tuple and decimal commas remain meaningful.
     """
     boxed = extract_boxed(s)
     answer = s if boxed is None else boxed
@@ -65,7 +106,8 @@ def normalize_answer(s: str) -> str:
         if closing is None:
             break
         answer = answer[: match.start()] + answer[opening + 1 : closing] + answer[closing + 1 :]
-    answer = re.sub(r"\s+", "", answer)
+    answer = re.sub(r"\s+", " ", answer.strip())
+    answer = re.sub(r"(?<![0-9]) | (?![0-9])", "", answer)
     while True:
         previous = answer
         answer = answer.removesuffix(".")
@@ -79,8 +121,10 @@ def normalize_answer(s: str) -> str:
                 break
         if answer == previous:
             break
-    if re.fullmatch(r"[+-]?[0-9]{1,3}(?:,[0-9]{3})+", answer):
-        answer = answer.replace(",", "")
+    for separator in (",", " ", r"\,"):
+        if re.fullmatch(r"[+-]?[0-9]{1,3}(?:" + re.escape(separator) + r"[0-9]{3})+", answer):
+            answer = answer.replace(separator, "")
+            break
     return answer
 
 
@@ -96,26 +140,28 @@ def _initialize_worker() -> None:
     # Cold imports must finish before Pebble starts a check's execution timeout.
     # Defer import failures to the scheduled check's future; raising in an
     # initializer would make Pebble respawn workers indefinitely instead.
-    with suppress(Exception):
+    with suppress(ImportError):
         import math_verify  # noqa: F401
 
 
 def _verify_symbolic(pred: str, gold: str) -> bool:
     from math_verify import parse, verify
 
-    for boxed in (False, True):
-        gold_wrapped = f"$\\boxed{{{gold}}}$" if boxed else f"${gold}$"
-        pred_wrapped = f"$\\boxed{{{pred}}}$" if boxed else f"${pred}$"
-        if verify(parse(gold_wrapped), parse(pred_wrapped)):
-            return True
-    return False
+    parsed_gold = parse(f"${gold}$")
+    if parsed_gold == []:
+        parsed_gold = parse(f"$\\boxed{{{gold}}}$")
+    parsed_pred = parse(f"${pred}$")
+    if parsed_pred == []:
+        parsed_pred = parse(f"$\\boxed{{{pred}}}$")
+    return bool(verify(parsed_gold, parsed_pred))
 
 
 class MathVerifier:
     """Async comparisons with a lazy process pool; close after the last use.
 
     ``timeout_s`` bounds worker execution, not time waiting behind queued checks
-    or interpreter startup. Stats count failed scheduled checks, not wrong answers.
+    or interpreter startup. Stats count timeouts, crashed workers, and rejected
+    prediction syntax, not ordinary wrong answers. Other failures propagate.
     """
 
     def __init__(self, max_workers: int = 4, timeout_s: float = 5.0) -> None:
@@ -125,8 +171,9 @@ class MathVerifier:
             raise ValueError("timeout_s must be finite and positive")
         self.max_workers = max_workers
         self.timeout_s = timeout_s
-        self.stats: dict[str, int] = {"timeouts": 0, "errors": 0}
+        self.stats: dict[str, int] = {"timeouts": 0, "errors": 0, "rejected": 0}
         self._pool: ProcessPool | None = None
+        self._pool_lock = Lock()
         self._closed = False
 
     async def verify(self, pred: str | None, gold: str, answer_format: str) -> bool:
@@ -136,34 +183,47 @@ class MathVerifier:
             raise ValueError("answer_format must be 'integer' or 'latex'")
         if pred is None:
             return False
-        predicted, expected = normalize_answer(pred), normalize_answer(gold)
+        predicted, expected = _light_normalize(pred), _light_normalize(gold)
+        if not _safe_prediction(predicted):
+            self.stats["rejected"] += 1
+            return False
         if not predicted or not expected:
             return False
-        if answer_format == "integer":
-            pred_key, gold_key = _integer_key(predicted), _integer_key(expected)
-            if pred_key is not None and gold_key is not None:
-                return pred_key == gold_key
-        if self._pool is None:
-            from pebble import ProcessPool
+        pred_key = _integer_key(normalize_answer(predicted))
+        gold_key = _integer_key(normalize_answer(expected))
+        if pred_key is not None and gold_key is not None:
+            return pred_key == gold_key
+        from pebble import ProcessExpired
 
-            self._pool = ProcessPool(
-                max_workers=self.max_workers,
-                context=multiprocessing.get_context("forkserver"),
-                initializer=_initialize_worker,
-            )
         try:
-            future = self._pool.schedule(
-                _verify_symbolic, args=(predicted, expected), timeout=self.timeout_s
-            )
+            future = await asyncio.to_thread(self._schedule_symbolic, predicted, expected)
             return bool(await asyncio.wrap_future(future))
         except TimeoutError:
             self.stats["timeouts"] += 1
-        except Exception:
-            # Worker exceptions and crashes are failed checks; cancellation still propagates.
+        except ProcessExpired:
             self.stats["errors"] += 1
+        except ImportError as exc:
+            raise ConfigError(f"math-verify unavailable: {exc}") from exc
         return False
 
+    def _schedule_symbolic(self, pred: str, gold: str) -> Future[bool]:
+        from pebble import ProcessPool
+
+        # Pebble starts workers on the first schedule(), not in its constructor.
+        # Serialize creation with close(), including cancelled startup awaits.
+        with self._pool_lock:
+            if self._closed:
+                raise RuntimeError("MathVerifier is closed")
+            if self._pool is None:
+                context = multiprocessing.get_context("forkserver")
+                context.set_forkserver_preload(["math_verify"])
+                self._pool = ProcessPool(
+                    max_workers=self.max_workers, context=context, initializer=_initialize_worker
+                )
+            return self._pool.schedule(_verify_symbolic, args=(pred, gold), timeout=self.timeout_s)
+
     async def canonical(self, pred: str | None, answer_format: str) -> str | None:
+        """Return a presentation key; this pure operation remains valid after close()."""
         if answer_format not in ("integer", "latex"):
             raise ValueError("answer_format must be 'integer' or 'latex'")
         if pred is None:
@@ -177,11 +237,12 @@ class MathVerifier:
 
     def close(self) -> None:
         """Finish queued checks and join the pool; repeated closes are harmless."""
-        self._closed = True
-        if self._pool is not None:
-            pool, self._pool = self._pool, None
-            pool.close()
-            pool.join()
+        with self._pool_lock:
+            self._closed = True
+            if self._pool is not None:
+                pool, self._pool = self._pool, None
+                pool.close()
+                pool.join()
 
     async def __aenter__(self) -> Self:
         if self._closed:
