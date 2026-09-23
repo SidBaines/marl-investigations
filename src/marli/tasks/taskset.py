@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
 from marli.envs.base import Task
+from marli.errors import ConfigError
 from marli.handles import Handle, atomic_write_text, register_handle
 
 
@@ -36,6 +36,12 @@ class TaskSet(Handle):
     commit_text: bool
 
     def __post_init__(self) -> None:
+        if type(self.n) is not int or self.n < 0:
+            raise ValueError("TaskSet n must be a non-negative integer")
+        if self.answer_format not in ("integer", "latex"):
+            raise ValueError("answer_format must be 'integer' or 'latex'")
+        if type(self.commit_text) is not bool:
+            raise ValueError("commit_text must be a boolean")
         kind = self.meta.get("task_kind") if self.kind == self.KIND else self.kind
         if kind != "math":
             raise ValueError("TaskSet kind must be 'math'")
@@ -57,18 +63,12 @@ def write_tasks(dir: str | Path, tasks: Iterable[Task]) -> Path:
 
 
 def read_tasks(taskset: TaskSet) -> list[Task]:
-    """Read complete rows, tolerating a torn final JSON/UTF-8 line without rewriting it."""
+    """Read every row and enforce the manifest count; atomic writes need no tail recovery."""
     tasks = []
     with taskset.file("tasks").open("rb") as stream:
-        size = os.fstat(stream.fileno()).st_size
         for line in stream:
-            if not line.endswith(b"\n"):
-                break
-            try:
-                row = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                if stream.tell() == size:
-                    break
-                raise
+            row = json.loads(line)
             tasks.append(Task(**row))
+    if len(tasks) != taskset.n:
+        raise ConfigError(f"TaskSet row count mismatch: expected {taskset.n}, read {len(tasks)}")
     return tasks

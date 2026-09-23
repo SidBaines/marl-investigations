@@ -14,6 +14,7 @@ import pytest
 
 from marli.tasks.loaders import load_tasks, strip_dapo_wrapper
 from marli.tasks.source import SOURCES
+from marli.tasks.taskset import TaskSet, read_tasks, write_tasks
 
 FIXTURE = Path(__file__).parent / "fixtures" / "tasks" / "sources.json"
 
@@ -133,6 +134,77 @@ def test_deduplication_keeps_first_row_before_filtering() -> None:
     source = replace(SOURCES.load("hmmt_feb_2026"), dedupe=True)
     tasks = load_tasks(source, loader=loader)
     assert [task.task_id for task in tasks] == ["hmmt_feb_2026/1"]
+
+
+def test_prompt_transform_follows_spec_not_source_name() -> None:
+    source = SOURCES.load("dapo_math_17k")
+    renamed = load_tasks(replace(source, name="synthetic"), loader=local_loader)
+    assert renamed[0].prompt == "Synthetic: compute 11 + 2."
+    untransformed = load_tasks(replace(source, prompt_transform=None), loader=local_loader)
+    assert untransformed[0].prompt.startswith("Solve the following math problem step by step.")
+
+
+@pytest.mark.parametrize("max_n", [None, 1, 0])
+def test_conflicts_drop_entire_transformed_prompt_group_and_record_manifest_counts(
+    tmp_path: Path, max_n: int | None
+) -> None:
+    problem = "Synthetic: conflict."
+    wrapped = (
+        "Solve the following math problem step by step.\n\n"
+        f"{problem}\nRemember to put your answer in a box."
+    )
+    rows = [
+        (wrapped, "1"),
+        ("Synthetic: agreeing.", "3"),
+        (problem, "1"),
+        ("Synthetic: agreeing.", 3),
+        ("Synthetic: single.", "4"),
+        (problem, "2"),
+        (problem, "1"),
+    ]
+
+    def loader(hf_id: str, config: str | None, *, split: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "prompt": [{"content": prompt}],
+                "reward_model": {"ground_truth": answer},
+                "extra_info": {"index": i},
+            }
+            for i, (prompt, answer) in enumerate(rows)
+        ]
+
+    source = SOURCES.load("dapo_math_17k")
+    meta: dict[str, Any] = {"fixture": True}
+    tasks = load_tasks(source, max_n=max_n, loader=loader, meta=meta)
+    expected = ["dapo_math_17k/1", "dapo_math_17k/4"][:max_n]
+    assert [task.task_id for task in tasks] == expected
+    assert meta == {"fixture": True, "n_raw": 7, "n_duplicates": 4, "n_conflicting_dropped": 1}
+    write_tasks(tmp_path, tasks)
+    handle = TaskSet(
+        root=tmp_path,
+        tasks="tasks.jsonl",
+        source=source.name,
+        split=source.split,
+        kind=source.kind,
+        n=len(tasks),
+        answer_format=source.answer_format,
+        commit_text=source.commit_text,
+        meta=meta,
+    )
+    manifest = handle.save()
+    saved = TaskSet.load(manifest)
+    assert read_tasks(saved) == tasks
+    assert json.loads(manifest.read_text())["meta"] == {**meta, "task_kind": "math"}
+
+
+def test_no_deduplication_retains_conflicts_and_counts_raw_rows() -> None:
+    def loader(hf_id: str, config: str | None, *, split: str) -> list[dict[str, Any]]:
+        return [{"problem": "Synthetic", "answer": "1"}, {"problem": "Synthetic", "answer": "2"}]
+
+    meta: dict[str, Any] = {}
+    tasks = load_tasks(SOURCES.load("beyond_aime"), loader=loader, meta=meta)
+    assert [task.answer for task in tasks] == ["1", "2"]
+    assert meta == {"n_raw": 2, "n_duplicates": 0, "n_conflicting_dropped": 0}
 
 
 @pytest.mark.parametrize("max_n", [-1, 1.5, True])
