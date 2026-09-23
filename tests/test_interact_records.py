@@ -5,9 +5,10 @@ from __future__ import annotations
 import base64
 import json
 import struct
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import pytest
@@ -30,6 +31,7 @@ from marli.interact.types import (
     Usage,
     WorkspaceRead,
     Write,
+    record_from_dict,
     record_to_dict,
 )
 from marli.render.base import Msg
@@ -195,6 +197,43 @@ def test_recorder_preserves_segment_boundaries() -> None:
     assert recorder.buffer("peer0/g0") == PROMPT
 
 
+def test_recorder_buffer_returns_the_live_list() -> None:
+    recorder = Recorder("episode", clock=FakeClock())
+    recorder.new_segment(segment(), PROMPT)
+    live = recorder.buffer("peer0/g0")
+    live.extend(R.encode_text("more"))
+    assert recorder.buffer("peer0/g0") is live
+    assert live == PROMPT + R.encode_text("more")
+
+
+def test_recorder_build_rejects_a_different_episode_id() -> None:
+    recorder = Recorder("expected", clock=FakeClock())
+    with pytest.raises(ValueError, match="different.*expected"):
+        recorder.build(episode_id="different")
+
+
+@pytest.mark.parametrize("seat_key", [[1, "peer"], ((1, 2),), ([1],), ({"a": 1},), (object(),)])
+def test_recorder_rejects_non_flat_seat_keys(seat_key: Any) -> None:
+    recorder = Recorder("episode", clock=FakeClock())
+    with pytest.raises(ValueError, match="peer0.*seat_key.*flat tuple"):
+        recorder.add_agent(AgentInfo("peer0", "peer", "learner", None, seat_key))
+
+
+@pytest.mark.parametrize("seat_key", [(), (0, "peer", 2.5, True, None)])
+def test_recorder_events_and_seat_keys_round_trip_in_json(seat_key: tuple[Any, ...]) -> None:
+    recorder = Recorder("episode", clock=FakeClock())
+    recorder.add_agent(AgentInfo("peer0", "peer", "learner", None, seat_key))
+    versions = {1: ("peer0", [2, 3])}
+    recorder.add_event(EventKind.PUSH, "peer0", 0, versions=versions)
+    versions[1][1].append(4)
+    supplied = vars(episode()).copy()
+    for key in ("agents", "segments", "calls", "events", "workspace_log", "limits_hit"):
+        del supplied[key]
+    built, _ = recorder.build(**supplied)
+    assert built.events[0].data == {"versions": {"1": ["peer0", [2, 3]]}}
+    assert record_from_dict(Episode, json.loads(json.dumps(record_to_dict(built)))) == built
+
+
 def test_single_agent_three_calls_count_only_new_prompt_tokens() -> None:
     delta = R.continuation("stop", [Msg("tool", "ok")])  # seven tokens
     first = call("peer0", 0, 3)
@@ -290,7 +329,34 @@ def test_finalizer_depends_on_last_call_of_each_peer() -> None:
     assert metrics["gen/finalizer"] == 4
 
 
-def test_api_call_counts_usage_without_a_buffer_or_prompt_tokens() -> None:
+@pytest.mark.parametrize("role", ["worker", "coordinator", "custom"])
+def test_finalizer_depends_on_every_earlier_non_finalizer(role: str) -> None:
+    calls = (call("agent", 0, 8, role=role), call("judge", 1, 4, role="finalizer"))
+    metrics = compute_metrics(episode(calls), independent_buffers(calls))
+    assert metrics["cp_tokens"] == 12
+    assert metrics["cp_calls"] == 2
+
+
+def test_finalizer_skips_agents_whose_last_call_is_later_and_other_finalizers() -> None:
+    calls = (
+        call("peer", 0, 2),
+        call("first_judge", 1, 20, role="finalizer"),
+        call("second_judge", 2, 30, role="finalizer"),
+        call("peer", 3, 2, segment_id="peer/g1"),
+    )
+    metrics = compute_metrics(episode(calls), independent_buffers(calls))
+    assert metrics["cp_tokens"] == 30
+    assert metrics["cp_calls"] == 2
+
+
+def test_backward_tick_edges_name_both_calls() -> None:
+    calls = (call("later_tick", 0, 2, tick=1), call("earlier_tick", 1, 3, tick=0))
+    with pytest.raises(MarliError) as error:
+        compute_metrics(episode(calls), independent_buffers(calls))
+    assert all(c.call_id in str(error.value) for c in calls)
+
+
+def test_api_call_keeps_foreign_token_usage_separate() -> None:
     token_call = call("peer", 0, 3, usage=Usage(999, 999, 999))
     api = call(
         "api",
@@ -303,14 +369,72 @@ def test_api_call_counts_usage_without_a_buffer_or_prompt_tokens() -> None:
         role="finalizer",
         purpose=Purpose.FINAL,
         policy_version=None,
-        usage=Usage(prompt_tokens=100, completion_tokens=7, tokenizer="api:model"),
+        usage=Usage(prompt_tokens=100, completion_tokens=70, tokenizer="api:model"),
     )
     metrics = compute_metrics(episode((token_call, api)), independent_buffers((token_call,)))
-    assert metrics["total_gen"] == metrics["cp_tokens"] == 10
+    assert metrics["total_gen"] == metrics["cp_tokens"] == 3
     assert metrics["calls"] == metrics["cp_calls"] == 2
     assert metrics["total_prompt"] == metrics["total_uncached"] == 4
-    assert metrics["gen/finalizer"] == 7
+    assert "gen/finalizer" not in metrics
+    assert "gen_purpose/final" not in metrics
+    assert metrics["api_calls"] == 1
+    assert metrics["api_gen_tokens"] == 70
+    assert metrics["api_prompt_tokens"] == 100
     assert metrics["peak_ctx"] == metrics["peak_active_ctx"] == 7
+
+
+@pytest.mark.parametrize("termination", [Termination.BUDGET, Termination.CTX])
+@pytest.mark.parametrize("api", [False, True])
+def test_refused_calls_contribute_no_compute(termination: Termination, api: bool) -> None:
+    refused = call(
+        "refused",
+        0,
+        100,
+        termination=termination,
+        purpose=Purpose.CARRY,
+        segment_id="" if api else "refused/g0",
+        prompt_len=1_000,
+        usage=Usage(prompt_tokens=1_000, completion_tokens=100),
+    )
+    sampled = call("judge", 1, 3, role="finalizer")
+    # Refused prompts need no token buffer and must not populate the ideal cache.
+    metrics = compute_metrics(episode((refused, sampled)), independent_buffers((sampled,)))
+    assert metrics["refused_calls"] == 1
+    assert metrics["calls"] == metrics["cp_calls"] == 1
+    assert metrics["calls/act"] == 1
+    assert "calls/carry" not in metrics
+    assert "gen/peer" not in metrics
+    assert "gen_purpose/carry" not in metrics
+    assert metrics["total_gen"] == metrics["cp_tokens"] == 3
+    assert metrics["total_prompt"] == metrics["total_uncached"] == 4
+    assert metrics["peak_ctx"] == metrics["peak_active_ctx"] == (7 if api else 1_000)
+    assert metrics["api_calls"] == metrics["api_gen_tokens"] == metrics["api_prompt_tokens"] == 0
+
+
+def test_api_calls_preserve_dependencies_between_token_calls() -> None:
+    calls = (
+        call("coord", 0, 3, role="coordinator"),
+        call(
+            "api",
+            1,
+            1,
+            role="worker",
+            segment_id="",
+            completion_ids=(),
+            logprobs=None,
+            usage=Usage(500, 100),
+        ),
+        call("coord", 2, 4, role="coordinator", segment_id="coord/g1"),
+    )
+    ep = episode(calls)
+    ep = replace(
+        ep,
+        agents=tuple(replace(a, parent="coord") if a.agent_id == "api" else a for a in ep.agents),
+    )
+    metrics = compute_metrics(ep, independent_buffers(calls))
+    assert metrics["cp_tokens"] == metrics["total_gen"] == 7
+    assert metrics["cp_calls"] == metrics["calls"] == 3
+    assert metrics["api_gen_tokens"] == 100
 
 
 def test_cache_reuses_all_earlier_full_sequences_but_not_future_tokens() -> None:
@@ -336,6 +460,113 @@ def test_cache_uses_partial_common_prefixes() -> None:
         second.completion_ids
     )
     assert compute_metrics(episode((first, second)), buffers)["total_uncached"] == 4 + 3
+
+
+@pytest.mark.parametrize("shared", [0, 1, 2, 3, 7, 15, 31, 63, 64])
+@pytest.mark.parametrize("mixed_sequences", [False, True])
+def test_cache_prefix_length_is_exact(shared: int, mixed_sequences: bool) -> None:
+    calls = (call("a", 0, 3, prompt_len=64), call("b", 1, 2, prompt_len=64))
+    first = R.encode_text("a" * 64) + list(calls[0].completion_ids)
+    second = R.encode_text("a" * shared + "b" * (64 - shared)) + list(calls[1].completion_ids)
+    buffers: dict[str, Sequence[int]] = {
+        "a/g0": first,
+        "b/g0": tuple(second) if mixed_sequences else second,
+    }
+    metrics = compute_metrics(episode(calls), buffers)
+    assert metrics["total_uncached"] == 128 - shared
+
+
+def test_uncached_long_append_only_episode_is_fast() -> None:
+    buffer = R.initial(None, [], [Msg("user", "q" * (32_000 - 3))])
+    delta = R.continuation("stop", [Msg("tool", "ok")])
+    calls = []
+    for seq in range(150):
+        c = call("peer", seq, 1, prompt_len=len(buffer))
+        calls.append(c)
+        buffer.extend(c.completion_ids)
+        if seq < 149:
+            buffer.extend(delta)
+    ep = episode(tuple(calls))
+    started = perf_counter()
+    metrics = compute_metrics(ep, {"peer/g0": buffer})
+    elapsed = perf_counter() - started
+    assert metrics["total_uncached"] == 32_000 + 149 * len(delta)
+    assert elapsed < 0.5
+
+
+@pytest.mark.parametrize("lockstep", [True, False])
+def test_blocked_coordinator_counts_toward_peak_context(lockstep: bool) -> None:
+    calls = (
+        call("coord", 0, 6, role="coordinator", tick=0 if lockstep else None),
+        call("worker", 1, 20, role="worker", tick=1 if lockstep else None),
+        call(
+            "coord", 2, 1, role="coordinator", tick=2 if lockstep else None, segment_id="coord/g1"
+        ),
+    )
+    metrics = compute_metrics(episode(calls), independent_buffers(calls))
+    assert metrics["peak_active_ctx"] == (4 + 6) + (4 + 20)
+
+
+def test_lockstep_and_async_peak_match_with_call_events() -> None:
+    calls = (
+        call("coord", 0, 6, role="coordinator", tick=0),
+        call("worker", 2, 20, role="worker", tick=1),
+        call("coord", 5, 1, role="coordinator", tick=2, segment_id="coord/g1"),
+    )
+    events = tuple(
+        event
+        for c in calls
+        for event in (
+            Event(c.seq, EventKind.CALL_START, c.agent_id, c.tick, {"call_id": c.call_id}),
+            Event(c.seq + 1, EventKind.CALL_END, c.agent_id, c.tick, {"call_id": c.call_id}),
+        )
+    ) + (Event(4, EventKind.DONE, "worker", 1), Event(7, EventKind.DONE, "coord", 2))
+    ep = episode(calls, events=events)
+    asynchronous = replace(
+        ep,
+        calls=tuple(replace(c, tick=None) for c in calls),
+        events=tuple(replace(e, tick=None) for e in events),
+    )
+    buffers = independent_buffers(calls)
+    assert compute_metrics(ep, buffers)["peak_active_ctx"] == 34
+    assert compute_metrics(asynchronous, buffers)["peak_active_ctx"] == 34
+
+
+def test_async_without_done_releases_context_at_last_call_end() -> None:
+    calls = (call("a", 0, 8), call("b", 3, 10))
+    events = (
+        Event(0, EventKind.CALL_START, "a", None, {"call_id": calls[0].call_id}),
+        Event(2, EventKind.CALL_END, "a", None, {"call_id": calls[0].call_id}),
+        Event(3, EventKind.CALL_START, "b", None, {"call_id": calls[1].call_id}),
+        Event(4, EventKind.CALL_END, "b", None, {"call_id": calls[1].call_id}),
+    )
+    metrics = compute_metrics(episode(calls, events=events), independent_buffers(calls))
+    assert metrics["peak_active_ctx"] == 14
+
+
+@pytest.mark.parametrize("lockstep", [True, False])
+@pytest.mark.parametrize("record_done", [True, False])
+def test_active_context_ends_at_done_or_last_call(lockstep: bool, record_done: bool) -> None:
+    calls = tuple(
+        call(agent, seq, n_gen, tick=tick if lockstep else None)
+        for agent, seq, n_gen, tick in (("a", 0, 8, 0), ("b", 2, 10, 1), ("c", 4, 20, 3))
+    )
+    events = (Event(3, EventKind.DONE, "a", 2 if lockstep else None),) if record_done else ()
+    metrics = compute_metrics(episode(calls, events=events), independent_buffers(calls))
+    assert metrics["peak_active_ctx"] == (26 if record_done else 24)
+
+
+def test_lockstep_uses_max_within_tick_and_replaces_carried_context() -> None:
+    calls = (
+        call("a", 0, 8, tick=0),
+        call("a", 1, 1, tick=0, segment_id="a/g1"),
+        call("b", 2, 2, tick=0),
+        call("a", 3, 1, tick=1, segment_id="a/g2"),
+        call("c", 4, 5, tick=1),
+        call("b", 5, 1, tick=2, segment_id="b/g1"),
+    )
+    metrics = compute_metrics(episode(calls), independent_buffers(calls))
+    assert metrics["peak_active_ctx"] == 5 + 6 + 9
 
 
 def test_async_peak_context_tracks_events_and_releases_done_agents() -> None:
@@ -419,6 +650,10 @@ def test_empty_episode_has_all_fixed_metrics_zero() -> None:
         "total_prompt",
         "total_uncached",
         "calls",
+        "refused_calls",
+        "api_calls",
+        "api_gen_tokens",
+        "api_prompt_tokens",
         "cp_tokens",
         "cp_calls",
         "peak_ctx",
@@ -487,6 +722,47 @@ def test_tokens_join_by_episode_id_and_ignore_orphans(tmp_path: Path) -> None:
         (first, {"g0": R.encode_text("a")}),
         (second, {"g0": R.encode_text("b")}),
     ]
+
+
+def test_read_episodes_sees_rows_appended_after_iteration_starts(tmp_path: Path) -> None:
+    first = episode(episode_id="first")
+    second = episode(episode_id="second")
+    writer = row_writer(tmp_path)
+    write_episode(writer, first, {"g0": R.encode_text("a")}, record_tokens=True)
+    rows = read_episodes(tmp_path, with_tokens=True)
+    assert next(rows) == (first, {"g0": R.encode_text("a")})
+    write_episode(writer, second, {"g0": R.encode_text("b")}, record_tokens=True)
+    assert next(rows) == (second, {"g0": R.encode_text("b")})
+    assert list(rows) == []
+
+
+def test_tokens_are_read_only_as_far_as_the_current_episode(tmp_path: Path) -> None:
+    first = episode(episode_id="first")
+    writer = row_writer(tmp_path)
+    write_episode(writer, first, {}, record_tokens=True)
+    with (tmp_path / "tokens.jsonl").open("a") as stream:
+        stream.write("not JSON\n")
+    write_episode(writer, episode(episode_id="second"), {}, record_tokens=True)
+    rows = read_episodes(tmp_path, with_tokens=True)
+    assert next(rows) == (first, {})
+    with pytest.raises(MarliError, match="tokens.jsonl"):
+        next(rows)
+
+
+@pytest.mark.parametrize("actual", [None, 2, 4])
+def test_read_validates_segment_presence_and_length(tmp_path: Path, actual: int | None) -> None:
+    ep = episode(episode_id="broken-episode", segments=(segment("peer/g3", n_tokens=3),))
+    buffers = {} if actual is None else {"peer/g3": R.encode_text("x" * actual)}
+    write_episode(row_writer(tmp_path), ep, buffers, record_tokens=True)
+    with pytest.raises(MarliError, match="broken-episode.*peer/g3"):
+        list(read_episodes(tmp_path, with_tokens=True))
+    assert list(read_episodes(tmp_path, with_tokens=False)) == [(ep, {})]
+
+
+def test_read_accepts_empty_recorded_segment(tmp_path: Path) -> None:
+    ep = episode(segments=(segment("peer/g0", n_tokens=0),))
+    write_episode(row_writer(tmp_path), ep, {"peer/g0": []}, record_tokens=True)
+    assert list(read_episodes(tmp_path, with_tokens=True)) == [(ep, {"peer/g0": []})]
 
 
 @pytest.mark.parametrize("tail", [b'{"episode_id":', b'{"episode_id":"\xe2'])
