@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Sequence
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,8 @@ class VLLMPolicy:
     ) -> Sample:
         if self.trainable:
             check_trainable_sampling(spec, policy_id=self.policy_id)
+        if not spec.stop_token_ids:
+            raise ConfigError("vLLM sampling requires non-empty stop_token_ids")
         prompt = list(prompt_ids)
         body = {
             "model": self.model,
@@ -77,11 +80,19 @@ class VLLMPolicy:
                 break
             except (httpx.TransportError, httpx.HTTPStatusError) as exc:
                 if isinstance(exc, httpx.HTTPStatusError):
-                    message = f"HTTP {response.status_code}: {response.text}"
-                    retryable = 500 <= response.status_code < 600
+                    message = f"HTTP {exc.response.status_code}: {exc.response.text[:500]}"
+                    retryable = 500 <= exc.response.status_code < 600
                 else:
                     message = str(exc)
-                    retryable = True
+                    retryable = isinstance(
+                        exc,
+                        (
+                            httpx.ConnectError,
+                            httpx.RemoteProtocolError,
+                            httpx.ReadError,
+                            httpx.WriteError,
+                        ),
+                    )
                 if not retryable or attempt == 2:
                     raise BackendError(f"vLLM sampling failed: {message}") from exc
                 await asyncio.sleep(2.0**attempt)
@@ -95,6 +106,13 @@ class VLLMPolicy:
             raise BackendError("vLLM returned an invalid token sampling response") from exc
         if len(logprobs) != len(ids):
             raise BackendError("vLLM completion token/logprob length mismatch")
+        if any(not isinstance(token, int) or isinstance(token, bool) for token in ids):
+            raise BackendError("vLLM completion ids must be integers (not bool)")
+        if any(
+            not isinstance(lp, (int, float)) or isinstance(lp, bool) or not isfinite(lp)
+            for lp in logprobs
+        ):
+            raise BackendError("vLLM completion logprobs must be finite numbers")
         return Sample(
             completion_ids=ids,
             logprobs=logprobs,
