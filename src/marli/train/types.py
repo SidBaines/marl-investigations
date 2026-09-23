@@ -54,7 +54,9 @@ class LearnerSpec:
     # 0 = no clipping (cookbook default). The RL loss is sum-reduced, so a small
     # clip would fire every step and divide out credit.loss_agg's global scale.
     grad_clip: float = 0.0
-    loss: str = doc_field("importance_sampling", help="importance_sampling | ppo")
+    loss: str = doc_field(
+        "importance_sampling", help="importance_sampling | ppo (RL) | cross_entropy (SFT)"
+    )
     init_from: str | None = doc_field(None, help="checkpoint manifest (state) to resume/warm-start")
 
     def __post_init__(self) -> None:
@@ -64,8 +66,10 @@ class LearnerSpec:
             )
         if self.rank <= 0 or self.learning_rate <= 0:
             raise ConfigError("learner.rank and learner.learning_rate must be positive")
-        if self.loss not in {"importance_sampling", "ppo"}:
-            raise ConfigError(f"learner.loss must be importance_sampling or ppo, got {self.loss!r}")
+        if self.loss not in {"importance_sampling", "ppo", "cross_entropy"}:
+            raise ConfigError(
+                f"learner.loss must be importance_sampling, ppo or cross_entropy, got {self.loss!r}"
+            )
 
 
 # seating: role -> "learner:<name>" | a frozen PolicyRef string ("tinker:…", "api:…", …).
