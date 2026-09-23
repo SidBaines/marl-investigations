@@ -252,9 +252,49 @@ EPISODE_LIMIT_KEY = "_episode"
 
 def record_to_dict(obj: Any) -> Any:
     """JSON-able form of any record above (recursive; enums by value; tuples as lists)."""
-    raise NotImplementedError  # M1-10
+    from dataclasses import fields, is_dataclass
+    from enum import Enum
+
+    if isinstance(obj, Enum):
+        return obj.value
+    if is_dataclass(obj):
+        return {f.name: record_to_dict(getattr(obj, f.name)) for f in fields(obj)}
+    if isinstance(obj, (tuple, list)):
+        return [record_to_dict(item) for item in obj]
+    if isinstance(obj, dict):
+        return {key: record_to_dict(value) for key, value in obj.items()}
+    return obj
 
 
 def record_from_dict(cls: type, data: Any) -> Any:
     """Inverse of :func:`record_to_dict` for ``cls`` (rebuilds nested records, enums, tuples)."""
-    raise NotImplementedError  # M1-10
+    from dataclasses import fields, is_dataclass
+    from enum import Enum
+    from types import UnionType
+    from typing import Union, get_args, get_origin, get_type_hints
+
+    if data is None or cls is Any:
+        return data
+    origin = get_origin(cls)
+    args = get_args(cls)
+    if origin in (UnionType, Union):
+        (inner,) = (arg for arg in args if arg is not type(None))
+        return record_from_dict(inner, data)
+    if origin is tuple:
+        if len(args) == 2 and args[1] is Ellipsis:
+            return tuple(record_from_dict(args[0], item) for item in data)
+        return tuple(record_from_dict(kind, item) for kind, item in zip(args, data, strict=True))
+    if origin is dict:
+        return {key: record_from_dict(args[1], value) for key, value in data.items()}
+    if isinstance(cls, type) and issubclass(cls, Enum):
+        return cls(data)
+    if is_dataclass(cls):
+        hints = get_type_hints(cls)
+        return cls(
+            **{
+                f.name: record_from_dict(hints[f.name], data[f.name])
+                for f in fields(cls)
+                if f.name in data
+            }
+        )
+    return data
