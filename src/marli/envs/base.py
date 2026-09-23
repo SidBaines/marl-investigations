@@ -56,6 +56,15 @@ class Env(ABC):
     @abstractmethod
     def canonical(self, submission: str | None) -> str | None: ...
 
+    async def same_answer(self, a: str | None, b: str | None) -> bool:
+        """Verifier equivalence of two submissions (used by vote aggregation).
+
+        Default: equal non-None canonical keys. Math envs override this with the
+        math verifier (pairwise ``verify``), which is more robust than canonical
+        strings for LaTeX answers."""
+        ka, kb = self.canonical(a), self.canonical(b)
+        return ka is not None and ka == kb
+
     @property
     def sandbox(self) -> Any | None:  # envs.sandbox.base.Sandbox or None
         return None
