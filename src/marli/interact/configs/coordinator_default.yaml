@@ -1,0 +1,4 @@
+coordinator_tools: [spawn_workers, submit]
+worker_tools: [return_report]
+env_tools: []
+worker_scratchpads: false
