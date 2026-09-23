@@ -199,9 +199,7 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
         errors.extend(
             runtime.error for runtime in io.runtimes.values() if runtime.error is not None
         )
-        submissions = {
-            agent_id: runtime.submission for agent_id, runtime in io.runtimes.items()
-        }
+        submissions = {agent_id: runtime.submission for agent_id, runtime in io.runtimes.items()}
         submissions.update(outcome.submissions)
         grades = {
             agent_id: await spec.env.grade(answer)

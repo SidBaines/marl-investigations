@@ -59,3 +59,9 @@ class _Outer:
 def test_from_mappings_retuples_nested_dataclasses_in_lists() -> None:
     out = from_mappings(_Outer, {"items": [{"names": ["a"]}], "tags": ["x"]})
     assert out.items[0].names == ("a",) and out.tags == ("x",)
+
+
+def test_nested_frozen_defaults_accept_overrides() -> None:
+    _, config, plain = resolve_protocol("swarm_n4_push", {"delivery": {"view": "full"}})
+    assert config.delivery.mode == "push" and config.delivery.view == "full"
+    assert plain["delivery"]["view"] == "full"

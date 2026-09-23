@@ -82,6 +82,7 @@ class SystemIO(ABC):
     env: Env
     rng: Any  # random.Random seeded per episode
     config: Any  # the protocol's own config dataclass
+    workspace: Workspace  # read-only use by protocols (e.g. a finalizer assembling peers' pads)
 
     @abstractmethod
     async def start_agent(
@@ -107,9 +108,7 @@ class SystemIO(ABC):
     def canonicalize(self, answer: str | None) -> str | None: ...
 
     @abstractmethod
-    async def vote(
-        self, submissions: dict[str, str | None]
-    ) -> tuple[str | None, dict[str, int]]:
+    async def vote(self, submissions: dict[str, str | None]) -> tuple[str | None, dict[str, int]]:
         """Greedily cluster by verifier equivalence; exclude None and seed ties.
 
         Each cluster compares new answers to its first member. Return a winning
@@ -284,9 +283,7 @@ class EpisodeSystem(SystemIO):
     def canonicalize(self, answer: str | None) -> str | None:
         return self.env.canonical(answer)
 
-    async def vote(
-        self, submissions: dict[str, str | None]
-    ) -> tuple[str | None, dict[str, int]]:
+    async def vote(self, submissions: dict[str, str | None]) -> tuple[str | None, dict[str, int]]:
         clusters: list[list[str]] = []
         for answer in submissions.values():
             if answer is None:

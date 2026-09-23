@@ -131,7 +131,8 @@ class SwarmProtocol(Protocol):
             "Each peer owns a scratchpad in the shared workspace. "
         )
         if self.config.delivery.mode == "pull" and not {
-            "read_scratchpad", "list_scratchpads"
+            "read_scratchpad",
+            "list_scratchpads",
         }.intersection(self.config.peer_tools):
             preamble += "Solve independently; other peers' work is unavailable. "
         if "submit" in self.config.peer_tools:

@@ -238,9 +238,7 @@ async def test_consensus_stops_remaining_peers_using_verifier(on_exhaust: str) -
 
 async def test_independent_has_only_submit_and_no_deliveries() -> None:
     protocol = IndependentProtocol(IndependentConfig(n_agents=3))
-    spec = swarm_spec(
-        {f"peer{i}": [submit("5")] for i in range(3)}, protocol=protocol
-    )
+    spec = swarm_spec({f"peer{i}": [submit("5")] for i in range(3)}, protocol=protocol)
     episode, _ = await run_episode(spec)
     (role,) = protocol.roles()
     assert role.tools == ("submit",) and protocol.delivery.mode == "pull"
