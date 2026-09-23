@@ -189,6 +189,76 @@ Manifest produced: `scores.json`.
 | episodes | str \| None | null | false | false | true | EpisodeSet manifest or dir |
 | regrade | bool | false | false | false | false |  |
 
+### train rl
+
+Train synchronous on-policy learners with checkpoint and optimizer resume.
+
+Manifest produced: `checkpoint.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| tasks | str \| None | null | false | false | true | training TaskSet |
+| protocol | str | single | false | false | false |  |
+| protocol_config | dict[str, Any] | {} | false | false | false |  |
+| env | str | math | false | false | false |  |
+| env_config | dict[str, Any] | {} | false | false | false |  |
+| learners | dict[str, LearnerSpec] | {} | false | false | false |  |
+| seating | dict[str, str] | {} | false | false | false |  |
+| frozen_sampling | dict[str, SamplingOverrides] | {} | false | false | false |  |
+| credit.reward_key | str | correct | false | false | false | grade component used as the reward |
+| credit.reward_target | dict[str, str] | {} | false | false | false |  |
+| credit.default_target | str | team | false | false | false |  |
+| credit.aux_rewards | list[AuxReward] | [] | false | false | false |  |
+| credit.overlong | str | none | false | false | false |  |
+| credit.overlong_scope | str | episode | false | false | false |  |
+| credit.baseline | str | role | false | false | false |  |
+| credit.baseline_unit | str | episode | false | false | false |  |
+| credit.rae_gamma | float | 0.95 | false | false | false |  |
+| credit.drop_zero_variance | bool | true | false | false | false |  |
+| credit.min_group | int | 2 | false | false | false |  |
+| credit.norm | str | mean | false | false | false |  |
+| credit.std_eps | float | 1e-06 | false | false | false |  |
+| credit.segment_credit | str | all | false | false | false |  |
+| credit.segment_gamma | float | 0.5 | false | false | false |  |
+| credit.segment_unit | str | session | false | false | false |  |
+| credit.segment_normalize | str | none | false | false | false |  |
+| credit.recipients | tuple[str, ...] | [] | false | false | false |  |
+| credit.loss_agg | str | token_sum | false | false | false |  |
+| limits.call.max_tokens | int | 4096 | false | false | false | cap on tokens sampled by a single call |
+| limits.call.min_call_tokens | int | 16 | false | false | false | below this allocation a call is not made (limit exhausted) |
+| limits.agent.max_gen_tokens | int | 32768 | false | false | false | total generated tokens for one agent instance |
+| limits.agent.max_calls | int | 64 | false | false | false | max LLM calls for one agent instance |
+| limits.agent.final_reserve | int | 512 | false | false | false | tokens held back for the forced final/report call |
+| limits.worker.max_gen_tokens | int | 8192 | false | false | false | total generated tokens for one agent instance |
+| limits.worker.max_calls | int | 24 | false | false | false | max LLM calls for one agent instance |
+| limits.worker.final_reserve | int | 512 | false | false | false | tokens held back for the forced final/report call |
+| limits.session.max_sessions | int | 1 | false | false | false | sessions per multi-session agent (1 = single-session) |
+| limits.session.max_gen_tokens | int | 16384 | false | false | false | generated tokens per session (incl. compaction calls) |
+| limits.session.carry_reserve | int | 2048 | false | false | false | tokens held back for the end-of-session carry call (must cover the summary) |
+| limits.session.carry_max_tokens | int | 1024 | false | false | false | cap on the carried summary/notes length |
+| limits.episode.max_gen_tokens | int | 131072 | false | false | false | generated tokens for the whole episode (all agents) |
+| limits.episode.max_ticks | int | 64 | false | false | false | lockstep ticks before the episode is forced to finish |
+| limits.episode.max_wall_s | float | 1800.0 | false | false | false | wall-clock cap (straggler guard; logged, not used for matching) |
+| limits.spawn.max_per_call | int | 4 | false | false | false | workers one spawn_workers call may start |
+| limits.spawn.max_total | int | 8 | false | false | false | workers per coordinator per episode |
+| limits.spawn.max_depth | int | 1 | false | false | false | spawn depth (v1: workers cannot spawn) |
+| limits.ctx.max_ctx | int | 32768 | false | false | false | max prompt+completion tokens in one segment; <= model and backend max_seq_len |
+| limits.on_exhaust | str | force_final | false | false | false | force_final \| none |
+| limits.on_no_tool_call | str | nudge | false | false | false | what to do when a turn makes no tool call: nudge \| end_agent \| final_text_as_answer |
+| limits.max_nudges | int | 2 | false | false | false | consecutive nudges before the agent is ended |
+| limits.tool_output_chars | int | 8000 | false | false | false | tool results are truncated (head+tail) to this many chars |
+| schedule | str | lockstep | false | false | false |  |
+| batch_tasks | int | 8 | false | false | false |  |
+| group_size | int | 4 | false | false | false |  |
+| steps | int | 10 | false | false | false |  |
+| checkpoint_every | int | 5 | false | false | false |  |
+| seed | int | 0 | false | false | false |  |
+| allow_idle | bool | false | false | false | false |  |
+| run_name | str |  | false | false | false |  |
+| concurrency | int | 16 | false | true | false | concurrent episodes |
+| max_usd | float \| None | null | false | true | false | spend guard (sampling + training) |
+| base_url | str \| None | null | false | true | false | Tinker base URL (explicit) |
+
 ### view
 
 Render saved multi-agent episodes as one self-contained HTML page.

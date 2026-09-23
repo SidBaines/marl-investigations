@@ -62,6 +62,13 @@ class VerbSpec:
 
 
 VERBS: dict[str, VerbSpec] = {
+    "train rl": VerbSpec(
+        "train rl",
+        "marli.train.loop:train_rl",
+        "marli.train.rl:TrainRLConfig",
+        "checkpoint.json",
+        "Train synchronous on-policy learners with checkpoint and optimizer resume.",
+    ),
     "data build": VerbSpec(
         "data build",
         "marli.data.build:build",

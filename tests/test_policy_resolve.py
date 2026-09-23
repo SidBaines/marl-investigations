@@ -218,7 +218,7 @@ async def test_tinker_spend_requires_model_before_sdk(
     "ref,trainable,renderer,error",
     [
         ("api:openai/model", True, None, "cannot be trainable"),
-        ("ckpt:checkpoint", False, None, r"ckpt: refs are resolved by marli.train \(M3\)"),
+        ("ckpt:/nonexistent/checkpoint", False, None, "checkpoint"),
         ("tinker:base", False, None, "require renderer_name"),
         ("vllm:http://local#model", True, "", "require renderer_name"),
         ("invalid", False, None, "Invalid policy ref"),

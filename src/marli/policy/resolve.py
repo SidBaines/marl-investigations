@@ -23,7 +23,24 @@ async def resolve_policy(
     if isinstance(ref, str):
         ref = refs.parse_ref(ref)
     if ref.kind == "ckpt":
-        raise ConfigError("ckpt: refs are resolved by marli.train (M3)")
+        from marli.train.checkpoint import Checkpoint, resolve_checkpoint_ref
+
+        try:
+            checkpoint = Checkpoint.load(ref.target)
+        except FileNotFoundError as exc:
+            raise ConfigError(f"ckpt: no checkpoint at {ref.target!r}") from exc
+        records = checkpoint.learners
+        if isinstance(ref.step, int) and ref.step != checkpoint.step:
+            records = next(
+                (saved["learners"] for saved in checkpoint.history if saved["step"] == ref.step),
+                {},
+            )
+        if ref.learner is None and len(records) > 1:
+            raise ConfigError(
+                "multi-learner checkpoint: name one with #learner=<name>; "
+                f"learners: {sorted(records)}"
+            )
+        ref = refs.parse_ref(resolve_checkpoint_ref(ref, ref.learner))
     if ref.kind == "scripted":
         policy = refs.resolve_scripted(ref)
         if policy.trainable != trainable:

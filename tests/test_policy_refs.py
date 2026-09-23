@@ -357,3 +357,27 @@ def test_scripted_factory_rejects_non_policies(
     monkeypatch.setattr(refs_module.importlib, "import_module", lambda name: module)
     with pytest.raises(ConfigError, match="TokenPolicy or ChatPolicy"):
         resolve_scripted(PolicyRef("scripted", "invalid_factory:factory"))
+
+
+@pytest.mark.parametrize(
+    "text,step,learner",
+    [
+        ("ckpt:/r", "final", None),
+        ("ckpt:/r#step=3", 3, None),
+        ("ckpt:/r#learner=coord", "final", "coord"),
+        ("ckpt:/r#step=3&learner=work", 3, "work"),
+        ("ckpt:/r#learner=work&step=final", "final", "work"),
+    ],
+)
+def test_ckpt_refs_name_a_learner(text: str, step: object, learner: str | None) -> None:
+    ref = parse_ref(text)
+    assert (ref.step, ref.learner) == (step, learner)
+    assert parse_ref(str(ref)) == ref
+
+
+@pytest.mark.parametrize(
+    "text", ["ckpt:/r#learner=", "ckpt:/r#step=1&step=2", "ckpt:/r#who=x", "ckpt:/r#learner=a#b"]
+)
+def test_bad_ckpt_suffixes_are_rejected(text: str) -> None:
+    with pytest.raises(ConfigError):
+        parse_ref(text)
