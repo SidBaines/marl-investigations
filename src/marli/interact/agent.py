@@ -532,11 +532,16 @@ class AgentRuntime:
         delta = self._prompt(messages)
         prefix: list[int] = []
         if self.renderer:
-            prefix = self.renderer.suppress_thinking_prefix()
+            # Forced tool prefixes already skip reasoning in the format's native way
+            # (Qwen3.5 closes the prefilled think block; Harmony opens the commentary
+            # channel), so only summary calls use suppress_thinking_prefix — adding both
+            # would emit e.g. a second </think>.
             if purpose in (Purpose.FINAL, Purpose.REPORT):
-                prefix += self.renderer.forced_tool_prefix(
+                prefix = self.renderer.forced_tool_prefix(
                     "submit" if purpose == Purpose.FINAL else "return_report",
                 )
+            else:
+                prefix = self.renderer.suppress_thinking_prefix()
         allocation = self._allocate(ticket, self._prompt_len(delta) + len(prefix), purpose)
         if allocation.exhausted:
             return None

@@ -40,6 +40,10 @@ from marli.config import doc_field
 from marli.errors import ConfigError
 from marli.interact.types import Purpose
 
+# Reserves may be 0 (no forced/carry call budget); the context manager and
+# on_exhaust validation decide when a reserve must be positive.
+_NON_NEGATIVE = frozenset({"agent.final_reserve", "worker.final_reserve", "session.carry_reserve"})
+
 
 @dataclass
 class CallLimits:
@@ -62,7 +66,9 @@ class SessionLimits:
     max_gen_tokens: int = doc_field(
         16384, help="generated tokens per session (incl. compaction calls)"
     )
-    carry_reserve: int = doc_field(1024, help="tokens held back for the end-of-session carry call")
+    carry_reserve: int = doc_field(
+        2048, help="tokens held back for the end-of-session carry call (must cover the summary)"
+    )
     carry_max_tokens: int = doc_field(1024, help="cap on the carried summary/notes length")
 
 
@@ -124,13 +130,18 @@ class Limits:
                 if name == "episode.max_wall_s":
                     if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
                         raise ConfigError(f"{name} must be finite and positive")
+                elif name in _NON_NEGATIVE:
+                    if type(value) is not int or value < 0:
+                        raise ConfigError(f"{name} must be a non-negative integer, got {value!r}")
                 elif type(value) is not int or value <= 0:
-                    raise ConfigError(f"{name} must be a positive integer")
+                    raise ConfigError(f"{name} must be a positive integer, got {value!r}")
         for name in ("max_nudges", "tool_output_chars"):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ConfigError(f"{name} must be a positive integer")
         for name in ("agent", "worker"):
             block = getattr(self, name)
+            if self.on_exhaust == "force_final" and block.final_reserve <= 0:
+                raise ConfigError(f"{name}.final_reserve must be > 0 when on_exhaust=force_final")
             if block.final_reserve >= block.max_gen_tokens:
                 raise ConfigError(f"{name}.final_reserve must be < {name}.max_gen_tokens")
         if self.session.carry_reserve >= self.session.max_gen_tokens:

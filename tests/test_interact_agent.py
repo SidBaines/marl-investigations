@@ -183,7 +183,10 @@ async def test_forced_final_prefix_is_observation_and_parsed_with_completion() -
     assert episode.outcome.final_answer == "5"
     assert final.purpose == Purpose.FINAL and final.forced
     assert final.tool_calls[0].name == "submit" and final.tool_calls[0].parsed_ok
-    prefix = renderer.suppress_thinking_prefix() + renderer.forced_tool_prefix("submit")
+    # FINAL calls use only the forced tool prefix (it skips reasoning natively);
+    # suppress_thinking_prefix is for summary calls (COMPACT/CARRY).
+    prefix = renderer.forced_tool_prefix("submit")
+    assert renderer.suppress_thinking_prefix() != [] and final.prompt_len >= len(prefix)
     assert buffers[final.segment_id][final.prompt_len - len(prefix) : final.prompt_len] == prefix
     assert list(final.completion_ids) == script(policy.calls[-1])
     assert (
