@@ -117,8 +117,12 @@ def _retuple(obj: Any) -> Any:
     changes: dict[str, Any] = {}
     for f in dataclasses.fields(obj):
         value = getattr(obj, f.name)
-        if isinstance(value, list) and _is_tuple(hints.get(f.name)):
-            changes[f.name] = tuple(value)
+        if isinstance(value, list):
+            items = [_retuple(item) for item in value]
+            if _is_tuple(hints.get(f.name)):
+                changes[f.name] = tuple(items)
+            elif any(new is not old for new, old in zip(items, value, strict=True)):
+                changes[f.name] = items
         elif dataclasses.is_dataclass(value) and not isinstance(value, type):
             fixed = _retuple(value)
             if fixed is not value:

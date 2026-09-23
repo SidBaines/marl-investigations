@@ -41,3 +41,21 @@ def test_every_config_entry_builds() -> None:
 def test_entry_files_are_named_by_stem() -> None:
     directory = Path(PROTOCOL_CONFIGS.directory)
     assert all(path.stem in PROTOCOL_CONFIGS.names() for path in directory.glob("*.yaml"))
+
+
+def test_from_mappings_retuples_nested_dataclasses_in_lists() -> None:
+    from dataclasses import dataclass, field
+
+    from marli.config import from_mappings
+
+    @dataclass
+    class Inner:
+        names: tuple[str, ...] = ()
+
+    @dataclass
+    class Outer:
+        items: list[Inner] = field(default_factory=list)
+        tags: tuple[str, ...] = ()
+
+    out = from_mappings(Outer, {"items": [{"names": ["a"]}], "tags": ["x"]})
+    assert out.items[0].names == ("a",) and out.tags == ("x",)
