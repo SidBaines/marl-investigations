@@ -15,6 +15,7 @@ class ExecResult:
     stderr: str
     timed_out: bool
     duration_s: float
+    truncated: bool = False
 
 
 class Sandbox(Protocol):
@@ -25,7 +26,7 @@ class Sandbox(Protocol):
     async def exec(
         self, cmd: Sequence[str] | str, *, timeout_s: float, stdin: str | None = None
     ) -> ExecResult:
-        """Run argv, or a string through bash -lc, from the workdir."""
+        """Run argv, or bash --noprofile --norc -c, from the workdir."""
         ...
 
     async def read_file(self, rel: str) -> str:
