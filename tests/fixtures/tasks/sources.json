@@ -1,0 +1,30 @@
+{
+  "aime_2025": [{"problem_idx": 1, "problem": "Synthetic: compute 6 + 4.", "answer": 10}],
+  "aime_2026": [{"problem_idx": 1, "problem": "Synthetic: compute 8 + 5.", "answer": 13}],
+  "hmmt_feb_2025": [{"problem_idx": 1, "problem": "Synthetic: divide 3 by 8.", "answer": "\\frac{3}{8}"}],
+  "hmmt_feb_2026": [
+    {"problem_idx": 1, "problem": "Synthetic: divide 7 by 4.", "answer": "\\frac{7}{4}"},
+    {"problem_idx": 2, "problem": "Synthetic proof exercise with no short answer.", "answer": ""},
+    {"problem_idx": 3, "problem": "Synthetic missing reference.", "answer": null},
+    {"problem_idx": 4, "problem": "Synthetic whitespace reference.", "answer": "   "},
+    {"problem_idx": 5, "problem": "Synthetic: subtract 9 from 9.", "answer": 0}
+  ],
+  "beyond_aime": [
+    {"problem": "Synthetic: compute 4 squared.", "answer": "16"},
+    {"problem": "Synthetic: compute 5 squared.", "answer": "25"},
+    {"problem": "Synthetic: compute 6 squared.", "answer": "36"},
+    {"problem": "Synthetic: compute 7 squared.", "answer": "49"}
+  ],
+  "imo_answerbench": [{"Problem ID": "synthetic-1", "Problem": "Synthetic: expand (x + 1) squared.", "Short Answer": "x^2+2x+1"}],
+  "math500": [{"unique_id": "synthetic/algebra/1", "problem": "Synthetic: solve x + 6 = 9.", "answer": "3", "level": 2, "subject": "Algebra"}],
+  "polaris_53k": [
+    {"problem": "Synthetic: compute 2 cubed.", "answer": "8", "difficulty": "7/8"},
+    {"problem": "Synthetic: compute 3 cubed.", "answer": "27", "difficulty": 0.5}
+  ],
+  "deepmath_103k": [{"question": "Synthetic: find the area of a square with side 3.", "final_answer": "9", "difficulty": 4.25, "topic": "Geometry", "r1_solution_1": "Ignored synthetic reasoning."}],
+  "dapo_math_17k": [
+    {"prompt": [{"role": "user", "content": "Solve the following math problem step by step. The last line contains the answer.\n\nSynthetic: compute 11 + 2.\n\nRemember to put your answer in a box."}], "reward_model": {"ground_truth": "13"}, "extra_info": {"index": 101}},
+    {"prompt": [{"role": "user", "content": "Solve the following math problem step by step. The last line contains the answer.\n\nSynthetic: compute 11 + 2.\n\nRemember to put your answer in a box."}], "reward_model": {"ground_truth": "13"}, "extra_info": {"index": 102}},
+    {"prompt": [{"role": "user", "content": "Solve the following math problem step by step. The last line contains the answer.\n\nSynthetic: compute 11 + 3.\n  Preserve this indentation.\n\nKeep this paragraph.\n\nRemember to put your answer in a box."}], "reward_model": {"ground_truth": "14"}, "extra_info": {"index": 103}}
+  ]
+}

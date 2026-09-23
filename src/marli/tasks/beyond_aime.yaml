@@ -1,0 +1,9 @@
+name: beyond_aime
+hf_id: ByteDance-Seed/BeyondAIME
+split: test
+kind: math
+fields: {prompt: problem, answer: answer}
+answer_format: integer
+license: cc0-1.0
+commit_text: false
+notes: 100 rows. Contamination-sensitive. Schema verified on the HF Hub 2026-09-23.

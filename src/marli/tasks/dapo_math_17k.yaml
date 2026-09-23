@@ -1,0 +1,14 @@
+name: dapo_math_17k
+hf_id: BytedTsinghua-SIA/DAPO-Math-17k
+split: train
+kind: math
+fields: {id: extra_info.index, prompt: prompt, answer: reward_model}
+prompt_path: prompt.0.content
+answer_path: reward_model.ground_truth
+answer_format: integer
+license: apache-2.0
+commit_text: false
+dedupe: true
+notes: >-
+  Approximately 1.79M rows, 17.9k unique prompts. Strip the instruction wrapper
+  before deduplication, keeping the first row. Schema verified on the HF Hub 2026-09-23.

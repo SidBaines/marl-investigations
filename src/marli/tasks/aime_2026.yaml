@@ -1,0 +1,9 @@
+name: aime_2026
+hf_id: MathArena/aime_2026
+split: train
+kind: math
+fields: {id: problem_idx, prompt: problem, answer: answer}
+answer_format: integer
+license: cc-by-nc-sa-4.0
+commit_text: false
+notes: 30 rows. Schema verified on the HF Hub 2026-09-23.

@@ -132,7 +132,10 @@ def _resolve(ref: str) -> Any:
     return getattr(importlib.import_module(module), attribute)
 
 
-CATALOG: dict[str, str] = {"models": "marli.model:MODELS"}
+CATALOG: dict[str, str] = {
+    "models": "marli.model:MODELS",
+    "tasks": "marli.tasks.source:SOURCES",
+}
 
 
 def catalog_kinds() -> list[str]:

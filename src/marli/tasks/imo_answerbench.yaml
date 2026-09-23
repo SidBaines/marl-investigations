@@ -1,0 +1,9 @@
+name: imo_answerbench
+hf_id: OpenEvals/IMO-AnswerBench
+split: train
+kind: math
+fields: {id: Problem ID, prompt: Problem, answer: Short Answer}
+answer_format: latex
+license: cc-by-4.0
+commit_text: false
+notes: 400 rows with symbolic answers. Contamination-sensitive. Schema verified 2026-09-23.

@@ -1,0 +1,10 @@
+name: hmmt_feb_2026
+hf_id: MathArena/hmmt_feb_2026
+split: train
+kind: math
+fields: {id: problem_idx, prompt: problem, answer: answer}
+answer_format: latex
+license: cc-by-nc-sa-4.0
+commit_text: false
+filters: {answer_nonempty: true}
+notes: 33 rows before filtering empty answers on proof-style problems. Schema verified 2026-09-23.
