@@ -39,4 +39,34 @@ YAML files merge left to right, followed by dotted overrides. `--out auto` uses
 `$MARLI_RUNS/<verb-with-hyphens>/<hash12>` (default root: `runs`). Matching completed
 runs are reused; incomplete runs resume. `--force` replaces existing run output.
 
-No verbs registered yet.
+### data build
+
+Build a taskset from a source, optionally excluding overlapping prompts.
+
+Manifest produced: `taskset.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| source | str | aime_2025 | false | false | false | task source registry name (marli list tasks) |
+| split | str \| None | null | false | false | false |  |
+| max_n | int \| None | null | false | false | false |  |
+| seed | int | 0 | false | false | false |  |
+| shuffle | bool | false | false | false | false |  |
+| exclude | str \| None | null | false | false | true | TaskSet whose prompts are removed (decontamination by exact/normalised match) |
+| ngram_exclude | int | 0 | false | false | false | if >0, also drop tasks sharing any n-gram of this length (words) with `exclude` |
+
+### data filter
+
+Filter a taskset by pass rates from saved rollouts.
+
+Manifest produced: `taskset.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| tasks | str \| None | null | false | false | true | TaskSet to filter |
+| episodes | str \| None | null | false | false | true | episodes dir of rollouts of that TaskSet (eval rollout output) |
+| lo | float | 0.0 | false | false | false |  |
+| hi | float | 1.0 | false | false | false |  |
+| inclusive | bool | false | false | false | false |  |
+| min_episodes | int | 2 | false | false | false |  |
+| metric | str | correct | false | false | false |  |

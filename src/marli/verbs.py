@@ -61,7 +61,22 @@ class VerbSpec:
     help: str
 
 
-VERBS: dict[str, VerbSpec] = {}
+VERBS: dict[str, VerbSpec] = {
+    "data build": VerbSpec(
+        "data build",
+        "marli.data.build:build",
+        "marli.data.build:BuildConfig",
+        "taskset.json",
+        "Build a taskset from a source, optionally excluding overlapping prompts.",
+    ),
+    "data filter": VerbSpec(
+        "data filter",
+        "marli.data.filter:filter",
+        "marli.data.filter:FilterConfig",
+        "taskset.json",
+        "Filter a taskset by pass rates from saved rollouts.",
+    ),
+}
 BUILTINS: tuple[str, ...] = ("list", "describe", "inspect", "status")
 
 
