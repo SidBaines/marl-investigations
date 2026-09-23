@@ -1,15 +1,14 @@
-"""Keep session ablations in configuration, with token carry owned by the runtime.
+"""Divide one agent's compute across explicit sessions and controlled carry modes.
 
-``sessions`` must match ``EpisodeSpec.limits.session.max_sessions``; this
-protocol validates that setting before starting the solver and never changes
-the episode's scientific limits. The current SystemIO contract has no limits
-accessor, so this check uses the concrete EpisodeSystem's public ``spec``.
-Session counts come from the runtime's call/segment records in compute_metrics.
+The protocol owns session counts and budgets, leaving the agent's final reserve
+outside that division. The runtime manages session identity and context resets;
+protocol prompts explain exactly which state survives them.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from string import Formatter
 
 from marli.errors import ConfigError
 from marli.interact.limits import Limits
@@ -28,13 +27,13 @@ class MultiSessionConfig:
     """Session settings; zero compact_threshold enables only session-end summaries.
 
     Prompt fields are sessions, carry, carry_instructions, tail_tokens and
-    notes_cap_chars, plus the runtime's agent_id, role and n_agents fields.
-    The token budget itself is configured by Limits.session.max_gen_tokens.
-    With sessions=1 the runtime uses single-session semantics: end_session
-    stops the agent without a forced final call.
+    notes_cap_chars, plus the runtime's agent_id, role, n_agents and
+    session_tokens fields. An omitted session_tokens divides the agent's
+    available budget equally; explicit budgets must fit that same total.
     """
 
     sessions: int = 3
+    session_tokens: int | None = None
     carry: str = "compaction"
     tail_tokens: int = 2048
     notes_cap_chars: int = 4000
@@ -43,9 +42,9 @@ class MultiSessionConfig:
     env_tools: tuple[str, ...] = ()
     system_prompt: str = (
         "Solve the task carefully. You have up to {sessions} sessions, each bounded by "
-        "its session token budget. Your context is cleared between sessions. "
-        "{carry_instructions} A session ends when its token budget runs out or you call "
-        "end_session. Use submit for your final answer; submitting ends the whole episode."
+        "a session token budget of {session_tokens} generated tokens. "
+        "Your context is cleared between sessions. {carry_instructions} "
+        "Use submit for your final answer; submitting ends the whole episode."
     )
 
     def __post_init__(self) -> None:
@@ -55,10 +54,33 @@ class MultiSessionConfig:
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise ConfigError(f"{name} must be a positive integer")
+        if self.sessions == 1:
+            raise ConfigError("multi_session requires at least two sessions; use single")
+        if self.session_tokens is not None and (
+            type(self.session_tokens) is not int or self.session_tokens <= 0
+        ):
+            raise ConfigError("session_tokens must be a positive integer or None")
         if type(self.compact_threshold) is not int or self.compact_threshold < 0:
             raise ConfigError("compact_threshold must be a non-negative integer")
         if self.compact_threshold and self.carry not in ("compaction", "both"):
             raise ConfigError("compact_threshold requires compaction or both carry")
+        try:
+            self.system_prompt.format(
+                sessions=self.sessions,
+                session_tokens=1024,
+                carry=self.carry,
+                carry_instructions="carry",
+                tail_tokens=self.tail_tokens,
+                notes_cap_chars=self.notes_cap_chars,
+                agent_id="solver0",
+                role="solver",
+                n_agents=1,
+                max_workers_per_call=4,
+                max_workers_total=8,
+                worker_tokens=8192,
+            )
+        except (KeyError, IndexError, ValueError, AttributeError) as exc:
+            raise ConfigError(f"invalid system_prompt template: {exc}") from exc
 
 
 @PROTOCOLS.register("multi_session")
@@ -79,7 +101,8 @@ class MultiSessionProtocol(Protocol):
             "notes": (
                 f"Use write_notes and read_notes to maintain private notes capped at "
                 f"{cfg.notes_cap_chars} characters. Your next session sees those notes "
-                "alongside the original task."
+                "alongside the original task. Save progress to notes regularly: sessions "
+                "end without warning when the budget runs out."
             ),
             "both": (
                 f"Use write_notes and read_notes to maintain private notes capped at "
@@ -87,25 +110,43 @@ class MultiSessionProtocol(Protocol):
                 "write a summary; your next session sees the original task, summary and notes."
             ),
             "tail": (
-                f"Only the last {cfg.tail_tokens} tokens of the previous context are carried "
-                "as a prefill alongside the original task in your next session."
+                f"Only the last {cfg.tail_tokens} tokens of your own replies (including "
+                "thinking, excluding tool calls) are carried as text alongside the original "
+                "task in your next session. Sessions end when their token budget runs out."
             ),
         }[cfg.carry]
-        prompt = cfg.system_prompt.format(
-            sessions=cfg.sessions,
-            carry=cfg.carry,
-            carry_instructions=carry_instructions,
-            tail_tokens=cfg.tail_tokens,
-            notes_cap_chars=cfg.notes_cap_chars,
-            agent_id="{agent_id}",
-            role="{role}",
-            n_agents="{n_agents}",
-        )
+        if cfg.carry != "tail":
+            carry_instructions += (
+                " A session ends when its token budget runs out or you call end_session."
+            )
+        fields = {
+            "sessions": cfg.sessions,
+            "carry": cfg.carry,
+            "carry_instructions": carry_instructions,
+            "tail_tokens": cfg.tail_tokens,
+            "notes_cap_chars": cfg.notes_cap_chars,
+        }
+        # Keep runtime fields and literal braces intact for the final format pass.
+        parts = []
+        for literal, name, spec, conversion in Formatter().parse(cfg.system_prompt):
+            parts.append(literal.replace("{", "{{").replace("}", "}}"))
+            if name is not None:
+                field = "{" + name + ("!" + conversion if conversion else "")
+                field += (":" + spec if spec else "") + "}"
+                if name in fields:
+                    field = field.format(**fields).replace("{", "{{").replace("}", "}}")
+                parts.append(field)
+        prompt = "".join(parts)
         notes_tools = ("read_notes", "write_notes") if cfg.carry in ("notes", "both") else ()
+        tools = (
+            ("submit",)
+            if cfg.carry == "tail" and cfg.tools == ("submit", "end_session")
+            else cfg.tools
+        )
         return [
             RoleSpec(
                 "solver",
-                tuple(dict.fromkeys((*cfg.tools, *notes_tools, *cfg.env_tools))),
+                tuple(dict.fromkeys((*tools, *notes_tools, *cfg.env_tools))),
                 prompt,
                 context=ContextSpec(
                     kind=cfg.carry,
@@ -117,8 +158,21 @@ class MultiSessionProtocol(Protocol):
         ]
 
     def adjust_limits(self, limits: Limits) -> Limits:
-        """The protocol owns the session count; budgets stay in ``Limits``."""
-        return replace(limits, session=replace(limits.session, max_sessions=self.config.sessions))
+        """Compute-match all sessions to the agent budget, preserving its final reserve."""
+        cfg = self.config
+        available = limits.agent.max_gen_tokens - limits.agent.final_reserve
+        tokens = available // cfg.sessions if cfg.session_tokens is None else cfg.session_tokens
+        if cfg.sessions * tokens > available:
+            raise ConfigError("sessions * session_tokens exceeds agent budget minus final_reserve")
+        return replace(
+            limits,
+            session=replace(
+                limits.session,
+                max_sessions=cfg.sessions,
+                max_gen_tokens=tokens,
+                carry_reserve=0 if cfg.carry in ("notes", "tail") else limits.session.carry_reserve,
+            ),
+        )
 
     async def run(self, io: SystemIO) -> Outcome:
         handle = await io.start_agent(

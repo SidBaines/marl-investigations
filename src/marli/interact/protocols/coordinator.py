@@ -32,7 +32,10 @@ class CoordinatorConfig:
     worker_scratchpads: bool = False
     coordinator_system_prompt: str = (
         "You are coordinator {agent_id}. Solve the task, delegating useful subtasks "
-        "with spawn_workers. Use submit to provide your final answer."
+        "with spawn_workers: at most {max_workers_per_call} workers per call "
+        "(spawn.max_per_call), {max_workers_total} workers total (spawn.max_total), "
+        "each with {worker_tokens} generated tokens (worker.max_gen_tokens). "
+        "Use submit to provide your final answer."
     )
     worker_system_prompt: str = (
         "You are worker {agent_id}. Solve your assigned subtask independently. "
@@ -42,12 +45,28 @@ class CoordinatorConfig:
     def __post_init__(self) -> None:
         if "spawn_workers" in (*self.worker_tools, *self.env_tools):
             raise ConfigError("workers cannot use spawn_workers (spawn.max_depth=1)")
+        if "return_report" not in self.worker_tools:
+            raise ConfigError("worker_tools must include return_report")
+        for name in ("coordinator_system_prompt", "worker_system_prompt"):
+            try:
+                getattr(self, name).format(
+                    agent_id="agent0",
+                    role="worker",
+                    n_agents=1,
+                    max_workers_per_call=4,
+                    max_workers_total=8,
+                    worker_tokens=8192,
+                    session_tokens=16384,
+                )
+            except (KeyError, IndexError, ValueError, AttributeError) as exc:
+                raise ConfigError(f"invalid {name} template: {exc}") from exc
 
 
 @TOOLS.register("spawn_workers")
 class _SpawnWorkers:
     shared = False
-    control = False
+    blocking = True
+    control = True
     spec = ToolSpec(
         "spawn_workers",
         "Run parallel workers on self-contained subtasks and wait for all their reports.",
@@ -58,7 +77,7 @@ class _SpawnWorkers:
                     "type": "array",
                     "description": (
                         "A non-empty list of objects, each with task (string) and "
-                        "optional context (string)."
+                        "optional context (string or null)."
                     ),
                 },
             },
@@ -71,7 +90,7 @@ class _SpawnWorkers:
         # The runtime constructs tools per agent, so this counter lasts one episode.
         self._spawned = 0
 
-    async def __call__(self, ctx: ToolCtx, *, tasks: list[dict[str, str]]) -> ToolResult:
+    async def __call__(self, ctx: ToolCtx, *, tasks: list[dict[str, str | None]]) -> ToolResult:
         limits = ctx.ledger.limits.spawn
         count = len(tasks)
         if not 1 <= count <= limits.max_per_call or self._spawned + count > limits.max_total:
@@ -85,13 +104,15 @@ class _SpawnWorkers:
             if (
                 not isinstance(task, dict)
                 or not isinstance(task.get("task"), str)
-                or ("context" in task and not isinstance(task["context"], str))
+                or not task["task"].strip()
+                or (task.get("context") is not None and not isinstance(task["context"], str))
                 or task.keys() - {"task", "context"}
             ):
                 raise ToolError(
-                    f"tasks[{index}] must contain task (string) and optional context (string)"
+                    f"tasks[{index}] must contain task (non-blank string) and optional "
+                    "context (string or null)"
                 )
-        affordable = ctx.ledger.reserve_workers(ctx.agent_id, count)
+        affordable = ctx.ledger.reserve_workers(ctx.agent_id, count, all_or_nothing=True)
         if affordable < count:
             raise ToolError(f"only {affordable} workers are affordable; requested {count}")
 
@@ -99,7 +120,7 @@ class _SpawnWorkers:
         for task in tasks:
             number = self._spawned
             first_message = f"{task['task']}\n\nYou are helping solve: {ctx.system.task.prompt}"
-            if "context" in task:
+            if task.get("context") is not None:
                 first_message += f"\n\nContext: {task['context']}"
             first_message += "\n\nEnd by calling return_report with your findings"
             handle = await ctx.system.start_agent(
@@ -119,10 +140,11 @@ class _SpawnWorkers:
             ctx.scheduler.unblock(ctx.agent_id)
         sections = []
         for result in results:
-            report = result.report
-            if report is None:
-                report = f"[worker {result.agent_id}: no report]"
-            sections.append(f"[worker {result.agent_id}] {report}")
+            sections.append(
+                f"[worker {result.agent_id}: no report ({result.ended_by})]"
+                if result.report is None
+                else f"[worker {result.agent_id}] {result.report}"
+            )
         return ToolResult("\n\n".join(sections), control={})
 
 
@@ -138,14 +160,18 @@ class CoordinatorProtocol(Protocol):
         config = self.config
         coordinator_tools = (*config.coordinator_tools, *config.env_tools)
         worker_tools = (*config.worker_tools, *config.env_tools)
+        coordinator_prompt = config.coordinator_system_prompt
+        worker_prompt = config.worker_system_prompt
         if config.worker_scratchpads:
             coordinator_tools += ("read_scratchpad", "list_scratchpads")
             worker_tools += ("write_scratchpad",)
+            coordinator_prompt += " Workers' scratchpads are visible to the coordinator."
+            worker_prompt += " Your scratchpad is visible to the coordinator."
         return [
             RoleSpec(
                 "coordinator",
                 coordinator_tools,
-                config.coordinator_system_prompt,
+                coordinator_prompt,
                 count=1,
                 limits_key="agent",
                 permissions=Permissions(
@@ -157,7 +183,7 @@ class CoordinatorProtocol(Protocol):
             RoleSpec(
                 "worker",
                 worker_tools,
-                config.worker_system_prompt,
+                worker_prompt,
                 count=None,
                 limits_key="worker",
                 permissions=Permissions(

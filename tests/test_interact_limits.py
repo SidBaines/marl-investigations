@@ -277,3 +277,16 @@ def test_all_or_nothing_reservation_leaves_no_partial_reserve(schedule: str) -> 
     assert alloc(ledger).max_tokens == before  # nothing reserved
     assert ledger.reserve_workers("a", 2, all_or_nothing=True) == 2
     assert alloc(ledger).max_tokens == 10
+
+
+def test_final_text_continue_is_validated_as_a_no_tool_mode() -> None:
+    assert Limits(on_no_tool_call="final_text_continue").on_no_tool_call == "final_text_continue"
+
+
+def test_final_uses_agent_reserve_after_session_budget_is_fully_spent() -> None:
+    cfg = Limits(session=SessionLimits(max_sessions=2, max_gen_tokens=100, carry_reserve=0))
+    ledger = Ledger(cfg)
+    ledger.register("a", kind="agent")
+    ledger.charge("a", gen_tokens=100, purpose=Purpose.ACT)
+    allocation = ledger.allocate("a", prompt_len=0, purpose=Purpose.FINAL, tick=1, n_active=1)
+    assert allocation.exhausted is None and allocation.max_tokens == cfg.agent.final_reserve

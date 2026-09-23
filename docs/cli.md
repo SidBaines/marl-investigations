@@ -107,7 +107,7 @@ Manifest produced: `report.json`.
 | common.limits.spawn.max_depth | int | 1 | false | false | false | spawn depth (v1: workers cannot spawn) |
 | common.limits.ctx.max_ctx | int | 32768 | false | false | false | max prompt+completion tokens in one segment; <= model and backend max_seq_len |
 | common.limits.on_exhaust | str | force_final | false | false | false | force_final \| none |
-| common.limits.on_no_tool_call | str | nudge | false | false | false | what to do when a turn makes no tool call: nudge \| end_agent \| final_text_as_answer |
+| common.limits.on_no_tool_call | str | nudge | false | false | false | no-tool turn: nudge \| end_agent \| final_text_as_answer \| final_text_continue |
 | common.limits.max_nudges | int | 2 | false | false | false | consecutive nudges before the agent is ended |
 | common.limits.tool_output_chars | int | 8000 | false | false | false | tool results are truncated (head+tail) to this many chars |
 | common.schedule | str | lockstep | false | false | false |  |
@@ -167,7 +167,7 @@ Manifest produced: `episodes.json`.
 | limits.spawn.max_depth | int | 1 | false | false | false | spawn depth (v1: workers cannot spawn) |
 | limits.ctx.max_ctx | int | 32768 | false | false | false | max prompt+completion tokens in one segment; <= model and backend max_seq_len |
 | limits.on_exhaust | str | force_final | false | false | false | force_final \| none |
-| limits.on_no_tool_call | str | nudge | false | false | false | what to do when a turn makes no tool call: nudge \| end_agent \| final_text_as_answer |
+| limits.on_no_tool_call | str | nudge | false | false | false | no-tool turn: nudge \| end_agent \| final_text_as_answer \| final_text_continue |
 | limits.max_nudges | int | 2 | false | false | false | consecutive nudges before the agent is ended |
 | limits.tool_output_chars | int | 8000 | false | false | false | tool results are truncated (head+tail) to this many chars |
 | schedule | str | lockstep | false | false | false |  |

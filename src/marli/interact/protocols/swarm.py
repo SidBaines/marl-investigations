@@ -65,11 +65,16 @@ class SwarmConfig:
         self.delivery.__post_init__()
         for name in ("peer_system_prompt", "finalizer_system_prompt"):
             try:
-                getattr(self, name).format(
-                    agent_id="peer0", role="peer", n_agents=self.n_agents, peer_ids="peer0"
-                )
+                getattr(self, name).format(agent_id="peer0", role="peer", **self.prompt_fields())
             except (KeyError, IndexError, ValueError) as exc:
                 raise ConfigError(f"invalid {name} template: {exc}") from exc
+
+    def prompt_fields(self) -> dict[str, str | int]:
+        """Protocol-owned fields resolved before the runtime formats each role."""
+        return {
+            "n_agents": self.n_agents,
+            "peer_ids": ", ".join(f"peer{i}" for i in range(self.n_agents)),
+        }
 
 
 @PROTOCOLS.register("swarm")
@@ -89,15 +94,14 @@ class SwarmProtocol(Protocol):
         # Resolve swarm-wide fields without consuming the runtime's per-agent
         # fields or literal braces (e.g. a boxed-answer instruction).
         parts = []
+        fields = self.config.prompt_fields()
         for literal, name, spec, conversion in Formatter().parse(template):
             parts.append(literal.replace("{", "{{").replace("}", "}}"))
             if name is not None:
                 field = "{" + name + ("!" + conversion if conversion else "")
                 field += (":" + spec if spec else "") + "}"
-                if name in {"n_agents", "peer_ids"}:
-                    field = field.format(
-                        n_agents=self.config.n_agents, peer_ids=", ".join(self.peer_ids)
-                    )
+                if name in fields:
+                    field = field.format(**fields)
                     field = field.replace("{", "{{").replace("}", "}}")
                 parts.append(field)
         return "".join(parts)
