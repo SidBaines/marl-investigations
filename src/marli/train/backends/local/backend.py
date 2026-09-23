@@ -110,6 +110,7 @@ class LocalBackend:
         # M4-1 owns torch/PEFT construction, training and checkpoint I/O. Its
         # constructors are synchronous; no heavy import occurs before validation.
         import torch
+
         from marli.train.backends.local.learner import LocalLearner, LocalLearnerPool
 
         class ServingLearner(_SamplerMixin, LocalLearner):

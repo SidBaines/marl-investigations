@@ -130,8 +130,11 @@ def _preflight(
     models = {name: load_model(spec.base_model) for name, spec in cfg.learners.items()}
     for name, spec in cfg.learners.items():
         model = models[name]
-        if spec.backend == "local":
-            raise ConfigError("local training backend not implemented until M4")
+        if spec.backend == "local" and not cfg.local_server_json:
+            raise ConfigError(
+                f"learner {name!r}: the local backend needs local_server_json "
+                "(start one with `marli serve vllm`)"
+            )
         if spec.backend == "tinker" and (
             model.tinker_max_ctx is None or cfg.limits.ctx.max_ctx > model.tinker_max_ctx
         ):
@@ -389,7 +392,14 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
         frozen, renderers = await build_policies(frozen_specs, spend=spend)
         for name, spec in cfg.learners.items():
             if spec.backend not in backends:
-                kwargs = {"state_dir": run.path("states")} if spec.backend == "fake" else {}
+                kwargs: dict[str, Any] = {}
+                if spec.backend == "fake":
+                    kwargs = {"state_dir": run.path("states")}
+                elif spec.backend == "local":
+                    kwargs = {
+                        "server_json": cfg.local_server_json,
+                        "adapters_dir": cfg.local_adapters_dir or str(run.path("adapters")),
+                    }
                 backends[spec.backend] = make_backend(
                     spec.backend, spend=spend, base_url=cfg.base_url, **kwargs
                 )
