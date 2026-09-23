@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Sequence
+from math import isfinite
 from typing import Any
 
 from marli.budget import SpendGuard, tinker_cost
@@ -46,6 +47,8 @@ class TinkerPolicy:
     ) -> Sample:
         if self.trainable:
             check_trainable_sampling(spec, policy_id=self.policy_id)
+        if not spec.stop_token_ids:
+            raise ConfigError("Tinker sampling requires non-empty stop_token_ids")
 
         import tinker
         from tinker.lib.retry_handler import RetryConfig, is_retryable_status_code
@@ -92,6 +95,13 @@ class TinkerPolicy:
             self.spend.charge(cost, self.policy_id)
         if logprobs is None or len(logprobs) != len(ids):
             raise BackendError("Tinker completion token/logprob length mismatch")
+        if any(not isinstance(token, int) or isinstance(token, bool) for token in ids):
+            raise BackendError("Tinker completion ids must be integers (not bool)")
+        if any(
+            not isinstance(lp, (int, float)) or isinstance(lp, bool) or not isfinite(lp)
+            for lp in logprobs
+        ):
+            raise BackendError("Tinker completion logprobs must be finite numbers")
         return Sample(
             completion_ids=ids,
             logprobs=logprobs,
@@ -102,6 +112,7 @@ class TinkerPolicy:
             usage=Usage(
                 prompt_tokens=len(prompt),
                 completion_tokens=len(ids),
+                cached_prompt_tokens=getattr(response, "prompt_cache_hit_tokens", None),
                 cost_usd=cost,
                 tokenizer=self.renderer_name,
             ),
@@ -110,24 +121,35 @@ class TinkerPolicy:
 
 def make_service_client(base_url: str | None) -> Any:
     """Reject implicit endpoint overrides before the SDK can route a paid call."""
-    env_url = os.environ.get("TINKER_BASE_URL")
-    if env_url is not None and env_url != base_url:
-        raise ConfigError("TINKER_BASE_URL disagrees with the policy's explicit base_url")
-
     import tinker
     from tinker.lib.base_url import DEFAULT_BASE_URL
 
-    return tinker.ServiceClient(base_url=base_url or DEFAULT_BASE_URL, max_retries=0)
+    explicit_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    env_url = (os.environ.get("TINKER_BASE_URL") or "").rstrip("/")
+    if env_url and env_url != explicit_url:
+        raise ConfigError(
+            f"TINKER_BASE_URL {env_url!r} disagrees with policy base_url {explicit_url!r}"
+        )
+    return tinker.ServiceClient(base_url=explicit_url)
 
 
 async def sampling_client_for(
     service: Any, *, base_model: str | None = None, model_path: str | None = None
 ) -> Any:
+    """Let our three-attempt sample loop own sample-level retries.
+
+    The service client's default transport retries remain enabled for session
+    and sampling-session creation, which our sample loop does not cover.
+    """
     from tinker.lib.retry_handler import RetryConfig
 
-    # Disable the SDK's outer sampling retry loop; its internal transport retries remain.
-    return await service.create_sampling_client_async(
-        base_model=base_model,
-        model_path=model_path,
-        retry_config=RetryConfig(enable_retry_logic=False),
-    )
+    try:
+        return await service.create_sampling_client_async(
+            base_model=base_model,
+            model_path=model_path,
+            retry_config=RetryConfig(enable_retry_logic=False),
+        )
+    except ValueError as exc:
+        raise ConfigError(f"Invalid Tinker sampling client configuration: {exc}") from exc
+    except Exception as exc:
+        raise BackendError(f"Tinker sampling client creation failed: {exc}") from exc

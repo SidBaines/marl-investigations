@@ -25,7 +25,14 @@ async def resolve_policy(
     if ref.kind == "ckpt":
         raise ConfigError("ckpt: refs are resolved by marli.train (M3)")
     if ref.kind == "scripted":
-        return refs.resolve_scripted(ref)
+        policy = refs.resolve_scripted(ref)
+        if policy.trainable != trainable:
+            raise ConfigError("scripted policy trainable disagrees with the requested trainable")
+        if renderer_name is not None and getattr(policy, "renderer_name", None) != renderer_name:
+            raise ConfigError(
+                "scripted policy renderer_name disagrees with requested renderer_name"
+            )
+        return policy
     if ref.kind == "api":
         if trainable:
             raise ConfigError("API policies cannot be trainable")
@@ -51,6 +58,8 @@ async def resolve_policy(
     if not renderer_name:
         raise ConfigError(f"{ref.kind} token policies require renderer_name")
     if ref.kind == "tinker":
+        if spend is not None and model is None:
+            raise ConfigError("Tinker refs with spend require a model for pricing")
         from marli.policy.tinker import TinkerPolicy, make_service_client, sampling_client_for
 
         service = make_service_client(ref.base_url)

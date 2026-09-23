@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
@@ -150,7 +151,35 @@ async def test_exact_sampling_request_and_response(
     assert sample.usage.prompt_tokens == len(prompt)
     assert sample.usage.completion_tokens == len(sample.completion_ids)
     assert sample.usage.tokenizer == "fake"
+    assert sample.usage.cached_prompt_tokens is None
     assert prompt == original_prompt
+
+
+@pytest.mark.parametrize("cached", [0, 3])
+async def test_prompt_cache_hits_are_recorded(sdk: ModuleType, cached: int) -> None:
+    result = response()
+    result.prompt_cache_hit_tokens = cached
+    client = SimpleNamespace(sample_async=AsyncMock(return_value=result))
+    renderer = FakeRenderer()
+    sample = await TinkerPolicy("p", client, renderer_name="fake", trainable=True).sample(
+        renderer.encode_text("prompt"),
+        SamplingSpec(20, stop_token_ids=renderer.stop_token_ids),
+        seed=1,
+    )
+    assert sample.usage.cached_prompt_tokens == cached
+
+
+@pytest.mark.parametrize("trainable", [False, True])
+async def test_empty_stop_ids_rejected_before_sdk(
+    monkeypatch: pytest.MonkeyPatch, trainable: bool
+) -> None:
+    monkeypatch.setitem(sys.modules, "tinker", None)
+    client = SimpleNamespace(sample_async=AsyncMock())
+    with pytest.raises(ConfigError, match="non-empty stop_token_ids"):
+        await TinkerPolicy("p", client, renderer_name="fake", trainable=trainable).sample(
+            FakeRenderer().encode_text("prompt"), SamplingSpec(20), seed=1
+        )
+    client.sample_async.assert_not_called()
 
 
 async def test_spend_preflight_and_actual_charge(sdk: ModuleType) -> None:
@@ -162,14 +191,18 @@ async def test_spend_preflight_and_actual_charge(sdk: ModuleType) -> None:
     policy = TinkerPolicy(
         "p", client, renderer_name="fake", trainable=True, model=model, spend=guard
     )
-    sample = await policy.sample(prompt, SamplingSpec(20), seed=1)
+    sample = await policy.sample(
+        prompt, SamplingSpec(20, stop_token_ids=FakeRenderer().stop_token_ids), seed=1
+    )
     expected = tinker_cost(model, prefill=len(prompt), sample=len(sample.completion_ids))
     guard.check.assert_called_once_with(tinker_cost(model, prefill=len(prompt), sample=20), "p")
     guard.charge.assert_called_once_with(expected, "p")
     assert sample.usage.cost_usd == expected and guard._mock_wraps.spent == expected
     policy.spend = SpendGuard(0)
     with pytest.raises(BudgetExceededError):
-        await policy.sample(prompt, SamplingSpec(20), seed=1)
+        await policy.sample(
+            prompt, SamplingSpec(20, stop_token_ids=FakeRenderer().stop_token_ids), seed=1
+        )
     assert client.sample_async.await_count == 1
 
 
@@ -180,8 +213,45 @@ async def test_misaligned_logprobs_fail(sdk: ModuleType, logprobs: list[float] |
     client = SimpleNamespace(sample_async=AsyncMock(return_value=result))
     policy = TinkerPolicy("p", client, renderer_name="fake", trainable=True)
     with pytest.raises(BackendError, match="length mismatch"):
-        await policy.sample(FakeRenderer().encode_text("prompt"), SamplingSpec(20), seed=1)
+        await policy.sample(
+            FakeRenderer().encode_text("prompt"),
+            SamplingSpec(20, stop_token_ids=FakeRenderer().stop_token_ids),
+            seed=1,
+        )
     assert client.sample_async.await_count == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("tokens", True),
+        ("tokens", 1.5),
+        ("tokens", "1"),
+        ("tokens", None),
+        ("logprobs", float("nan")),
+        ("logprobs", float("inf")),
+        ("logprobs", -float("inf")),
+        ("logprobs", "-0.5"),
+        ("logprobs", None),
+        ("logprobs", True),
+    ],
+)
+async def test_invalid_token_values_fail_without_retry(
+    sdk: ModuleType, monkeypatch: pytest.MonkeyPatch, field: str, value: Any
+) -> None:
+    result = response()
+    getattr(result.sequences[0], field)[0] = value
+    client = SimpleNamespace(sample_async=AsyncMock(return_value=result))
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    with pytest.raises(BackendError, match="integers|finite numbers"):
+        await TinkerPolicy("p", client, renderer_name="fake", trainable=True).sample(
+            FakeRenderer().encode_text("prompt"),
+            SamplingSpec(20, stop_token_ids=FakeRenderer().stop_token_ids),
+            seed=1,
+        )
+    client.sample_async.assert_awaited_once()
+    sleep.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -205,7 +275,11 @@ async def test_transient_retries_preserve_request(
     monkeypatch.setattr(asyncio, "sleep", sleep)
     client = SimpleNamespace(sample_async=AsyncMock(side_effect=[error, error, response()]))
     policy = TinkerPolicy("p", client, renderer_name="fake", trainable=True)
-    sample = await policy.sample(FakeRenderer().encode_text("prompt"), SamplingSpec(20), seed=1)
+    sample = await policy.sample(
+        FakeRenderer().encode_text("prompt"),
+        SamplingSpec(20, stop_token_ids=FakeRenderer().stop_token_ids),
+        seed=1,
+    )
     assert sample.termination == Termination.STOP
     calls = client.sample_async.call_args_list
     assert len(calls) == 3 and calls[0] == calls[1] == calls[2]
@@ -221,7 +295,9 @@ async def test_failures_are_bounded(
     client = SimpleNamespace(sample_async=AsyncMock(side_effect=error))
     with pytest.raises(BackendError) as caught:
         await TinkerPolicy("p", client, renderer_name="fake", trainable=True).sample(
-            FakeRenderer().encode_text("p"), SamplingSpec(10), seed=1
+            FakeRenderer().encode_text("p"),
+            SamplingSpec(10, stop_token_ids=FakeRenderer().stop_token_ids),
+            seed=1,
         )
     assert caught.value.__cause__ is error
     assert client.sample_async.await_count == attempts and sleep.await_count == attempts - 1
@@ -231,7 +307,9 @@ async def test_cancellation_is_not_retried(sdk: ModuleType) -> None:
     client = SimpleNamespace(sample_async=AsyncMock(side_effect=asyncio.CancelledError()))
     with pytest.raises(asyncio.CancelledError):
         await TinkerPolicy("p", client, renderer_name="fake", trainable=True).sample(
-            FakeRenderer().encode_text("p"), SamplingSpec(10), seed=1
+            FakeRenderer().encode_text("p"),
+            SamplingSpec(10, stop_token_ids=FakeRenderer().stop_token_ids),
+            seed=1,
         )
     assert client.sample_async.await_count == 1
 
@@ -255,9 +333,13 @@ async def test_trainable_guard_before_sdk(sdk: ModuleType, spec: SamplingSpec) -
         (None, None, True),
         ("http://local:8000", None, True),
         ("http://local:8000", "http://local:8000", True),
+        ("http://local:8000/", "http://local:8000", True),
+        ("http://local:8000", "http://local:8000///", True),
+        ("http://local:8000/", "", True),
         (None, "http://local:8000", False),
         ("http://local:8000", "https://cloud.invalid", False),
-        (None, "", False),
+        (None, "", True),
+        (None, "https://tinker.thinkingmachines.dev/services/tinker-prod/", True),
     ],
 )
 def test_explicit_endpoint_guard(
@@ -270,14 +352,19 @@ def test_explicit_endpoint_guard(
     if env is not None:
         monkeypatch.setenv("TINKER_BASE_URL", env)
     if not allowed:
-        with pytest.raises(ConfigError, match="TINKER_BASE_URL"):
+        with pytest.raises(ConfigError, match="TINKER_BASE_URL") as caught:
             make_service_client(explicit)
+        assert env in str(caught.value)
+        assert (explicit or "https://tinker.thinkingmachines.dev/services/tinker-prod") in str(
+            caught.value
+        )
         sdk.ServiceClient.assert_not_called()
         return
     assert make_service_client(explicit) is sdk.ServiceClient.return_value
     sdk.ServiceClient.assert_called_once_with(
-        base_url=explicit or "https://tinker.thinkingmachines.dev/services/tinker-prod",
-        max_retries=0,
+        base_url=(explicit or "https://tinker.thinkingmachines.dev/services/tinker-prod").rstrip(
+            "/"
+        ),
     )
 
 
@@ -290,4 +377,58 @@ async def test_sampling_client_constructor(sdk: ModuleType, kwargs: dict[str, st
         base_model=kwargs.get("base_model"),
         model_path=kwargs.get("model_path"),
         retry_config=RetryConfig(enable_retry_logic=False),
+    )
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (ValueError("invalid model"), ConfigError),
+        (APIConnectionError("offline"), BackendError),
+        (APIStatusError(503), BackendError),
+        (httpx.ConnectError("offline"), BackendError),
+        (TimeoutError("timeout"), BackendError),
+    ],
+)
+async def test_sampling_client_creation_errors_are_classified(
+    sdk: ModuleType, error: Exception, expected: type[Exception]
+) -> None:
+    service = SimpleNamespace(create_sampling_client_async=AsyncMock(side_effect=error))
+    with pytest.raises(expected) as caught:
+        await sampling_client_for(service, base_model="base")
+    assert caught.value.__cause__ is error
+    service.create_sampling_client_async.assert_awaited_once()
+
+
+async def test_sampling_client_creation_cancellation_passes_through(sdk: ModuleType) -> None:
+    service = SimpleNamespace(
+        create_sampling_client_async=AsyncMock(side_effect=asyncio.CancelledError())
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await sampling_client_for(service, base_model="base")
+    service.create_sampling_client_async.assert_awaited_once()
+
+
+@pytest.mark.tinker
+async def test_installed_sdk_signatures_match_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    tinker = pytest.importorskip("tinker")
+    params = Mock(wraps=tinker.SamplingParams)
+    monkeypatch.setattr(tinker, "SamplingParams", params)
+    client = SimpleNamespace(sample_async=AsyncMock(return_value=response()))
+    renderer = FakeRenderer()
+    await TinkerPolicy("p", client, renderer_name="fake", trainable=True).sample(
+        renderer.encode_text("prompt"),
+        SamplingSpec(20, stop_token_ids=renderer.stop_token_ids),
+        seed=1,
+    )
+    assert params.call_args.kwargs.keys() <= tinker.types.SamplingParams.model_fields.keys()
+    sample_signature = inspect.signature(tinker.SamplingClient.sample_async)
+    assert client.sample_async.call_args.kwargs.keys() <= sample_signature.parameters.keys()
+
+    service = SimpleNamespace(create_sampling_client_async=AsyncMock())
+    await sampling_client_for(service, base_model="base")
+    create_signature = inspect.signature(tinker.ServiceClient.create_sampling_client_async)
+    assert (
+        service.create_sampling_client_async.call_args.kwargs.keys()
+        <= create_signature.parameters.keys()
     )
