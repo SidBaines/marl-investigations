@@ -17,6 +17,7 @@ How others' state reaches an agent (``delivery``, configured per protocol):
 - ``notify`` (default): each turn the harness pushes a compact index of
   writes the reader hasn't seen — ``(writer, key, version, n_chars,
   first line)`` — and the agent pulls contents with ``read_scratchpad``.
+  The first notification includes only the latest version per writer.
 - ``push``: each turn the harness pushes the new content itself
   (``view``: ``latest`` = newest version per writer, ``full`` = every unseen
   version, capped by ``push_max_chars``).
@@ -36,6 +37,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field, replace
 
+from marli.errors import ConfigError
 from marli.interact.tools import ToolError
 from marli.interact.types import ReadVia, WorkspaceRead, Write
 
@@ -54,6 +56,16 @@ class DeliverySpec:
     view: str = "latest"  # latest | full   (push payload shape)
     push_max_chars: int = 6000
     index_first_line_chars: int = 120
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"notify", "push", "pull"}:
+            raise ConfigError(f"unknown delivery mode: {self.mode!r}")
+        if self.view not in {"latest", "full"}:
+            raise ConfigError(f"unknown delivery view: {self.view!r}")
+        if self.push_max_chars <= 64:
+            raise ConfigError("push_max_chars must be greater than 64")
+        if self.index_first_line_chars < 0:
+            raise ConfigError("index_first_line_chars must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -89,12 +101,8 @@ class Workspace:
         notes_cap_chars: int = 4000,
     ) -> None:
         """Create an episode workspace; copy role maps so permissions stay stable."""
-        if delivery.mode not in {"notify", "push", "pull"}:
-            raise ValueError(f"unknown delivery mode: {delivery.mode!r}")
-        if delivery.view not in {"latest", "full"}:
-            raise ValueError(f"unknown delivery view: {delivery.view!r}")
-        if min(delivery.push_max_chars, delivery.index_first_line_chars, notes_cap_chars) < 0:
-            raise ValueError("workspace character caps must be non-negative")
+        if notes_cap_chars < 0:
+            raise ConfigError("notes_cap_chars must be non-negative")
         self.delivery = delivery
         self.staged = staged
         self.notes_cap_chars = notes_cap_chars
@@ -110,9 +118,9 @@ class Workspace:
     def add_agent(self, agent_id: str, role: str) -> None:
         """Register a dynamic worker with an existing role's permissions."""
         if agent_id in self._roles:
-            raise ToolError(f"agent {agent_id!r} is already registered")
+            raise ConfigError(f"agent {agent_id!r} is already registered")
         if role not in self._permissions:
-            raise ToolError(f"no workspace permissions for role {role!r}")
+            raise ConfigError(f"no workspace permissions for role {role!r}")
         self._roles[agent_id] = role
 
     def write(
@@ -158,8 +166,6 @@ class Workspace:
         Unlisted agents' writes remain staged. Immediate workspaces return an
         empty list. Versions are assigned from committed history here.
         """
-        if not self.staged:
-            return []
         for agent_id in seat_order:
             self._agent_permissions(agent_id)
         committed = []
@@ -167,6 +173,19 @@ class Workspace:
             for write in self._staged.pop(agent_id, []):
                 committed.append(self._commit(write))
         return committed
+
+    def has_staged(self) -> bool:
+        """Whether any writes still await a scheduler commit or episode-end flush."""
+        return bool(self._staged)
+
+    def flush_staged(self, seat_order: list[str]) -> list[Write]:
+        """Commit all pending writes, including agents omitted from a partial order.
+
+        Listed agents commit first in seat order; remaining agents follow in
+        agent-id order. Each agent's writes retain their original order.
+        """
+        remaining = sorted(self._staged.keys() - set(seat_order))
+        return self.commit_staged([*seat_order, *remaining])
 
     def view(self, reader: str) -> WorkspaceView:
         """Snapshot readable committed history and the reader's own staged content.
@@ -191,13 +210,17 @@ class Workspace:
     def read(
         self, reader: str, writer: str, key: str = "scratchpad", version: int | None = None
     ) -> tuple[str, int]:
-        """Read a permitted committed version; zero or never written is empty.
+        """Read committed state or the writer's own latest staged version.
 
-        Unknown agents, forbidden reads and nonexistent versions raise ToolError.
+        Zero or never written is empty. An unknown harness reader raises
+        ValueError; an unknown target writer, forbidden reads and nonexistent
+        versions raise ToolError. Own pending content is returned for the latest
+        read or its exact pending version.
         Reading does not acknowledge pending notify/push deliveries.
         """
         self._agent_permissions(reader)
-        self._agent_permissions(writer)
+        if writer not in self._roles:
+            raise ToolError(f"unknown agent {writer!r}")
         self._validate_key(key)
         if not self._can_read(reader, writer, key):
             if key == "notes":
@@ -205,6 +228,13 @@ class Workspace:
             raise ToolError(f"agent {reader!r} may not read {writer!r}'s {key}")
         if version is not None and (type(version) is not int or version < 0):
             raise ToolError("version must be a non-negative integer")
+        if reader == writer:
+            pending = next(
+                (write for write in reversed(self._staged.get(reader, [])) if write.key == key),
+                None,
+            )
+            if pending is not None and (version is None or version == pending.version):
+                return pending.content, pending.version
         history = self._history.get((writer, key), [])
         if version == 0 or not history:
             return "", 0
@@ -233,15 +263,18 @@ class Workspace:
     def pending_delivery(self, reader: str) -> tuple[str | None, list[WorkspaceRead]]:
         """Deliver unseen readable peer scratchpads and acknowledge the versions.
 
-        Notify lists every unseen version. Push selects all versions or the
-        latest per writer, in commit order, then keeps the tail within the cap.
-        Versions omitted by the cap are acknowledged too; read records describe
-        only versions whose formatted blocks overlap the delivered tail.
+        The first notify collapses history to the latest version per writer;
+        later notifies list every unseen version. Push selects all versions or
+        the latest per writer, in commit order. Oversized blocks keep their
+        headers and a marked content tail; whole blocks are then dropped
+        oldest-first to fit the total cap. Omitted versions are acknowledged
+        too; read records describe only blocks whose headers are delivered.
         """
         self._agent_permissions(reader)
         if self.delivery.mode == "pull":
             return None, []
-        seen = self._last_seen.setdefault(reader, {})
+        first_delivery = reader not in self._last_seen
+        seen = self._last_seen.get(reader, {})
         writes = [
             write
             for write in self._log
@@ -252,8 +285,13 @@ class Workspace:
         ]
         if not writes:
             return None, []
+        self._last_seen[reader] = seen
         for write in writes:
             seen[write.writer, write.key] = write.version
+        if (self.delivery.mode == "notify" and first_delivery) or (
+            self.delivery.mode == "push" and self.delivery.view == "latest"
+        ):
+            writes = [write for write in writes if write.version == seen[write.writer, write.key]]
         if self.delivery.mode == "notify":
             text = "\n".join(
                 f"[workspace] {write.writer} wrote {write.key} v{write.version} "
@@ -264,27 +302,25 @@ class Workspace:
                 WorkspaceRead(write.writer, write.key, write.version, ReadVia.NOTIFY)
                 for write in writes
             ]
-        if self.delivery.view == "latest":
-            writes = [write for write in writes if write.version == seen[write.writer, write.key]]
-        blocks = [
-            f"[workspace] {write.writer} {write.key} v{write.version}:\n{write.content}"
-            for write in writes
-        ]
-        text = "\n\n".join(blocks)
+        blocks = []
+        marker = "…[truncated]"
+        for write in writes:
+            header = f"[workspace] {write.writer} {write.key} v{write.version}:\n"
+            content = write.content
+            if len(header) + len(content) > self.delivery.push_max_chars:
+                keep = max(0, self.delivery.push_max_chars - len(header) - len(marker))
+                content = marker + (content[-keep:] if keep else "")
+            blocks.append(header + content)
+        total = sum(map(len, blocks)) + 2 * (len(blocks) - 1)
         start = 0
-        if len(text) > self.delivery.push_max_chars:
-            marker = "…[truncated]"
-            keep = max(0, self.delivery.push_max_chars - len(marker))
-            start = len(text) - keep
-            text = marker[: self.delivery.push_max_chars] + (text[-keep:] if keep else "")
-        reads = []
-        end = 0
-        for write, block in zip(writes, blocks, strict=True):
-            end += len(block)
-            if end > start:
-                reads.append(WorkspaceRead(write.writer, write.key, write.version, ReadVia.PUSH))
-            end += 2  # Blank line between blocks is not part of a version's content.
-        return text, reads
+        while start < len(blocks) and total > self.delivery.push_max_chars:
+            total -= len(blocks[start]) + (2 if start + 1 < len(blocks) else 0)
+            start += 1
+        reads = [
+            WorkspaceRead(write.writer, write.key, write.version, ReadVia.PUSH)
+            for write in writes[start:]
+        ]
+        return "\n\n".join(blocks[start:]) or None, reads
 
     def log(self) -> tuple[Write, ...]:
         """Return committed writes in commit order, excluding staged records."""
@@ -299,7 +335,7 @@ class Workspace:
 
     def _agent_permissions(self, agent_id: str) -> Permissions:
         if agent_id not in self._roles:
-            raise ToolError(f"unknown agent {agent_id!r}")
+            raise ValueError(f"unknown agent {agent_id!r}")
         return self._permissions[self._roles[agent_id]]
 
     def _can_read(self, reader: str, writer: str, key: str) -> bool:
