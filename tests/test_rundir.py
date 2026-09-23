@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -145,6 +146,31 @@ def test_torn_final_line_is_truncated_before_append(
         assert path.read_bytes() == prefix + b'{"id": 3}\n'
 
 
+@pytest.mark.parametrize("tail", [b'{"id":', b'{"id": 2}', b'{"answer": "\xce'])
+def test_resume_appends_before_reading_torn_tail(tmp_path: Path, tail: bytes) -> None:
+    with run_dir(tmp_path) as run:
+        run.append_row("rows.jsonl", {"id": 1})
+        path = run.path("rows.jsonl")
+        path.write_bytes(path.read_bytes() + tail)
+    with run_dir(tmp_path) as resumed:
+        resumed.append_row("rows.jsonl", {"id": 3})
+        resumed.append_row("rows.jsonl", {"id": 4})
+        expected = [{"id": 1}, {"id": 3}, {"id": 4}]
+        assert resumed.read_rows("rows.jsonl") == expected
+        assert path.read_bytes().endswith(b"\n")
+        assert [json.loads(line) for line in path.read_bytes().splitlines()] == expected
+
+
+def test_append_with_torn_tail_rejects_middle_corruption(tmp_path: Path) -> None:
+    with run_dir(tmp_path) as run:
+        path = run.path("rows.jsonl")
+        content = b'{"id": 1}\ninvalid\n{"id":'
+        path.write_bytes(content)
+        with pytest.raises(MarliError, match="line 2"):
+            run.append_row("rows.jsonl", {"id": 3})
+        assert path.read_bytes() == content
+
+
 @pytest.mark.parametrize("bad_line", [b"invalid\n", b"\xff\n"])
 def test_corrupt_middle_line_is_loud_and_untouched(tmp_path: Path, bad_line: bytes) -> None:
     with run_dir(tmp_path) as run:
@@ -180,6 +206,45 @@ def test_force_wipes_old_work_but_preserves_lock(tmp_path: Path, complete: bool)
             run_dir(tmp_path, force=True).open()
         record = json.loads(forced.path(".marli/run.json").read_text())
         assert record["config_hash"] == config_hash(Settings(2))
+
+
+def test_interrupted_force_cannot_reuse_old_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with run_dir(tmp_path) as run:
+        run.append_row("rows.jsonl", {"id": 1})
+        run.finalize(RowsHandle(root=tmp_path))
+    manifest = run.path(RowsHandle.MANIFEST)
+    record = run.path(".marli/run.json")
+    real_fsync = os.fsync
+    out_synced = False
+    removed: list[Path] = []
+
+    def track_fsync(fd: int) -> None:
+        nonlocal out_synced
+        if os.fstat(fd).st_ino == tmp_path.stat().st_ino:
+            assert not manifest.exists()
+            assert not record.exists()
+            out_synced = True
+        real_fsync(fd)
+
+    def interrupt_remove(path: Path) -> None:
+        assert not manifest.exists()
+        assert not record.exists()
+        assert out_synced
+        removed.append(path)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rundir_module.os, "fsync", track_fsync)
+    monkeypatch.setattr(RunDir, "_remove", staticmethod(interrupt_remove))
+    with pytest.raises(KeyboardInterrupt):
+        run_dir(tmp_path, seed=2, force=True).open()
+    assert len(removed) == 1
+    assert not manifest.exists()
+    assert not record.exists()
+    assert run.path("rows.jsonl").read_bytes() == b'{"id": 1}\n'
+    with pytest.raises(ConfigError, match="not a marli run dir"):
+        run_dir(tmp_path).open()
 
 
 def test_force_unlinks_symlinks_without_deleting_targets(tmp_path: Path) -> None:
@@ -223,6 +288,45 @@ def test_exclusive_lock_then_reopen(tmp_path: Path) -> None:
     finally:
         first.close()
         second.close()
+
+
+def test_forked_child_close_preserves_parent_lock(tmp_path: Path) -> None:
+    with run_dir(tmp_path) as parent:
+        pid = os.fork()
+        if pid == 0:
+            try:
+                parent.close()
+            except BaseException:
+                os._exit(1)
+            os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        with pytest.raises(RunDirLockedError), run_dir(tmp_path):
+            pass
+    with run_dir(tmp_path) as reopened:
+        assert reopened.status is RunStatus.RESUME
+
+
+@pytest.mark.parametrize("escape", ["absolute", "absolute_inside", "parent", "symlink"])
+def test_paths_cannot_escape_run(tmp_path: Path, escape: str) -> None:
+    outside = tmp_path / "outside.jsonl"
+    content = b'{"id": 1}\n{"id":'
+    outside.write_bytes(content)
+    with run_dir(tmp_path / "run") as run:
+        run.path("linked").symlink_to(tmp_path, target_is_directory=True)
+        rel = {
+            "absolute": str(outside),
+            "absolute_inside": str(run.out / "rows.jsonl"),
+            "parent": "../outside.jsonl",
+            "symlink": "linked/outside.jsonl",
+        }[escape]
+        with pytest.raises(ConfigError):
+            run.path(rel)
+        with pytest.raises(ConfigError):
+            run.read_rows(rel)
+        with pytest.raises(ConfigError):
+            run.append_row(rel, {"id": 2})
+        assert outside.read_bytes() == content
 
 
 def test_resume_kind_mismatch(tmp_path: Path) -> None:
@@ -281,6 +385,27 @@ def test_write_progress(tmp_path: Path) -> None:
     assert timestamp.tzinfo == UTC
     assert before <= timestamp <= after
     assert list(tmp_path.rglob("*.tmp*")) == []
+
+
+@pytest.mark.parametrize("reopen", [False, True])
+def test_completed_run_rejects_rows_and_progress(tmp_path: Path, reopen: bool) -> None:
+    with run_dir(tmp_path) as run:
+        run.append_row("rows.jsonl", {"id": 1})
+        run.write_progress({"done": 1})
+        run.finalize(RowsHandle(root=tmp_path))
+        paths = [run.path(name) for name in ("rows.jsonl", "progress.json", "rows.json")]
+        original = [path.read_bytes() for path in paths]
+        if reopen:
+            run.close()
+            run.open()
+        with pytest.raises(MarliError, match="complete"):
+            run.append_row("rows.jsonl", {"id": 2})
+        with pytest.raises(MarliError, match="complete"):
+            run.append_row("new/rows.jsonl", {"id": 2})
+        with pytest.raises(MarliError, match="complete"):
+            run.write_progress({"done": 2})
+        assert [path.read_bytes() for path in paths] == original
+        assert not run.path("new").exists()
 
 
 def test_failed_open_releases_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
