@@ -19,6 +19,17 @@ marli = "marli.cli.main:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6"]
+# Token-level renderers: HF chat templates (Qwen) + the official Harmony encoding (gpt-oss).
+render = ["transformers>=5.5,<=5.5.4", "openai-harmony>=0.0.8"]
+# Math tasks + the one verifier used for reward and eval. math-verify must use the
+# ANTLR 4.9 runtime: OmegaConf (marli.config) pins antlr4-python3-runtime==4.9.*.
+eval = ["datasets>=4", "math-verify[antlr4_9_3]>=0.9", "pebble>=5"]
+# Tinker sampling/training backend (the cookbook brings torch; install on pods/dev boxes that train).
+tinker = ["tinker==0.30.1", "tinker-cookbook==0.5.7"]
+wandb = ["wandb"]
+hub = ["huggingface_hub"]
+pods = ["bellhop-py>=0.8"]
+all = ["marli[dev,render,eval,tinker,wandb,hub,pods]"]
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -44,6 +55,7 @@ markers = [
     "gpu: needs a CUDA device",
     "live: hits the network or spends money (APIs, Tinker, pods)",
     "tinker: needs the [tinker] extra (tinker + tinker-cookbook)",
+    "hf: needs transformers + cached HF tokenizers (skipped otherwise)",
 ]
 
 [tool.ruff]

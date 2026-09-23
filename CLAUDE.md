@@ -125,10 +125,11 @@ superseded debate-centric draft.)
   credit combinations are rejected at config validation.
 - Graders see only the submission and the sandbox — never scratchpads or
   notes.
-- The API `ChatClient` has an in-memory cache: sampling calls **must** pass a
-  per-call `cache_salt` or repeated identical prompts (parallel peers, SC@k,
-  GRPO groups) collapse to one sample (scimt postmortem,
-  `docs/sources/scimt-prior-latmem-lessons.md`).
+- The API `ChatClient` cache is **off by default**; when enabled it keys on the
+  payload **plus** a required per-call `cache_salt`, so repeated identical
+  prompts (parallel peers, SC@k, GRPO groups) never collapse to one sample
+  (scimt postmortem: its always-on in-memory cache did exactly that,
+  `docs/sources/scimt-prior-latmem-lessons.md`). APIPolicy always salts.
 
 ## Evaluation conventions
 
