@@ -1,7 +1,7 @@
 name: gpt_oss_20b
 hf_id: openai/gpt-oss-20b
 family: gpt_oss
-renderer: gpt_oss
+renderer: gpt_oss_medium
 architecture: GptOssForCausalLM
 max_ctx: 32768
 default_max_tokens: 8192

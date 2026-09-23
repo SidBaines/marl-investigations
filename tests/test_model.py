@@ -142,7 +142,8 @@ def test_published_model_entries(
     model = load_model(name)
     assert model.name == MODELS.path(name).stem == name
     assert model.hf_id == hf_id
-    assert model.family == model.renderer == family
+    assert model.family == family
+    assert model.renderer == {"gpt_oss": "gpt_oss_medium"}.get(family, family)
     assert model.architecture == architecture
     assert model.max_ctx == 32768
     assert model.default_max_tokens == (8192 if thinking else 2048)

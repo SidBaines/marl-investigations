@@ -29,6 +29,13 @@ def _fake(hf_id: str | None) -> DeltaRenderer:
     return FakeRenderer()
 
 
+def _harmony(name: str, hf_id: str | None) -> DeltaRenderer:
+    """gpt-oss (Harmony) renderers; ``hf_id`` is irrelevant: the encoding is fixed."""
+    from marli.render.harmony import HARMONY_RENDERERS
+
+    return HARMONY_RENDERERS[name]()
+
+
 def _qwen(name: str, hf_id: str | None) -> DeltaRenderer:
     from marli.render.hf import HFTemplateRenderer
     from marli.render.qwen import qwen_profile
@@ -45,6 +52,9 @@ _FACTORIES: dict[str, Callable[[str | None], DeltaRenderer]] = {
     "qwen3_5_nothink": partial(_qwen, "qwen3_5_nothink"),
     "qwen3": partial(_qwen, "qwen3"),
     "qwen3_nothink": partial(_qwen, "qwen3_nothink"),
+    "gpt_oss_low": partial(_harmony, "gpt_oss_low"),
+    "gpt_oss_medium": partial(_harmony, "gpt_oss_medium"),
+    "gpt_oss_high": partial(_harmony, "gpt_oss_high"),
 }
 
 
@@ -56,3 +66,8 @@ def get_renderer(name: str, *, hf_id: str | None = None) -> DeltaRenderer:
             f"Unknown renderer {name!r}; valid names: {', '.join(sorted(_FACTORIES))}"
         ) from None
     return factory(hf_id)
+
+
+def renderer_names() -> tuple[str, ...]:
+    """All registered renderer names (no heavy imports)."""
+    return tuple(sorted(_FACTORIES))

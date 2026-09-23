@@ -45,6 +45,13 @@ class TinkerPrices:
             raise ValueError(date_error)
 
 
+
+def _renderer_names() -> tuple[str, ...]:
+    from marli.render.registry import renderer_names
+
+    return renderer_names()
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     """Reproducible model identity, rendering, backend capabilities and defaults.
@@ -57,7 +64,7 @@ class ModelSpec:
     name: str  # registry key, identical to the YAML filename stem
     hf_id: str  # Hugging Face model identifier for weights and tokenizer
     family: str  # model family: qwen3 | qwen3_5 | gpt_oss
-    renderer: str  # token renderer: qwen3 | qwen3_5 | gpt_oss
+    renderer: str  # default token renderer name (marli.render.registry.renderer_names())
     architecture: str  # Hugging Face architecture class name
     max_ctx: int  # default prompt+completion cap; <= model and backend limits
     default_max_tokens: int  # default completion token cap per call
@@ -73,7 +80,7 @@ class ModelSpec:
     def __post_init__(self) -> None:
         for field, choices in (
             ("family", ("qwen3", "qwen3_5", "gpt_oss")),
-            ("renderer", ("qwen3", "qwen3_5", "gpt_oss")),
+            ("renderer", _renderer_names()),
             ("tool_format", ("qwen3_json", "qwen3_5_xml", "harmony")),
             ("local", ("yes", "no", "unverified")),
         ):
