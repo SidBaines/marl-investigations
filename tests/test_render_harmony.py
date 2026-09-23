@@ -353,3 +353,12 @@ def test_initial_matches_cached_hf_template(renderer: HarmonyRenderer) -> None:
         assert actual[actual.index(end) + 1 :] == expected[expected.index(end) + 1 :]
         pytest.skip("Only system header differs: Harmony pins the conversation date")
     assert actual == expected
+
+
+def test_suppress_thinking_prefix_opens_final_channel(
+    renderer: HarmonyRenderer, encoding: HarmonyEncoding
+) -> None:
+    prefix = renderer.suppress_thinking_prefix()
+    completion = encoding.encode("Summary text.<|return|>", allowed_special="all")
+    turn = renderer.parse(prefix + completion)
+    assert turn.content == "Summary text." and turn.thinking is None

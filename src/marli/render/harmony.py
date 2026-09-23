@@ -141,6 +141,10 @@ class HarmonyRenderer:
                 raise ValueError(f"Unknown Harmony message role: {msg.role!r}")
         return messages
 
+    def suppress_thinking_prefix(self) -> list[int]:
+        """Open the final channel directly, skipping analysis (harness summary calls)."""
+        return self._encoding.encode("<|channel|>final<|message|>", allowed_special="all")
+
     def forced_tool_prefix(self, tool_name: str) -> list[int]:
         if tool_name not in self._tools:
             raise ValueError(f"Tool {tool_name!r} was not advertised in initial()")
