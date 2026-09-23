@@ -44,6 +44,20 @@ Async (``schedule: async``):
   * An optional ``wait_for_update(timeout)`` tool lets an agent sleep until any
     other agent commits.
 
+Construction: ``LockstepScheduler(workspace, recorder, *, clock=None)`` and
+``AsyncScheduler(workspace, recorder, *, clock=None)``. The recorder
+(``interact/records.py``) is the single authority for event ``seq`` numbers:
+the scheduler records TICK-level facts through it (commits: one
+``EventKind.COMMIT`` event per committed write, plus ``recorder.add_write``),
+while call/tool events are recorded by the agent runtime. At tick close the
+lockstep scheduler calls ``workspace.commit_staged(seat_order)`` with the
+agents that were released at that tick, in ``seat_key`` order.
+
+``register`` returns immediately; a registered agent must eventually call
+``turn()`` or ``done()`` — the scheduler never times agents out (the protocol
+enforces ``max_wall_s``). ``done`` is idempotent. ``block``/``unblock`` nest
+(a counter), so a tool may block while waiting on several workers.
+
 Both schedulers take an injectable clock for tests.
 """
 
@@ -58,7 +72,6 @@ from typing import Any, Protocol
 class Ticket:
     tick: int | None  # None under async
     view: Any  # WorkspaceView: read-only snapshot for this turn (see workspace.py)
-    seq: int  # event seq assigned to this turn's start
 
 
 class Scheduler(Protocol):
@@ -72,7 +85,6 @@ class Scheduler(Protocol):
     def done(self, agent_id: str) -> None: ...
     @property
     def tick(self) -> int | None: ...
-    def next_seq(self) -> int: ...
     # async only; False on timeout
     async def wait_for_update(self, agent_id: str, timeout: float) -> bool: ...
 
