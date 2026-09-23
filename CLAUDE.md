@@ -1,13 +1,25 @@
 # marl-investigations (`marli`)
 
-Research repo for **multi-agent RL on LLMs**: several LLM agents interact under
-a *protocol* (debate, solver/critic, round-robin, …), we evaluate them on
-benchmarks under different protocols, and we train one or more of them with RL
-— locally on RunPod GPUs (our own learner + vLLM) or on Tinker.
+Research repo for **RL on multi-agent LLM systems**. The systems we study are
+token-level, tool-using agents over a shared workspace, organised by a
+*protocol*:
+
+- **coordinator-free swarms**: parallel peers, each writing its own scratchpad
+  and reading the others';
+- **coordinator + workers**: an orchestrator spawns workers via a tool and
+  composes their reports;
+- **multi-session single agents**: fresh contexts, carrying state through
+  compaction and/or notes-to-self.
+
+Debate and self-consistency exist only as baselines. We evaluate on hard math
+and agentic coding at matched compute. We train with RL either locally (our own
+PEFT multi-LoRA learner + vLLM on RunPod) or on Tinker, choosing shared vs
+per-role LoRAs and which agents and sessions receive credit.
 
 `AGENTS.md` is a symlink to this file: Claude and Codex follow the same rules.
-The founding design is `docs/plans/2026-09-23-core-infra.md` — read it before
-changing library structure.
+The founding design is `docs/plans/2026-09-23-agent-systems.md` — read it
+before changing library structure. (`2026-09-23-core-infra.md` is an earlier,
+superseded debate-centric draft.)
 
 ## Four layers
 
@@ -98,13 +110,23 @@ changing library structure.
   templates or returned text. Tinker and vLLM must see identical prompt ids.
 - **Trainable seats sample at temperature 1, top_p 1, top_k −1** (both
   backends return raw logprobs; anything else is silently off-policy).
-- Training datums are built **per (episode, trainable agent)**, never merged
-  across agents; non-action positions carry logprob 0 and advantage 0. Frozen
-  seats never produce datums.
-- The RL loss is **sum-reduced**; use `train.adv_norm` to compare protocols
-  with different token volumes.
+- **Every LLM call is recorded with its exact ids; datums use exactly the ids
+  the policy saw** — never re-render or re-tokenize history at training time.
+  An agent's context is an append-only token buffer (sampled ids appended
+  verbatim, new messages rendered as a delta); a context reset (compaction,
+  new session, worker spawn) starts a new *segment*.
+- Training datums are built **per (agent, segment)**, never merged across
+  agents; non-action positions (tool results, pushed messages, prefills,
+  forced closes) carry logprob 0 and advantage 0. Frozen and API seats never
+  produce datums.
+- The RL loss is **sum-reduced**; credit assignment and normalization live in
+  `train.credit.*` (recipients, reward_target, baseline_group, norm,
+  segment_credit, loss_agg) and are applied by scaling advantages. Invalid
+  credit combinations are rejected at config validation.
+- Graders see only the submission and the sandbox — never scratchpads or
+  notes.
 - The API `ChatClient` has an in-memory cache: sampling calls **must** pass a
-  per-call `cache_salt` or repeated identical prompts (debate round 1, SC@k,
+  per-call `cache_salt` or repeated identical prompts (parallel peers, SC@k,
   GRPO groups) collapse to one sample (scimt postmortem,
   `docs/sources/scimt-prior-latmem-lessons.md`).
 
@@ -114,10 +136,14 @@ changing library structure.
   once; scoring re-runs over saved episodes.
 - **One verifier for reward and eval** (math-verify for math; strict letter
   extraction for MCQ). Majority votes group answers by verifier equivalence.
-- **Compute-matched baselines are first-class** (SC@k, self-refine at equal
-  generated tokens); debate gains are mostly voting until shown otherwise.
-- **Report the n; show paired lift** vs a baseline cell of the same harness
-  (McNemar / paired bootstrap), plus calls and tokens per episode.
+- **Compute-matched comparisons are the default.** Every episode records
+  total generated tokens, uncached prompt tokens, LM calls, critical-path
+  tokens and peak context. Baselines are a single agent, N independent agents
+  + vote (the swarm with visibility off), and sequential multi-session. Report
+  accuracy against both total and critical-path tokens: multi-agent gains
+  often vanish at equal compute.
+- **Report the n; show paired lift** against a baseline cell of the same
+  harness (McNemar / paired bootstrap).
 - **Never commit benchmark question or transcript text for gated/contamination-
   sensitive sets** (GPQA, AIME, …) — aggregate numbers only.
 

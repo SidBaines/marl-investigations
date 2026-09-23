@@ -1,3 +1,7 @@
+> **SUPERSEDED (2026-09-23)** by [2026-09-23-agent-systems.md](2026-09-23-agent-systems.md).
+> This earlier draft assumed debate-style turn-taking protocols; Sid redirected the project to
+> agent systems (swarms, coordinator+workers, multi-session). Kept for history only.
+
 # Plan: core infra for `marl-investigations` (multi-agent RL on LLMs)
 
 ## Context
