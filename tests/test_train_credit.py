@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from math import sqrt
+from random import Random
 
 import pytest
 
@@ -396,8 +397,8 @@ def test_per_learner_normalizes_once_per_emitting_agent_across_roles_and_groups(
     ]
     cfg = CreditConfig(default_target="individual", norm="per_learner", std_eps=0.1)
     assert validate_credit(cfg, ctx, group_size=2) == [
-        "learner 'other' serves a single role: per_learner == mean_std-like; "
-        "did you mean norm=mean_std?"
+        "learner 'other' serves a single role: per_learner scales by RMS; "
+        "use norm=mean_std for reward-standard-deviation scaling"
     ]
     credits, _, _ = assign_credit(episodes, cfg, ctx)
     shared_std = sqrt(14 / 3)
@@ -448,7 +449,7 @@ def test_per_learner_population_excludes_masked_nonrecipient_frozen_and_empty_ag
     )
     credits, _, _ = assign_credit(episodes, cfg, ctx)
     assert [credit.agent_id for credit in credits] == ["kept", "kept"]
-    assert advantages(credits) == pytest.approx([0, 2 / 1.1])
+    assert advantages(credits) == pytest.approx([0, 2 / (sqrt(2) + 0.1)])
 
 
 def test_zero_variance_drop_is_after_baselines_before_normalization() -> None:
@@ -456,9 +457,12 @@ def test_zero_variance_drop_is_after_baselines_before_normalization() -> None:
     cfg = CreditConfig()
     credits, stats, _ = assign_credit(episodes, cfg, context())
     assert credits == []
-    assert stats == CreditStats(
-        n_episodes=2, n_groups=1, zero_variance_groups=1, reward_mean={"peer": 1}
-    )
+    assert asdict(stats) == {
+        **asdict(
+            CreditStats(n_episodes=2, n_groups=1, zero_variance_groups=1, reward_mean={"peer": 1})
+        ),
+        "norm_skipped": 0,
+    }
     credits, stats, _ = assign_credit(episodes, replace(cfg, drop_zero_variance=False), context())
     assert advantages(credits) == [0, 0]
     assert stats.action_tokens == {"shared": 8}
@@ -495,7 +499,7 @@ def test_empty_input_preserves_rae_state_without_aliasing() -> None:
     state = {"protocol-hash/peer": 0.5}
     credits, stats, new_state = assign_credit([], CreditConfig(), context(), rae_state=state)
     assert credits == []
-    assert stats == CreditStats()
+    assert asdict(stats) == {**asdict(CreditStats()), "norm_skipped": 0}
     assert new_state == state
     assert new_state is not state
 
@@ -534,8 +538,9 @@ def test_mask_no_answer_scopes_and_nonsubmitting_role_follows_episode(
 @pytest.mark.parametrize(
     "scope,kept,masked", [("episode", ["a", "b", "w"], 3), ("agent", ["a", "w", "a", "b", "w"], 1)]
 )
-def test_mask_forced_scopes_include_calls_of_every_purpose(
-    scope: str, kept: list[str], masked: int
+@pytest.mark.parametrize("purpose", [Purpose.FINAL, Purpose.REPORT])
+def test_mask_forced_scopes_include_final_and_report(
+    scope: str, kept: list[str], masked: int, purpose: Purpose
 ) -> None:
     ctx = context(RoleSpec("peer", ("submit",), ""), RoleSpec("worker", (), ""))
     seats = [Seat("a"), Seat("b"), Seat("w", "worker")]
@@ -543,7 +548,7 @@ def test_mask_forced_scopes_include_calls_of_every_purpose(
     first = replace(
         first,
         calls=tuple(
-            replace(call, forced=True, purpose=Purpose.CARRY) if call.agent_id == "b" else call
+            replace(call, forced=True, purpose=purpose) if call.agent_id == "b" else call
             for call in first.calls
         ),
     )
@@ -572,7 +577,7 @@ def test_masked_agent_reward_stays_in_role_baseline_and_mean_std() -> None:
         std_eps=0.1,
     )
     credits, stats, _ = assign_credit(episodes, cfg, context())
-    assert advantages(credits) == pytest.approx([1 / 1.1, -2 / 1.1, -2 / 1.1])
+    assert advantages(credits) == pytest.approx([a / (sqrt(1.5) + 0.1) for a in (1, -2, -2)])
     assert stats.reward_mean == {"peer": 1}
     assert stats.masked_overlong == 1
 
@@ -830,8 +835,6 @@ def test_validate_warns_when_segment_weights_cannot_have_an_effect() -> None:
 @pytest.mark.parametrize(
     "role",
     [
-        RoleSpec("peer", ("submit",), "", count=2),
-        RoleSpec("peer", ("submit",), "", count=None),
         RoleSpec("peer", ("submit",), "", context=ContextSpec("compaction")),
         RoleSpec("peer", ("submit", "end_session"), ""),
     ],
@@ -843,8 +846,7 @@ def test_validate_does_not_warn_when_multiple_units_are_possible(role: RoleSpec)
 def test_validate_per_learner_warning_counts_roles_not_instances() -> None:
     warnings = validate_credit(CreditConfig(norm="per_learner"), context(), group_size=2)
     assert len(warnings) == 1
-    assert "single role: per_learner == mean_std-like" in warnings[0]
-    assert "did you mean" in warnings[0]
+    assert "single role: per_learner scales by RMS" in warnings[0]
     ctx = context(RoleSpec("peer", ("submit",), ""), RoleSpec("worker", (), "", count=None))
     assert validate_credit(CreditConfig(norm="per_learner"), ctx, group_size=2) == []
 
@@ -887,3 +889,178 @@ def test_output_order_is_group_episode_seat_segment_and_inputs_are_unchanged() -
         for idx in (2, 10)
         for agent, segment in (("z", "z/g0"), ("z", "z/g1"), ("a", "a/g0"))
     ]
+
+
+@pytest.mark.parametrize("unit", ["episode", "instance"])
+@pytest.mark.parametrize("target,scale", [("individual", 1.0), ("mix:0.5", 0.5)])
+def test_mean_std_includes_spread_with_tied_episode_means(
+    unit: str, target: str, scale: float
+) -> None:
+    episodes = [
+        episode(i, 1, [Seat(f"p{j}", own=r) for j, r in enumerate(rewards)])
+        for i, rewards in enumerate(([1, 0, 0], [0, 1, 0]))
+    ]
+    cfg = CreditConfig(default_target=target, norm="mean_std", baseline_unit=unit)
+    credits, _, _ = assign_credit(episodes, cfg, context())
+    denominator = scale * sqrt(2 / 9) + cfg.std_eps
+    assert advantages(credits) == pytest.approx(
+        [scale * r / denominator for r in (2 / 3, -1 / 3, -1 / 3, -1 / 3, 2 / 3, -1 / 3)]
+    )
+
+
+@pytest.mark.parametrize("unit", ["episode", "instance"])
+def test_mean_std_swarm_individual_golden(unit: str) -> None:
+    episodes = [
+        episode(i, 1 - i, [Seat(f"p{j}", own=r) for j, r in enumerate(rewards)])
+        for i, rewards in enumerate(([1, 0, 1], [0, 0, 1]))
+    ]
+    cfg = CreditConfig(default_target="individual", norm="mean_std", baseline_unit=unit)
+    credits, _, _ = assign_credit(episodes, cfg, context())
+    assert advantages(credits) == pytest.approx(
+        [r / (0.5 + cfg.std_eps) for r in (2 / 3, -1 / 3, 2 / 3, -2 / 3, -2 / 3, 1 / 3)]
+    )
+
+
+def test_mean_std_episode_baseline_preserves_aux_spread() -> None:
+    episodes = [
+        episode(0, 1, [Seat("p0"), Seat("p1", submission=None)]),
+        episode(1, 1, [Seat("p0", submission=None), Seat("p1")]),
+    ]
+    cfg = CreditConfig(
+        baseline="episode", norm="mean_std", aux_rewards=[AuxReward("submitted", weight=0.1)]
+    )
+    credits, _, _ = assign_credit(episodes, cfg, context())
+    assert advantages(credits) == pytest.approx(
+        [a / (0.05 + cfg.std_eps) for a in (0.05, -0.05, -0.05, 0.05)]
+    )
+
+
+@pytest.mark.parametrize("unit", ["episode", "instance"])
+def test_mean_std_weights_instance_spread_by_episode(unit: str) -> None:
+    episodes = [
+        episode(i, 0, [Seat(f"p{j}", own=r) for j, r in enumerate(rewards)])
+        for i, rewards in enumerate(([1, 0], [0, 1, 0, 1], [0.5]))
+    ]
+    # Episode means are all 0.5, so within-episode spread alone sets the scale.
+    cfg = CreditConfig(default_target="individual", norm="mean_std", baseline_unit=unit)
+    credits, _, _ = assign_credit(episodes, cfg, context())
+    expected_std = sqrt(1 / 6) if unit == "episode" else sqrt(3 / 14)
+    assert advantages(credits) == pytest.approx(
+        [r / (expected_std + cfg.std_eps) for r in (0.5, -0.5, -0.5, 0.5, -0.5, 0.5, 0)]
+    )
+
+
+def test_per_learner_single_emitter_uses_rms() -> None:
+    cfg = CreditConfig(norm="per_learner", overlong="mask_no_answer")
+    credits, stats, _ = assign_credit(
+        [episode(0, 1), episode(1, 0, final_answer=None)], cfg, context()
+    )
+    assert advantages(credits) == pytest.approx([1 / (1 + cfg.std_eps)])
+    assert stats.norm_skipped == 0
+
+
+def test_per_learner_identical_rae_advantages_use_rms_and_keep_ema() -> None:
+    episodes = [episode(i, 1, [Seat("p0"), Seat("p1")], group=f"g{i // 2}") for i in range(4)]
+    cfg = CreditConfig(baseline="rae", norm="per_learner", rae_gamma=0.9)
+    state = {"protocol-hash/peer": 0.4}
+    credits, stats, updated = assign_credit(episodes, cfg, context(), rae_state=state)
+    assert advantages(credits) == pytest.approx([0.6 / (0.6 + cfg.std_eps)] * 8)
+    assert stats.norm_skipped == 0
+    assert updated == pytest.approx({"protocol-hash/peer": 0.46})
+    assert state == {"protocol-hash/peer": 0.4}
+
+
+def test_per_learner_zero_rms_skips_once_per_learner_and_serializes() -> None:
+    cfg = CreditConfig(norm="per_learner", drop_zero_variance=False)
+    credits, stats, _ = assign_credit([episode(0, 1), episode(1, 1)], cfg, context())
+    assert advantages(credits) == [0, 0]
+    assert asdict(stats)["norm_skipped"] == 1
+
+
+@pytest.mark.parametrize("norm", ["mean_std", "per_learner"])
+def test_randomized_normalization_does_not_blow_up(norm: str) -> None:
+    rng = Random(20260923)
+    for _ in range(100):
+        baseline = rng.choice(["role", "episode"])
+        target = "team" if baseline == "episode" else rng.choice(["team", "individual", "mix:0.3"])
+        episodes = [
+            episode(
+                i,
+                rng.choice([0.0, 0.5, 1.0]),
+                [
+                    Seat(
+                        f"p{j}",
+                        own=rng.choice([0.0, 0.5, 1.0]),
+                        submission=rng.choice([None, "answer"]),
+                    )
+                    for j in range(rng.randint(1, 4))
+                ],
+            )
+            for i in range(rng.randint(2, 4))
+        ]
+        # Fix the reward scale: a reward-relative bound is not scale invariant.
+        first = episodes[0]
+        episodes[0] = replace(
+            first,
+            grades={
+                **first.grades,
+                "_system": {"correct": 1.0},
+                first.agents[0].agent_id: {"correct": 1.0},
+            },
+        )
+        cfg = CreditConfig(
+            baseline=baseline,
+            norm=norm,
+            default_target=target,
+            baseline_unit=rng.choice(["episode", "instance"]),
+            aux_rewards=[AuxReward("submitted", weight=0.1)],
+        )
+        credits, _, _ = assign_credit(episodes, cfg, context())
+        bound = 10 * max((abs(c.reward) for c in credits), default=0) + 1
+        assert all(abs(c.advantage) <= bound for c in credits)
+
+
+@pytest.mark.parametrize("scope", ["episode", "agent"])
+async def test_budget_ended_multi_session_carry_is_not_masked(scope: str) -> None:
+    from test_protocols_multi_session import session_spec
+
+    from marli.interact.run import run_episode
+
+    spec = session_spec("compaction", budget_end=True)
+    ep, _ = await run_episode(spec)
+    assert ep.ok and ep.outcome.final_answer == "5"
+    assert any(c.forced and c.purpose == Purpose.CARRY for c in ep.calls)
+    assert not any(c.forced and c.purpose in (Purpose.FINAL, Purpose.REPORT) for c in ep.calls)
+    ctx = context(*spec.protocol.roles())
+    cfg = CreditConfig(baseline="none", min_group=1, overlong="mask_forced", overlong_scope=scope)
+    credits, stats, _ = assign_credit([ep], cfg, ctx)
+    assert {c.segment_id for c in credits} == {s.segment_id for s in ep.segments}
+    assert advantages(credits) == [1, 1]
+    assert stats.masked_overlong == 0
+
+
+def test_validate_rejects_unknown_target_role_and_impossible_min_group() -> None:
+    with pytest.raises(ConfigError, match="reward_target.*typo.*not a protocol role"):
+        validate_credit(CreditConfig(reward_target={"typo": "individual"}), context(), group_size=2)
+    with pytest.raises(ConfigError, match="min_group.*group_size"):
+        validate_credit(CreditConfig(min_group=4), context(), group_size=2)
+
+
+@pytest.mark.parametrize("source", ["_system", "a"])
+def test_missing_reward_key_is_config_error(source: str) -> None:
+    ep = episode(0, 1, [Seat(own=1)])
+    ep = replace(ep, grades={**ep.grades, source: {"partial": 0.2}})
+    with pytest.raises(ConfigError, match="g/e0.*missing reward_key.*correct"):
+        assign_credit([ep], CreditConfig(baseline="none", min_group=1), context())
+
+
+@pytest.mark.parametrize("count", [1, 3, None])
+@pytest.mark.parametrize("kind", ["none", "notes", "tail"])
+def test_unit_warning_is_per_recipient_agent(count: int | None, kind: str) -> None:
+    ctx = context(
+        RoleSpec("peer", ("submit",), "", count=count, context=ContextSpec(kind)),
+        RoleSpec("frozen", ("end_session",), "", context=ContextSpec("compaction")),
+        seating={"peer": "learner:shared", "frozen": "api:fake"},
+    )
+    warnings = validate_credit(CreditConfig(segment_credit="last"), ctx, group_size=2)
+    assert len(warnings) == 1 and "U == 1" in warnings[0]

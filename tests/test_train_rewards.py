@@ -84,7 +84,13 @@ def episode(calls: tuple[Call, ...] = ()) -> Episode:
 
 
 def test_builtin_registry_names() -> None:
-    assert AUX_REWARDS.names() == ["cross_reads", "format", "submitted", "workers_spawned"]
+    assert AUX_REWARDS.names() == [
+        "cross_reads",
+        "cross_reads_all",
+        "format",
+        "submitted",
+        "workers_spawned",
+    ]
 
 
 def test_format_is_fraction_of_act_calls_not_fraction_of_tools() -> None:
@@ -140,7 +146,10 @@ def test_submitted_uses_own_submission_not_team_answer_or_grade(
     )
 
 
-def test_cross_reads_counts_each_other_writer_record_across_calls_and_delivery_modes() -> None:
+@pytest.mark.parametrize(
+    "name,counts", [("cross_reads", (2.0, 0.0)), ("cross_reads_all", (4.0, 1.0))]
+)
+def test_cross_reads_respects_delivery_mode(name: str, counts: tuple[float, float]) -> None:
     reads = tuple(
         WorkspaceRead(writer, "scratchpad", 1, via) for writer in ("a", "b") for via in ReadVia
     )
@@ -149,10 +158,10 @@ def test_cross_reads_counts_each_other_writer_record_across_calls_and_delivery_m
         call(reads=(WorkspaceRead("b", "notes", 1, ReadVia.PULL),), purpose=Purpose.COMPACT),
         call("b", reads=(WorkspaceRead("c", "scratchpad", 0, ReadVia.NOTIFY),)),
     )
-    assert AUX_REWARDS.get("cross_reads")(episode(calls), "a") == 4.0
-    assert AUX_REWARDS.get("cross_reads")(episode(calls), "b") == 1.0
-    assert AUX_REWARDS.get("cross_reads")(episode(calls), "missing") == 0.0
-    assert AUX_REWARDS.get("cross_reads")(episode(), "a") == 0.0
+    assert AUX_REWARDS.get(name)(episode(calls), "a") == counts[0]
+    assert AUX_REWARDS.get(name)(episode(calls), "b") == counts[1]
+    assert AUX_REWARDS.get(name)(episode(calls), "missing") == 0.0
+    assert AUX_REWARDS.get(name)(episode(), "a") == 0.0
 
 
 def test_workers_spawned_counts_direct_children_including_without_calls() -> None:

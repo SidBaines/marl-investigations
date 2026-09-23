@@ -2,11 +2,19 @@
 
 Only submission is awaited before both operations are queued. Spend is reserved
 before either request, and forward/backward is never retried by this layer.
+
+``init_from`` resumes weights and optimizer by default. The explicit backend
+kwarg ``init_mode="weights"`` warm-starts with a fresh optimizer instead.
+Checkpoint manifests restore their sampler version; raw state paths start at
+version zero. Both modes publish restored weights before serving a policy when
+the record has no same-step sampler. ``load_state`` follows the same rules and
+keeps the current version for raw paths, without incrementing it like a sync.
 """
 
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
@@ -22,17 +30,27 @@ from marli.train.types import LearnerSpec, TrainDatum
 
 
 @contextmanager
-def _sdk_errors(operation: str) -> Iterator[None]:
-    import tinker
-
+def _sdk_errors(
+    operation: str, *, configuration: bool = False, failures: list[BaseException] | None = None
+) -> Iterator[None]:
     try:
-        yield
-    except MarliError:
+        try:
+            import tinker
+        except ImportError as exc:
+            raise ConfigError("Tinker backend requires the [tinker] extra") from exc
+        try:
+            yield
+        except MarliError:
+            raise
+        except (tinker.BadRequestError, tinker.UnprocessableEntityError) as exc:
+            raise ConfigError(f"Tinker {operation}: {exc}") from exc
+        except Exception as exc:
+            error = ConfigError if configuration and isinstance(exc, ValueError) else BackendError
+            raise error(f"Tinker {operation} failed: {exc}") from exc
+    except BaseException as exc:
+        if failures is not None:
+            failures.append(exc)
         raise
-    except (ValueError, tinker.BadRequestError, tinker.UnprocessableEntityError) as exc:
-        raise ConfigError(f"Tinker {operation}: {exc}") from exc
-    except Exception as exc:
-        raise BackendError(f"Tinker {operation} failed: {exc}") from exc
 
 
 class TinkerLearner:
@@ -47,6 +65,7 @@ class TinkerLearner:
         sampling_client: Any,
         spend: SpendGuard | None,
         base_url: str | None,
+        failures: list[BaseException] | None = None,
     ) -> None:
         self.name = name
         self.spec = spec
@@ -57,6 +76,7 @@ class TinkerLearner:
         self.sampling_client = sampling_client
         self.spend = spend
         self.base_url = base_url
+        self._failures = failures if failures is not None else []
         self._sampler_names: set[str] = set()
 
     async def train_step(
@@ -75,9 +95,11 @@ class TinkerLearner:
         n_tokens = sum(len(d.tokens) - 1 for d in datums)
         n_action_tokens = sum(d.n_action_tokens for d in datums)
 
-        import tinker
+        with _sdk_errors(
+            "datum/optimizer configuration", configuration=True, failures=self._failures
+        ):
+            import tinker
 
-        with _sdk_errors("datum/optimizer configuration"):
             data = [
                 tinker.Datum(
                     model_input=tinker.ModelInput.from_ints(list(d.tokens[:-1])),
@@ -105,7 +127,7 @@ class TinkerLearner:
                 self.spend.charge(cost, self.name)
             elif self.spend.remaining() is not None:
                 raise ConfigError(f"model {self.model.name!r} has no Tinker prices")
-        with _sdk_errors("train_step"):
+        with _sdk_errors("train_step", failures=self._failures):
             forward = await self.training_client.forward_backward_async(
                 data, loss_fn=self.spec.loss
             )
@@ -114,32 +136,35 @@ class TinkerLearner:
                 forward.result_async(), optim.result_async()
             )
 
-        diffs: list[float] = []
-        outputs = forward_result.loss_fn_outputs
-        if len(outputs) != len(datums):
-            raise BackendError("Tinker training output datum count mismatch")
-        for datum, output in zip(datums, outputs, strict=True):
-            logprobs = output["logprobs"].tolist()
-            if len(logprobs) != len(datum.logprobs):
-                raise BackendError("Tinker training logprob length mismatch")
-            diffs.extend(
-                sample - train
-                for sample, train, mask in zip(datum.logprobs, logprobs, datum.mask, strict=True)
-                if mask > 0
+            diffs: list[float] = []
+            outputs = forward_result.loss_fn_outputs
+            if len(outputs) != len(datums):
+                raise BackendError("Tinker training output datum count mismatch")
+            for datum, output in zip(datums, outputs, strict=True):
+                logprobs = output["logprobs"].tolist()
+                if len(logprobs) != len(datum.logprobs):
+                    raise BackendError("Tinker training logprob length mismatch")
+                diffs.extend(
+                    sample - train
+                    for sample, train, mask in zip(
+                        datum.logprobs, logprobs, datum.mask, strict=True
+                    )
+                    if mask > 0
+                )
+            if "loss:sum" not in forward_result.metrics:
+                raise BackendError("Tinker forward/backward metrics missing loss:sum")
+            optim_metrics = optim_result.metrics or {}
+            metrics = {**forward_result.metrics, **optim_metrics}
+            return StepResult(
+                learner=self.name,
+                n_datums=len(datums),
+                n_tokens=n_tokens,
+                n_action_tokens=n_action_tokens,
+                loss=forward_result.metrics["loss:sum"],
+                grad_norm=metrics.get("grad_norm"),
+                kl_sample_train=sum(diffs) / len(diffs) if diffs else 0.0,
+                metrics=metrics,
             )
-        if "loss:sum" not in forward_result.metrics:
-            raise BackendError("Tinker forward/backward metrics missing loss:sum")
-        optim_metrics = optim_result.metrics or {}
-        return StepResult(
-            learner=self.name,
-            n_datums=len(datums),
-            n_tokens=n_tokens,
-            n_action_tokens=n_action_tokens,
-            loss=forward_result.metrics["loss:sum"],
-            grad_norm=optim_metrics.get("grad_norm"),
-            kl_sample_train=sum(diffs) / len(diffs) if diffs else 0.0,
-            metrics={**forward_result.metrics, **optim_metrics},
-        )
 
     def policy(self, *, policy_id: str | None = None) -> TinkerPolicy:
         return TinkerPolicy(
@@ -157,7 +182,7 @@ class TinkerLearner:
             raise ValueError(f"sampler name {name!r} already used by learner {self.name!r}")
         # A failed response may still have saved the remote name; never overwrite it.
         self._sampler_names.add(name)
-        with _sdk_errors("sync_sampler"):
+        with _sdk_errors("sync_sampler", failures=self._failures):
             saved = await self.training_client.save_weights_for_sampler_async(
                 name, ttl_seconds=None
             )
@@ -169,17 +194,58 @@ class TinkerLearner:
         return SamplerSnapshot(self.name, self.version, path, ref)
 
     async def save_state(self, name: str) -> str:
-        with _sdk_errors("save_state"):
+        with _sdk_errors("save_state", failures=self._failures):
             saved = await self.training_client.save_state_async(name, ttl_seconds=None)
             return (await saved.result_async()).path
 
     async def load_state(self, path: str, *, with_optimizer: bool = True) -> None:
-        with _sdk_errors("load_state"):
+        sampler = None
+        version = self.version
+        if not path.startswith("tinker://"):
+            checkpoint = Checkpoint.load(path)
+            path = checkpoint.require_state(self.name)
+            record = checkpoint.learners[self.name]
+            if record["backend"] != "tinker":
+                raise ConfigError("Tinker init_from requires backend=tinker")
+            if record["base_model"] not in {self.model.name, self.model.tinker_id}:
+                raise ConfigError("Tinker checkpoint base_model does not match the model")
+            if record["rank"] != self.spec.rank:
+                raise ConfigError("Tinker checkpoint rank does not match learner.rank")
+            version = record["version"]
+            if record.get("sampler"):
+                ref = parse_ref(checkpoint.policy_ref(self.name))
+                if ref.kind != "tinker" or ref.sampler is None:
+                    raise ConfigError("Tinker init_from requires a Tinker sampler checkpoint")
+                sampler = ref.sampler
+        if not path.startswith("tinker://") or "sampler_weights" in path.split("/"):
+            raise ConfigError("Tinker load_state requires a Tinker state path, not sampler weights")
+        if self.spec.base_model and self.spec.base_model != self.model.name:
+            raise ConfigError("learner.base_model does not match the supplied model")
+        with _sdk_errors("load_state", failures=self._failures):
+            info = await self.service.create_rest_client().get_weights_info_by_tinker_path(path)
+            if info.base_model != self.model.tinker_id:
+                raise ConfigError("Tinker state base_model does not match the model")
+            if not info.is_lora or info.lora_rank != self.spec.rank:
+                raise ConfigError("Tinker state rank does not match learner.rank")
             if with_optimizer:
-                loaded = await self.training_client.load_state_with_optimizer_async(path)
+                client = await self.service.create_training_client_from_state_with_optimizer_async(
+                    path=path
+                )
             else:
-                loaded = await self.training_client.load_state_async(path)
-            await loaded.result_async()
+                client = await self.service.create_training_client_from_state_async(path=path)
+            if sampler is None:
+                name = f"{self.name}-init"
+                suffix = 1
+                while name in self._sampler_names:
+                    name = f"{self.name}-restore-{suffix}"
+                    suffix += 1
+                self._sampler_names.add(name)
+                saved = await client.save_weights_for_sampler_async(name, ttl_seconds=None)
+                sampler = (await saved.result_async()).path
+            sampling_client = await self.service.create_sampling_client_async(model_path=sampler)
+        self.training_client = client
+        self.sampling_client = sampling_client
+        self.version = version
 
     async def close(self) -> None:
         # TrainingClient has no public close; its backend owns the shared session.
@@ -189,10 +255,16 @@ class TinkerLearner:
 class TinkerBackend:
     name = "tinker"
 
-    def __init__(self, spend: SpendGuard | None, base_url: str | None = None) -> None:
+    def __init__(
+        self, spend: SpendGuard | None, base_url: str | None = None, *, init_mode: str = "resume"
+    ) -> None:
+        if init_mode not in {"resume", "weights"}:
+            raise ConfigError("Tinker init_mode must be resume or weights")
         self.spend = spend
         self.base_url = base_url
-        with _sdk_errors("service creation"):
+        self.init_mode = init_mode
+        self._failures: list[BaseException] = []
+        with _sdk_errors("service creation", configuration=True, failures=self._failures):
             self.service = make_service_client(base_url)
         self.learners: dict[str, TinkerLearner] = {}
 
@@ -209,33 +281,14 @@ class TinkerBackend:
             and self.spend.remaining() is not None
         ):
             raise ConfigError(f"model {model.name!r} has no Tinker prices")
-        state = spec.init_from
-        sampler = None
-        if state is not None and not state.startswith("tinker://"):
-            checkpoint = Checkpoint.load(state)
-            state = checkpoint.require_state(name)
-            if checkpoint.learners[name].get("sampler"):
-                ref = parse_ref(checkpoint.policy_ref(name))
-                if ref.kind != "tinker" or ref.sampler is None:
-                    raise ConfigError("Tinker init_from requires a Tinker sampler checkpoint")
-                sampler = ref.sampler
-        with _sdk_errors("learner creation"):
-            if state is None:
+        client = sampling_client = None
+        if spec.init_from is None:
+            with _sdk_errors("learner creation", failures=self._failures):
                 client = await self.service.create_lora_training_client_async(
                     base_model=model.tinker_id, rank=spec.rank, seed=seed
                 )
-            else:
-                client = await self.service.create_training_client_from_state_async(path=state)
-                # SDK 0.30.1's constructor restores weights only, despite its name.
-                restored = await client.load_state_with_optimizer_async(state)
-                await restored.result_async()
-            if sampler is None:
                 sampling_client = await self.service.create_sampling_client_async(
                     base_model=model.tinker_id
-                )
-            else:
-                sampling_client = await self.service.create_sampling_client_async(
-                    model_path=sampler
                 )
         learner = TinkerLearner(
             name,
@@ -246,10 +299,21 @@ class TinkerBackend:
             sampling_client=sampling_client,
             spend=self.spend,
             base_url=self.base_url,
+            failures=self._failures,
         )
+        if spec.init_from is not None:
+            await learner.load_state(spec.init_from, with_optimizer=self.init_mode == "resume")
         self.learners[name] = learner
         return learner
 
     async def close(self) -> None:
+        error = sys.exception() or (self._failures[0] if self._failures else None)
+        status = "success"
+        if error is not None:
+            status = (
+                "interrupted"
+                if isinstance(error, (asyncio.CancelledError, KeyboardInterrupt))
+                else "errored"
+            )
         with _sdk_errors("close"):
-            await self.service.close("success")
+            await self.service.close(status)

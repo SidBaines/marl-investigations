@@ -112,6 +112,35 @@ def credit_for(call: Call, *, learner: str = "shared", advantage: float = 0.75) 
     )
 
 
+@pytest.mark.parametrize("invalid", ["duplicate", "nan", "inf", "-inf", "role"])
+async def test_credit_guards(invalid: str) -> None:
+    ep, buffers = await run_episode(
+        episode_spec(
+            {
+                "solver0": [
+                    Turn(tool_calls=(("write_scratchpad", {"content": "a"}),)),
+                    Turn(tool_calls=(("submit", {"answer": "5"}),)),
+                ]
+            }
+        )
+    )
+    credit = credit_for(ep.calls[0])
+    if invalid == "duplicate":
+        credits = [credit, replace(credit, learner="different")]
+        message = "Duplicate credit"
+    elif invalid == "role":
+        credits = [replace(credit, role="other")]
+        message = "role does not match"
+    else:
+        credits = [replace(credit, advantage=float(invalid))]
+        message = "advantage must be finite"
+    with pytest.raises(ValueError, match=message):
+        build_datums(ep, buffers, credits)
+    # Routing belongs to credit assignment, not the recorded policy_id string.
+    [datum] = build_datums(ep, buffers, [replace(credit, learner="different")])
+    assert datum.learner == "different"
+
+
 def assert_exact_datum(
     datum: TrainDatum,
     episode: Episode,
@@ -323,17 +352,22 @@ async def test_lockstep_agents_train_only_their_own_completions(
         assert not any(datum.mask[start - 1 : stop - 1])
 
 
-def test_filters_other_episodes_and_preserves_credit_order(
-    tool_episode: tuple[Episode, dict[str, list[int]]],
-) -> None:
-    episode, buffers = tool_episode
+async def test_filters_other_episodes_and_preserves_credit_order() -> None:
+    episode, buffers = await run_episode(
+        episode_spec(
+            {
+                name: [Turn(tool_calls=(("submit", {"answer": "5"}),))]
+                for name in ("solver0", "solver1")
+            }
+        )
+    )
     credit = credit_for(episode.calls[0])
     other = replace(credit, episode_id="other", agent_id="missing", segment_id="")
-    second = replace(credit, learner="second", advantage=-2.0)
-    datums = build_datums(episode, buffers, [other, second, credit, credit])
-    assert [datum.learner for datum in datums] == ["second", "shared", "shared"]
-    for datum, expected_credit in zip(datums, [second, credit, credit], strict=True):
-        assert_exact_datum(datum, episode, buffers[credit.segment_id], expected_credit)
+    second = credit_for(episode.calls[1], learner="second", advantage=-2.0)
+    datums = build_datums(episode, buffers, [other, second, credit])
+    assert [datum.learner for datum in datums] == ["second", "shared"]
+    for datum, expected_credit in zip(datums, [second, credit], strict=True):
+        assert_exact_datum(datum, episode, buffers[datum.segment_id], expected_credit)
     assert build_datums(episode, {}, [other]) == []
     assert build_datums(episode, {}, []) == []
 

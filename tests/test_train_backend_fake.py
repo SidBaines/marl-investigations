@@ -178,6 +178,47 @@ async def test_save_load_and_checkpoint_resume(tmp_path: Path, with_optimizer: b
     assert fresh.weights == 2
 
 
+async def test_save_requires_explicit_state_directory() -> None:
+    learner = await FakeBackend().create_learner(
+        "a", LearnerSpec(backend="fake"), model=load_model("qwen3_8b"), seed=0
+    )
+    await learner.train_step([datum()])
+    with pytest.raises(ConfigError, match="explicit state_dir"):
+        await learner.save_state("step-1")
+
+
+async def test_resume_version_comes_from_checkpoint_record(tmp_path: Path) -> None:
+    model = load_model("qwen3_8b")
+    learner = await FakeBackend(FACTORY, state_dir=tmp_path / "states").create_learner(
+        "a", LearnerSpec(backend="fake"), model=model, seed=0
+    )
+    await learner.train_step([datum()])
+    state = await learner.save_state("before-publishing")
+    await learner.sync_sampler("published")
+    checkpoint = Checkpoint(
+        root=tmp_path / "ckpt",
+        step=1,
+        run_config_hash="h",
+        learners={
+            "a": {
+                "state": state,
+                "sampler": None,
+                "version": 1,
+                "base_model": model.name,
+                "backend": "fake",
+                "rank": 32,
+            }
+        },
+    )
+    fresh = await FakeBackend(FACTORY).create_learner(
+        "a", LearnerSpec(backend="fake", init_from=str(checkpoint.save())), model=model, seed=0
+    )
+    assert fresh.weights == 1
+    assert fresh.version == fresh.policy().policy_version == 1
+    await fresh.train_step([datum(version=1)])
+    assert fresh.weights == 2
+
+
 def test_registry_selection_and_lazy_imports() -> None:
     assert isinstance(make_backend("fake", spend=None, policy_factory=FACTORY), FakeBackend)
     with pytest.raises(ConfigError, match="not implemented until M4"):

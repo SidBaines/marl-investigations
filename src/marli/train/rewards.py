@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from marli.interact.types import Episode, Purpose
+from marli.interact.types import Episode, Purpose, ReadVia
 from marli.registry import FnRegistry
 
 AUX_REWARDS: FnRegistry[Callable[[Episode, str], float]] = FnRegistry("aux_rewards")
@@ -27,6 +27,18 @@ def submitted(episode: Episode, agent_id: str) -> float:
 
 @AUX_REWARDS.register("cross_reads")
 def cross_reads(episode: Episode, agent_id: str) -> float:
+    return float(
+        sum(
+            read.writer != agent_id and read.via == ReadVia.PULL
+            for call in episode.calls
+            if call.agent_id == agent_id
+            for read in call.reads
+        )
+    )
+
+
+@AUX_REWARDS.register("cross_reads_all")
+def cross_reads_all(episode: Episode, agent_id: str) -> float:
     return float(
         sum(
             read.writer != agent_id

@@ -5,12 +5,12 @@ all agents' rewards, mark overlong agents, subtract baselines, drop all-zero
 groups, normalize, weight segments, select recipients, and scale the summed loss.
 Masking and recipient selection never remove observations from a baseline.
 
-Group reward standard deviations include the focal episode. Episode baselines
-use episode means of agent rewards (team plus any aux); role baselines use
-episode role means or individual role instances according to baseline_unit.
-Without a baseline, mean_std uses all
-agent rewards in the group. Per-learner normalization counts each emitting
-agent once, before segment weights or loss scaling, including zero advantages.
+Group reward standard deviations include the focal episode and within-episode
+variation. Episode weighting gives each episode equal mass, then each instance
+within it equal mass. Per-learner normalization uses the RMS advantage of each
+emitting agent once, before segment weights or loss scaling, including zeros.
+Zero denominators leave advantages unchanged; norm_skipped counts learners with
+zero RMS. Without a baseline, mean_std uses all agent rewards in the group.
 
 Stats count input episodes, groups surviving min_group (including zero-variance
 drops), and masked agents. Reward means include all agents surviving min_group;
@@ -23,11 +23,12 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from math import sqrt
 from statistics import fmean, pstdev
 
 from marli.errors import ConfigError
 from marli.interact.system import RoleSpec
-from marli.interact.types import SYSTEM_GRADE_KEY, AgentInfo, Episode, SegmentInfo
+from marli.interact.types import SYSTEM_GRADE_KEY, AgentInfo, Episode, Purpose, SegmentInfo
 from marli.train.rewards import AUX_REWARDS
 from marli.train.types import AuxReward, CreditConfig, CreditStats, SegmentCredit, seat_learner
 
@@ -40,12 +41,20 @@ class CreditContext:
     protocol_hash: str = ""
 
 
+@dataclass
+class _CreditStats(CreditStats):
+    norm_skipped: int = 0
+
+
 def validate_credit(
     cfg: CreditConfig, ctx: CreditContext, *, group_size: int, allow_idle: bool = False
 ) -> list[str]:
     """Validate protocol-dependent combinations before sampling spends compute."""
     if cfg.reward_key == "oracle_any":
         raise ConfigError("credit.reward_key=oracle_any is eval-only")
+    for role in cfg.reward_target:
+        if role not in ctx.roles:
+            raise ConfigError(f"reward_target role {role!r} is not a protocol role")
     for role, spec in ctx.roles.items():
         if role not in ctx.seating:
             raise ConfigError(f"role {role!r} is missing from seating")
@@ -77,6 +86,8 @@ def validate_credit(
         raise ConfigError(f"idle learners have no recipient role: {sorted(idle)}; set allow_idle")
     if group_size < 2 and cfg.baseline in {"episode", "role"}:
         raise ConfigError(f"baseline={cfg.baseline} requires group_size >= 2")
+    if cfg.min_group > group_size:
+        raise ConfigError("credit.min_group must not exceed group_size")
     for aux in cfg.aux_rewards:
         AUX_REWARDS.get(aux.name)
         for role in aux.roles:
@@ -84,24 +95,27 @@ def validate_credit(
                 raise ConfigError(f"aux reward {aux.name!r} role {role!r} is not a protocol role")
 
     warnings: list[str] = []
+    recipient_roles = [
+        ctx.roles[role] for role in recipients if seat_learner(ctx.seating[role]) is not None
+    ]
     if (
         cfg.segment_credit != "all"
-        and ctx.roles
+        and recipient_roles
         and all(
-            role.count == 1 and role.context.kind == "none" and "end_session" not in role.tools
-            for role in ctx.roles.values()
+            role.context.kind not in {"compaction", "both"} and "end_session" not in role.tools
+            for role in recipient_roles
         )
     ):
         warnings.append(
-            "segment_credit != all but roles have count=1, context=none and no session tool; "
-            "for a single-session protocol U == 1, so segment credit has no effect"
+            "segment_credit != all but every recipient has no compaction or session tool; "
+            "U == 1 per agent, so segment credit has no effect"
         )
     if cfg.norm == "per_learner":
         for learner, roles in sorted(learner_roles.items()):
             if len(roles) == 1:
                 warnings.append(
-                    f"learner {learner!r} serves a single role: per_learner == mean_std-like; "
-                    "did you mean norm=mean_std?"
+                    f"learner {learner!r} serves a single role: per_learner scales by RMS; "
+                    "use norm=mean_std for reward-standard-deviation scaling"
                 )
     return warnings
 
@@ -165,6 +179,14 @@ def _compute_rewards(
     ]
     rows: list[_AgentCredit] = []
     for episode in episodes:
+        if SYSTEM_GRADE_KEY not in episode.grades:
+            raise ConfigError(f"episode {episode.episode_id!r} is missing the system grade")
+        for source, grade in episode.grades.items():
+            if cfg.reward_key not in grade:
+                raise ConfigError(
+                    f"episode {episode.episode_id!r} grade {source!r} "
+                    f"is missing reward_key {cfg.reward_key!r}"
+                )
         team = episode.grades[SYSTEM_GRADE_KEY][cfg.reward_key]
         for agent in sorted(episode.agents, key=lambda agent: agent.seat_key):
             target, alpha = cfg.target_for(agent.role)
@@ -197,7 +219,9 @@ def _mask_overlong(
                 masked = episode.outcome.final_answer is None
         elif cfg.overlong == "mask_forced":
             masked = any(
-                call.forced and (cfg.overlong_scope == "episode" or call.agent_id == agent.agent_id)
+                call.forced
+                and call.purpose in (Purpose.FINAL, Purpose.REPORT)
+                and (cfg.overlong_scope == "episode" or call.agent_id == agent.agent_id)
                 for call in episode.calls
             )
         stats.masked_overlong += int(masked)
@@ -212,12 +236,13 @@ def _group_baseline(
     for row in rows:
         by_episode[row.episode.episode_id].append(row.reward)
     means = {episode_id: fmean(rewards) for episode_id, rewards in by_episode.items()}
-    population = (
-        list(means.values())
-        if cfg.baseline_unit == "episode" or cfg.baseline == "episode"
-        else [reward for rewards in by_episode.values() for reward in rewards]
-    )
-    reward_std = pstdev(population)
+    if cfg.baseline_unit == "episode":
+        mean = fmean(means.values())
+        reward_std = sqrt(
+            fmean(fmean((r - mean) ** 2 for r in rewards) for rewards in by_episode.values())
+        )
+    else:
+        reward_std = pstdev(reward for rewards in by_episode.values() for reward in rewards)
     baselines: dict[str, float] = {}
     for episode_id in by_episode:
         others = (
@@ -305,7 +330,7 @@ def _recipient_learner(row: _AgentCredit, cfg: CreditConfig, ctx: CreditContext)
 
 
 def _normalize(
-    rows: Sequence[_AgentCredit], cfg: CreditConfig, ctx: CreditContext
+    rows: Sequence[_AgentCredit], cfg: CreditConfig, ctx: CreditContext, stats: _CreditStats
 ) -> list[_AgentCredit]:
     if cfg.norm == "mean":
         return list(rows)
@@ -316,16 +341,24 @@ def _normalize(
             learner = _recipient_learner(row, cfg, ctx)
             if learner is not None and _agent_segments(row.episode, row.agent.agent_id):
                 values[learner].append(row.advantage)
-        deviations = {learner: pstdev(advantages) for learner, advantages in values.items()}
+        deviations = {
+            learner: sqrt(fmean(a * a for a in advantages))
+            for learner, advantages in values.items()
+        }
+        stats.norm_skipped += sum(value == 0.0 for value in deviations.values())
     result: list[_AgentCredit] = []
     for row in rows:
         if cfg.norm == "mean_std":
-            result.append(replace(row, advantage=row.advantage / (row.reward_std + cfg.std_eps)))
+            result.append(
+                replace(row, advantage=row.advantage / (row.reward_std + cfg.std_eps))
+                if row.reward_std > 0.0
+                else row
+            )
         else:
             learner = _recipient_learner(row, cfg, ctx)
             result.append(
                 replace(row, advantage=row.advantage / (deviations[learner] + cfg.std_eps))
-                if learner in deviations
+                if learner in deviations and deviations[learner] > 0.0
                 else row
             )
     return result
@@ -460,7 +493,7 @@ def assign_credit(
     may shrink after failed episodes are discarded. Idle learners are permitted
     here so a caller's explicit allow_idle validation remains effective.
     """
-    stats = CreditStats(n_episodes=len(episodes))
+    stats = _CreditStats(n_episodes=len(episodes))
     kept = _drop_episodes(episodes, cfg, stats)
     rewards = _compute_rewards(kept, cfg, ctx)
     rows = _mask_overlong(rewards, cfg, ctx, stats)
@@ -468,7 +501,7 @@ def assign_credit(
         rows, cfg, ctx, stats, rae_state if rae_state is not None else {}
     )
     rows = _drop_zero_variance(rows, cfg, stats)
-    rows = _normalize(rows, cfg, ctx)
+    rows = _normalize(rows, cfg, ctx, stats)
     segments = _weight_segments(rows, cfg)
     emissions = _select_recipients(segments, cfg, ctx)
     emissions = _aggregate_loss(emissions, cfg)
