@@ -33,6 +33,9 @@ ScriptFn = Callable[[ScriptCtx], Sequence[int]]
 
 
 class ScriptedPolicy:
+    # outputs depend only on the script and ScriptCtx: lockstep episodes replay exactly
+    deterministic: bool = True
+
     def __init__(
         self,
         policy_id: str,
@@ -180,6 +183,7 @@ class ChatCall:
 
 class ScriptedChatPolicy:
     trainable: bool = False
+    deterministic: bool = True
 
     def __init__(
         self, policy_id: str, replies: Callable[[Sequence[Msg], CallMeta], ChatReply]

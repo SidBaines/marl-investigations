@@ -318,12 +318,13 @@ async def test_system_prompt_n_agents_is_role_count() -> None:
 
 @pytest.mark.parametrize("deterministic", [None, False, True])
 async def test_determinism_is_duck_typed_and_only_seated_policies_are_checked(
-    deterministic: bool | None,
+    deterministic: bool | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = single_spec()
     seated = spec.policies["script"]
-    if deterministic is None:
+    if deterministic is None:  # a policy without the attribute is not replayable
         del seated.deterministic
+        monkeypatch.delattr(type(seated), "deterministic")
     else:
         seated.deterministic = deterministic
     unused = ScriptedChatPolicy("unused", lambda messages, meta: None)
