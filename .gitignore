@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Secrets / local env
+.env
+.env.*
+
+# Run outputs: bytes never enter git. Experiments commit their small,
+# deliberate deliverables under experiments/<study>/results/ instead.
+runs/
+**/out/
+wandb/
+*.safetensors
+*.bin
+*.pt
+*.npz
+
+# Caches
+.cache/
+.hf_cache/
+
+# Claude Code local state (skills under .claude/skills/ ARE committed)
+.claude/settings.local.json
+.claude/worktrees/
