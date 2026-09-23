@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from types import ModuleType
 
@@ -10,9 +10,9 @@ import pytest
 
 import marli.policy.refs as refs_module
 from marli.errors import ConfigError
-from marli.policy.base import TokenPolicy
+from marli.policy.base import ChatPolicy, ChatReply, TokenPolicy
 from marli.policy.refs import PolicyRef, parse_ref, resolve_scripted
-from marli.policy.scripted import ScriptedPolicy, Turn, turns_by_agent
+from marli.policy.scripted import ScriptedChatPolicy, ScriptedPolicy, Turn, turns_by_agent
 from marli.render.fake import FakeRenderer
 
 
@@ -100,6 +100,76 @@ def test_ref_forms_round_trip(text: str, expected: PolicyRef, canonical: str | N
     assert parsed == expected
     assert str(parsed) == (text if canonical is None else canonical)
     assert parse_ref(str(parsed)) == parsed
+    assert parse_ref(str(expected)) == expected
+
+
+def test_direct_checkpoint_defaults_to_final() -> None:
+    ref = PolicyRef("ckpt", "checkpoint")
+    assert ref.step == "final"
+    assert str(ref) == "ckpt:checkpoint"
+    assert parse_ref(str(ref)) == ref
+
+
+@pytest.mark.parametrize(
+    ("ref", "allowed"),
+    [
+        (PolicyRef("tinker", "model"), ("base_url", "sampler")),
+        (PolicyRef("ckpt", "checkpoint"), ("step",)),
+        (PolicyRef("vllm", "model", base_url="https://host"), ("base_url", "server_json")),
+        (PolicyRef("api", "model", provider="openai"), ("provider",)),
+        (PolicyRef("scripted", "module:factory"), ()),
+    ],
+)
+def test_direct_refs_reject_forbidden_fields(ref: PolicyRef, allowed: tuple[str, ...]) -> None:
+    for field, value in {
+        "base_url": "https://host",
+        "server_json": "server.json",
+        "provider": "openai",
+        "sampler": "sampler/path",
+        "step": 1,
+    }.items():
+        if field not in allowed:
+            with pytest.raises(ConfigError, match=field):
+                replace(ref, **{field: value})
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"kind": "unknown", "target": "model"},
+        {"kind": None, "target": "model"},
+        {"kind": "tinker", "target": None},
+        {"kind": "tinker", "target": ""},
+        {"kind": "tinker", "target": "model name"},
+        {"kind": "tinker", "target": "model#extra"},
+        {"kind": "tinker", "target": "model", "base_url": "host"},
+        {"kind": "tinker", "target": "model", "base_url": "https://host/a|b"},
+        {"kind": "tinker", "target": "model", "sampler": ""},
+        {"kind": "tinker", "target": "model", "sampler": "sampler#extra"},
+        {"kind": "tinker", "target": "model", "sampler": "sampler "},
+        {"kind": "ckpt", "target": " "},
+        {"kind": "ckpt", "target": "checkpoint#extra"},
+        {"kind": "ckpt", "target": "checkpoint "},
+        {"kind": "vllm", "target": "model"},
+        {"kind": "vllm", "target": "model", "base_url": "https://host", "server_json": "s.json"},
+        {"kind": "vllm", "target": "model", "server_json": ""},
+        {"kind": "vllm", "target": "model", "server_json": "server#extra.json"},
+        {"kind": "api", "target": "model"},
+        {"kind": "api", "target": "model", "provider": "unknown"},
+        {"kind": "api", "target": "/model", "provider": "openai"},
+        {"kind": "api", "target": "model/", "provider": "openai"},
+        {"kind": "scripted", "target": "module"},
+    ],
+)
+def test_invalid_direct_refs_raise_config_error(fields: dict[str, object]) -> None:
+    with pytest.raises(ConfigError):
+        PolicyRef(**fields)
+
+
+@pytest.mark.parametrize("step", [-1, 1.0, True, False, "12", "0012", "latest"])
+def test_direct_checkpoint_requires_canonical_step(step: object) -> None:
+    with pytest.raises(ConfigError, match="step"):
+        PolicyRef("ckpt", "checkpoint", step=step)
 
 
 def test_ref_is_frozen() -> None:
@@ -127,6 +197,40 @@ def test_paths_are_resolved_only_on_request(
     for text in ["tinker:org/model", "vllm:https://host#model", "api:openai/model"]:
         assert parse_ref(text, resolve_paths=True) == parse_ref(text)
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("kind", ["ckpt", "vllm"])
+def test_path_resolution_preserves_symlinks_and_absolute_spelling(
+    kind: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "real").mkdir()
+    (tmp_path / "linked").symlink_to(tmp_path / "real", target_is_directory=True)
+    for path, expected in (
+        ("linked/file", str(tmp_path / "linked/file")),
+        (f"{tmp_path}/linked/../file", f"{tmp_path}/linked/../file"),
+        (f"{tmp_path}/linked/file", f"{tmp_path}/linked/file"),
+    ):
+        text = f"ckpt:{path}" if kind == "ckpt" else f"vllm:@{path}#model"
+        ref = parse_ref(text, resolve_paths=True)
+        assert (ref.target if kind == "ckpt" else ref.server_json) == expected
+
+
+@pytest.mark.parametrize("value", [None, True, 7, b"ckpt:dir", Path("dir"), []])
+def test_non_string_ref_is_config_error(value: object) -> None:
+    with pytest.raises(ConfigError, match="reference must be a string"):
+        parse_ref(value)
+
+
+@pytest.mark.parametrize("kind", ["tinker", "vllm"])
+@pytest.mark.parametrize("userinfo", ["user:pass", "user", ":pass", ""])
+def test_urls_with_credentials_are_rejected(kind: str, userinfo: str) -> None:
+    url = f"https://{userinfo}@host:8000/api"
+    text = f"tinker@{url}|model" if kind == "tinker" else f"vllm:{url}#model"
+    with pytest.raises(ConfigError, match="credentials"):
+        parse_ref(text)
+    with pytest.raises(ConfigError, match="credentials"):
+        PolicyRef(kind, "model", base_url=url)
 
 
 @pytest.mark.parametrize(
@@ -164,6 +268,8 @@ def test_paths_are_resolved_only_on_request(
         ("api:openai", "model"),
         ("api:openai/", "model"),
         ("api:openai//", "model"),
+        ("api:openai//model", "leading or trailing"),
+        ("api:openrouter/org/model/", "leading or trailing"),
         ("api:openai/model#step=12", "suffix"),
         ("scripted:", "factory"),
         ("scripted:module", "factory"),
@@ -228,3 +334,26 @@ def test_scripted_resolution_failures_are_config_errors(
 def test_resolve_scripted_rejects_other_kinds() -> None:
     with pytest.raises(ConfigError, match="scripted.*tinker"):
         resolve_scripted(parse_ref("tinker:org/model"))
+
+
+def test_scripted_factory_accepts_chat_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    def reply(*args: object) -> ChatReply:
+        pytest.fail("resolution must not make a chat call")
+
+    policy = ScriptedChatPolicy("chat-factory", reply)
+    module = ModuleType("chat_factory")
+    module.factory = lambda: policy
+    monkeypatch.setattr(refs_module.importlib, "import_module", lambda name: module)
+    assert resolve_scripted(PolicyRef("scripted", "chat_factory:factory")) is policy
+    assert isinstance(policy, ChatPolicy)
+
+
+@pytest.mark.parametrize("result", [None, 42, "policy", object(), {"policy_id": "fake"}])
+def test_scripted_factory_rejects_non_policies(
+    result: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = ModuleType("invalid_factory")
+    module.factory = lambda: result
+    monkeypatch.setattr(refs_module.importlib, "import_module", lambda name: module)
+    with pytest.raises(ConfigError, match="TokenPolicy or ChatPolicy"):
+        resolve_scripted(PolicyRef("scripted", "invalid_factory:factory"))

@@ -54,7 +54,10 @@ class CarryText:
 class ContextManager(Protocol):
     """Pure reset policy; the runtime owns calls, buffers, and segment lineage."""
 
-    spec: ContextSpec
+    @property
+    def spec(self) -> ContextSpec:
+        """Read-only context policy configuration."""
+        ...
 
     def should_compact(self, prompt_len: int) -> bool:
         """Whether the next prompt exceeds an enabled compaction threshold."""
@@ -71,7 +74,7 @@ class ContextManager(Protocol):
     def carry_text(self, *, summary: str | None, notes: str | None) -> CarryText:
         """Format enabled carry sources after the task in the first user message.
 
-        Empty sources are omitted. Caps count retained source characters;
+        Empty or whitespace-only sources are omitted. Caps count retained source characters;
         labels and the leading ``…[truncated]`` marker are additional text.
         Truncation keeps the tail of each source.
         """
@@ -105,22 +108,32 @@ class _ContextManager:
         if self.spec.kind not in ("compaction", "both"):
             return ""
         return (
-            "Write a self-contained summary of your progress so far: what you have tried, "
-            "intermediate results, your current best answer, and next steps. "
-            "This summary will replace your context. "
-            f"Keep it within about {self.limits.session.carry_max_tokens} tokens. "
-            "Do not call tools in this turn."
-        )
+            "Your context is almost full. It will now be cleared and replaced by the "
+            "summary you write in this reply; afterwards you will see only the original "
+            "task and this summary. "
+        ) + self._summary_instruction()
 
     def session_carry_instruction(self) -> str | None:
         if self.spec.kind not in ("compaction", "both"):
             return None
+        opening = (
+            "Your session is ending. Your next session will start with a fresh context "
+            "and will see only the original task and the summary you write in this reply"
+        )
+        if self.spec.kind == "both":
+            opening += " plus your saved notes; don't repeat them"
+        return opening + ". " + self._summary_instruction()
+
+    def _summary_instruction(self) -> str:
+        tokens = self.limits.session.carry_max_tokens
         return (
-            "Your session is ending. Write a self-contained summary that your next session "
-            "will start from: what you have tried, intermediate results, your current best "
-            "answer, and next steps. "
-            f"Keep it within about {self.limits.session.carry_max_tokens} tokens. "
-            "Do not call tools in this turn."
+            "Write the summary itself as your reply. Include what you have tried and "
+            "what worked or failed (and why), intermediate results with exact values, "
+            "your current best answer or the current state of your solution, and your "
+            "next steps. Do not restate the task. "
+            f"Keep it within about {tokens} tokens (roughly {tokens * 3 // 4} words); "
+            "anything longer is cut. Do not call any tools and do not continue working "
+            "on the task in this reply."
         )
 
     def carry_text(self, *, summary: str | None, notes: str | None) -> CarryText:
@@ -134,7 +147,7 @@ class _ContextManager:
             ),
             ("Your notes", notes if self.has_notes_tools else None, self.spec.notes_cap_chars),
         ):
-            if not content:
+            if not content or not content.strip():
                 continue
             if len(content) > cap:
                 content = "…[truncated]" + content[len(content) - cap :]
@@ -154,23 +167,49 @@ class _ContextManager:
 
 def make_context_manager(spec: ContextSpec, limits: Limits) -> ContextManager:
     """Validate context settings against limits before the runtime spends compute."""
-    if spec.kind not in ("none", "compaction", "notes", "both", "tail"):
-        raise ConfigError(f"context.kind: unknown kind {spec.kind!r}")
+    kinds = ("none", "compaction", "notes", "both", "tail")
+    if spec.kind not in kinds:
+        raise ConfigError(f"context.kind must be one of {kinds}, got {spec.kind!r}")
     if spec.notes_cap_chars <= 0:
-        raise ConfigError("context.notes_cap_chars must be > 0")
+        raise ConfigError(f"context.notes_cap_chars must be > 0, got {spec.notes_cap_chars!r}")
+    if spec.compact_threshold < 0:
+        raise ConfigError(f"context.compact_threshold must be >= 0, got {spec.compact_threshold!r}")
     if spec.kind in ("compaction", "both"):
-        if (
-            spec.compact_threshold > 0
-            and spec.compact_threshold > limits.ctx.max_ctx - spec.compact_reserve
-        ):
-            raise ConfigError(
-                "context.compact_threshold must be <= ctx.max_ctx - context.compact_reserve"
-            )
+        if spec.compact_threshold > 0:
+            if spec.compact_reserve <= 0:
+                raise ConfigError(
+                    "context.compact_reserve must be > 0 to cover the summary, "
+                    f"got {spec.compact_reserve!r}"
+                )
+            if spec.compact_reserve < limits.session.carry_max_tokens:
+                raise ConfigError(
+                    "context.compact_reserve must cover the summary "
+                    f"(>= session.carry_max_tokens={limits.session.carry_max_tokens!r}), "
+                    f"got {spec.compact_reserve!r}"
+                )
+            if spec.compact_threshold > limits.ctx.max_ctx - spec.compact_reserve:
+                raise ConfigError(
+                    "context.compact_threshold must be <= ctx.max_ctx - context.compact_reserve "
+                    f"({limits.ctx.max_ctx!r} - {spec.compact_reserve!r}), "
+                    f"got {spec.compact_threshold!r}"
+                )
         if limits.session.carry_reserve <= 0:
-            raise ConfigError("session.carry_reserve must be > 0 for compaction/both")
+            raise ConfigError(
+                "session.carry_reserve must be > 0 to cover the summary for compaction/both, "
+                f"got {limits.session.carry_reserve!r}"
+            )
+        if limits.session.carry_reserve < limits.session.carry_max_tokens:
+            raise ConfigError(
+                "session.carry_reserve must cover the summary "
+                f"(>= session.carry_max_tokens={limits.session.carry_max_tokens!r}), "
+                f"got {limits.session.carry_reserve!r}"
+            )
     if spec.kind == "tail":
         if spec.tail_tokens <= 0:
-            raise ConfigError("context.tail_tokens must be > 0")
+            raise ConfigError(f"context.tail_tokens must be > 0, got {spec.tail_tokens!r}")
         if spec.tail_tokens >= limits.ctx.max_ctx // 2:
-            raise ConfigError("context.tail_tokens must be < ctx.max_ctx // 2")
+            raise ConfigError(
+                f"context.tail_tokens must be < ctx.max_ctx // 2 ({limits.ctx.max_ctx // 2}), "
+                f"got {spec.tail_tokens!r}"
+            )
     return _ContextManager(spec=spec, limits=limits)

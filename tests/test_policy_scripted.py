@@ -168,6 +168,22 @@ async def test_fixed_latency_uses_clock(latency: float) -> None:
     assert clock.now() == latency
 
 
+def test_negative_fixed_latency_is_rejected() -> None:
+    with pytest.raises(ValueError, match="latency_s.*-0.25"):
+        ScriptedPolicy("script", FakeRenderer(), lambda ctx: [], latency_s=-0.25)
+
+
+async def test_negative_callable_latency_is_rejected_before_sleeping() -> None:
+    clock = FakeClock()
+    policy = ScriptedPolicy(
+        "script", FakeRenderer(), lambda ctx: [], clock=clock, latency_s=lambda ctx: -0.25
+    )
+    with pytest.raises(ValueError, match="latency_s.*-0.25"):
+        await policy.sample([], SamplingSpec(1), seed=1)
+    assert clock.sleeps == []
+    assert clock.now() == 0.0
+
+
 async def test_callable_latency_receives_recorded_context() -> None:
     clock = FakeClock()
     seen: list[ScriptCtx] = []
@@ -240,7 +256,9 @@ def test_turn_lookup_uses_metadata_and_has_no_shared_cursor(by_agent: bool) -> N
 
 
 @pytest.mark.parametrize("by_agent", [True, False])
-@pytest.mark.parametrize(("key", "index"), [("peer0", 1), ("missing", 0), ("peer0", -1)])
+@pytest.mark.parametrize(
+    ("key", "index"), [("peer0", 1), ("missing", 0), ("peer0", -1), ("peer0", 4)]
+)
 def test_turn_lookup_exhaustion_and_default(by_agent: bool, key: str, index: int) -> None:
     renderer = FakeRenderer()
     helper = turns_by_agent if by_agent else by_role
@@ -250,8 +268,11 @@ def test_turn_lookup_exhaustion_and_default(by_agent: bool, key: str, index: int
     )
     with pytest.raises(IndexError) as caught:
         helper(renderer, turns)(ctx)
-    assert repr(key) in str(caught.value)
-    assert f"index {index}" in str(caught.value)
+    kind = "agent" if by_agent else "role"
+    count = len(turns.get(key, ()))
+    assert str(caught.value) == (
+        f"no scripted turn for {kind} {key!r} at call index {index} ({count} scripted)"
+    )
     assert tuple(helper(renderer, turns, default=Turn())(ctx)) == tuple(
         renderer.encode_completion()
     )

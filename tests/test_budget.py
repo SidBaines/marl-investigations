@@ -40,10 +40,10 @@ def test_check_exceeding_limit_does_not_record_spend() -> None:
     with pytest.raises(BudgetExceededError) as caught:
         guard.check(0.5, "next sample")
     assert caught.value.exit_code == 4
-    message = str(caught.value)
-    assert "limit $1" in message
-    assert "spent so far $0.75" in message
-    assert "next sample" in message
+    assert str(caught.value) == (
+        "budget limit $1.0000 exceeded for 'next sample': "
+        "spent so far $0.7500, additional spend $0.5000"
+    )
     assert guard.summary() == before
     assert guard.remaining() == 0.25
 
@@ -54,10 +54,9 @@ def test_charge_exceeding_limit_keeps_incurred_spend() -> None:
     with pytest.raises(BudgetExceededError) as caught:
         guard.charge(0.5, "sample")
     assert caught.value.exit_code == 4
-    message = str(caught.value)
-    assert "limit $1" in message
-    assert "spent so far $1.25" in message
-    assert "sample" in message
+    assert str(caught.value) == (
+        "budget limit $1.0000 exceeded by 'sample' (charged $0.5000): spent so far $1.2500"
+    )
     assert guard.spent == 1.25
     assert guard.remaining() == -0.25
     assert guard.summary() == {"max_usd": 1.0, "spent_usd": 1.25, "by_item": {"sample": 1.25}}

@@ -24,31 +24,51 @@ class TinkerPrices:
     def __post_init__(self) -> None:
         for field in ("prefill", "sample", "train"):
             value = getattr(self, field)
-            if not isinstance(value, (int, float)) or not isfinite(value) or value < 0:
-                raise ValueError(f"{field} price must be finite and non-negative")
-        if (
-            not isinstance(self.as_of, str)
-            or date.fromisoformat(self.as_of).isoformat() != self.as_of
-        ):
-            raise ValueError("as_of must be an ISO date (YYYY-MM-DD)")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"{field} price must be finite and non-negative, got {value!r}")
+        date_error = (
+            "as_of must be a quoted ISO date string 'YYYY-MM-DD', "
+            f"got {self.as_of!r}"
+        )
+        if not isinstance(self.as_of, str):
+            raise ValueError(date_error)
+        try:
+            canonical_date = date.fromisoformat(self.as_of).isoformat()
+        except ValueError as exc:
+            raise ValueError(date_error) from exc
+        if canonical_date != self.as_of:
+            raise ValueError(date_error)
 
 
 @dataclass(frozen=True)
 class ModelSpec:
-    name: str
-    hf_id: str
-    family: str
-    renderer: str
-    architecture: str
-    max_ctx: int
-    default_max_tokens: int
-    thinking: bool
-    tool_format: str
-    tinker_id: str | None = None
-    tinker_max_ctx: int | None = None
-    tinker_prices: TinkerPrices | None = None
+    """Reproducible model identity, rendering, backend capabilities and defaults.
+
+    ``max_ctx`` caps prompt plus completion and must fit the model and selected
+    backend's limits. Tinker limits are checked here; local limits also depend
+    on the server configuration. Tinker fields are all set or all None.
+    """
+
+    name: str  # registry key, identical to the YAML filename stem
+    hf_id: str  # Hugging Face model identifier for weights and tokenizer
+    family: str  # model family: qwen3 | qwen3_5 | gpt_oss
+    renderer: str  # token renderer: qwen3 | qwen3_5 | gpt_oss
+    architecture: str  # Hugging Face architecture class name
+    max_ctx: int  # default prompt+completion cap; <= model and backend limits
+    default_max_tokens: int  # default completion token cap per call
+    thinking: bool  # whether the model uses a reasoning channel
+    tool_format: str  # native tool syntax: qwen3_json | qwen3_5_xml | harmony
+    tinker_id: str | None = None  # Tinker base model identifier; None = not on Tinker
+    tinker_max_ctx: int | None = None  # Tinker's prompt+completion token limit
+    tinker_prices: TinkerPrices | None = None  # dated USD per million Tinker tokens
+    # Local learner support: yes = supported, no = unsupported, unverified = untested.
     local: str = "unverified"
-    notes: str = ""
+    notes: str = ""  # capability caveats and provenance for this catalog entry
 
     def __post_init__(self) -> None:
         for field, choices in (
@@ -57,32 +77,43 @@ class ModelSpec:
             ("tool_format", ("qwen3_json", "qwen3_5_xml", "harmony")),
             ("local", ("yes", "no", "unverified")),
         ):
-            if getattr(self, field) not in choices:
-                raise ValueError(f"{field} must be one of {choices}")
+            value = getattr(self, field)
+            if value not in choices:
+                raise ValueError(f"{field} must be one of {choices}, got {value!r}")
         for field in ("max_ctx", "default_max_tokens", "tinker_max_ctx"):
             value = getattr(self, field)
             if field == "tinker_max_ctx" and value is None:
                 continue
             if type(value) is not int or value <= 0:
-                raise ValueError(f"{field} must be a positive integer")
+                raise ValueError(f"{field} must be a positive integer, got {value!r}")
         if not isinstance(self.thinking, bool):
-            raise ValueError("thinking must be a boolean")
+            raise ValueError(f"thinking must be a boolean, got {self.thinking!r}")
 
         tinker_fields = (self.tinker_id, self.tinker_max_ctx, self.tinker_prices)
         if any(value is not None for value in tinker_fields) and any(
             value is None for value in tinker_fields
         ):
             raise ValueError(
-                "tinker_id, tinker_max_ctx, and tinker_prices must be all set or all None"
+                "tinker_id, tinker_max_ctx, and tinker_prices must be all set or all None, "
+                f"got {tinker_fields!r}"
+            )
+        if self.tinker_max_ctx is not None and self.max_ctx > self.tinker_max_ctx:
+            raise ValueError(
+                f"max_ctx must be <= tinker_max_ctx ({self.tinker_max_ctx!r}), "
+                f"got {self.max_ctx!r}"
             )
         if isinstance(self.tinker_prices, Mapping):
             try:
                 prices = TinkerPrices(**self.tinker_prices)
             except TypeError as exc:
-                raise ValueError(f"invalid tinker_prices: {exc}") from exc
+                raise ValueError(
+                    f"invalid tinker_prices: {exc}; got {self.tinker_prices!r}"
+                ) from exc
             object.__setattr__(self, "tinker_prices", prices)
         elif self.tinker_prices is not None and not isinstance(self.tinker_prices, TinkerPrices):
-            raise ValueError("tinker_prices must be a mapping or TinkerPrices")
+            raise ValueError(
+                f"tinker_prices must be a mapping or TinkerPrices, got {self.tinker_prices!r}"
+            )
 
 
 MODELS: Registry[ModelSpec] = Registry("models", Path(__file__).parent / "models", ModelSpec)

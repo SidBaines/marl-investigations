@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, asdict, replace
+from datetime import date
 from itertools import product
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from marli.model import (
     load_model,
     tinker_models,
 )
-from marli.registry import Registry
+from marli.registry import Registry, catalog_kinds, catalog_names
 
 
 @pytest.mark.parametrize(
@@ -152,10 +153,14 @@ def test_published_model_entries(
     assert model.tinker_id == (hf_id if prices is not None else None)
     assert model.tinker_prices == (TinkerPrices(*prices, "2026-09-23") if prices else None)
     assert for_hf_id(hf_id) == model
-    if family == "qwen3_5":
+    if family == "qwen3_5" and local == "unverified":
         assert model.notes == (
             "Qwen3.5 is a vision-language architecture; "
             "local LoRA support to be verified (M2 spike)"
+        )
+    if family == "qwen3_5" and local == "no":
+        assert model.notes == (
+            "Qwen3.5 vision-language MoE architecture; not supported by the local learner"
         )
     if prices is None:
         assert "Retired on Tinker 2026-06-12" in model.notes
@@ -169,6 +174,11 @@ def test_all_entries_load_and_tinker_subset_excludes_retired_model() -> None:
     assert [model.name for model in tinker_models()] == [
         name for name in names if name != "qwen3_4b_instruct_2507"
     ]
+
+
+def test_model_registry_is_discoverable_in_catalog() -> None:
+    assert "models" in catalog_kinds()
+    assert catalog_names("models") == list_models()
 
 
 def test_missing_names_and_hf_ids_raise_config_error() -> None:
@@ -220,15 +230,35 @@ def test_invalid_yaml_is_config_error(
 
 @pytest.mark.parametrize("field", ["family", "renderer", "tool_format", "local"])
 def test_invalid_enum_fields(field: str) -> None:
-    with pytest.raises(ValueError, match=field):
+    with pytest.raises(ValueError, match=field) as caught:
         replace(load_model("qwen3_8b"), **{field: "unsupported"})
+    assert "got 'unsupported'" in str(caught.value)
 
 
 @pytest.mark.parametrize("field", ["max_ctx", "default_max_tokens", "tinker_max_ctx"])
 @pytest.mark.parametrize("value", [0, -1, 1.5, True, "32768"])
 def test_context_and_token_caps_are_positive_integers(field: str, value: object) -> None:
-    with pytest.raises(ValueError, match=f"{field} must be a positive integer"):
+    with pytest.raises(ValueError, match=f"{field} must be a positive integer") as caught:
         replace(load_model("qwen3_8b"), **{field: value})
+    assert f"got {value!r}" in str(caught.value)
+
+
+@pytest.mark.parametrize("max_ctx", [1, 32768])
+def test_context_cap_can_equal_tinker_limit(max_ctx: int) -> None:
+    assert replace(load_model("qwen3_8b"), max_ctx=max_ctx).max_ctx == max_ctx
+
+
+def test_context_cap_must_fit_tinker_limit() -> None:
+    with pytest.raises(ValueError, match="max_ctx must be <= tinker_max_ctx") as caught:
+        replace(load_model("qwen3_8b"), max_ctx=32769)
+    assert "32768" in str(caught.value)
+    assert "got 32769" in str(caught.value)
+
+
+def test_non_tinker_model_has_no_tinker_context_limit() -> None:
+    model = replace(load_model("qwen3_4b_instruct_2507"), max_ctx=65536)
+    assert model.tinker_max_ctx is None
+    assert model.max_ctx == 65536
 
 
 @pytest.mark.parametrize(
@@ -243,8 +273,9 @@ def test_partial_tinker_configuration(present: tuple[bool, bool, bool]) -> None:
             ("tinker_id", "tinker_max_ctx", "tinker_prices"), present, strict=True
         )
     }
-    with pytest.raises(ValueError, match="all set or all None"):
+    with pytest.raises(ValueError, match="all set or all None") as caught:
         replace(original, **changes)
+    assert f"got {tuple(changes.values())!r}" in str(caught.value)
 
 
 def test_prices_mapping_conversion_and_frozen_records() -> None:
@@ -260,23 +291,39 @@ def test_prices_mapping_conversion_and_frozen_records() -> None:
 
 @pytest.mark.parametrize("prices", [{"typo": 1}, {"prefill": 1}, "not a mapping"])
 def test_invalid_prices_raise_value_error(prices: object) -> None:
-    with pytest.raises(ValueError, match="tinker_prices"):
+    with pytest.raises(ValueError, match="tinker_prices") as caught:
         replace(load_model("qwen3_8b"), tinker_prices=prices)
+    assert f"got {prices!r}" in str(caught.value)
 
 
 @pytest.mark.parametrize("field", ["prefill", "sample", "train"])
-@pytest.mark.parametrize("value", [-1, float("nan"), float("inf")])
-def test_invalid_price_amounts(field: str, value: float) -> None:
-    with pytest.raises(ValueError, match=field):
+@pytest.mark.parametrize("value", [-1, float("nan"), float("inf"), True, False, "1", None])
+def test_invalid_price_amounts(field: str, value: object) -> None:
+    with pytest.raises(ValueError, match=field) as caught:
         replace(TinkerPrices(1, 2, 3, "2026-09-23"), **{field: value})
+    assert f"got {value!r}" in str(caught.value)
 
 
-@pytest.mark.parametrize("as_of", ["not a date", "2026-02-30", "20260923"])
-def test_price_date_must_be_iso_date(as_of: str) -> None:
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize("as_of", ["not a date", "2026-02-30", "20260923", date(2026, 9, 23)])
+def test_price_date_must_be_iso_date(as_of: object) -> None:
+    with pytest.raises(ValueError) as caught:
         TinkerPrices(1, 2, 3, as_of)
+    assert "as_of must be a quoted ISO date string 'YYYY-MM-DD'" in str(caught.value)
+    assert f"got {as_of!r}" in str(caught.value)
+
+
+def test_unquoted_yaml_date_explains_required_quoting(tmp_path: Path) -> None:
+    data = asdict(load_model("qwen3_8b"))
+    data["tinker_prices"]["as_of"] = date(2026, 9, 23)
+    yaml_text = yaml.safe_dump(data)
+    assert "as_of: 2026-09-23" in yaml_text
+    (tmp_path / "qwen3_8b.yaml").write_text(yaml_text, encoding="utf-8")
+    with pytest.raises(ConfigError) as caught:
+        Registry("models", tmp_path, ModelSpec).load("qwen3_8b")
+    assert "as_of must be a quoted ISO date string 'YYYY-MM-DD'" in str(caught.value)
 
 
 def test_thinking_must_be_boolean() -> None:
-    with pytest.raises(ValueError, match="thinking"):
+    with pytest.raises(ValueError, match="thinking") as caught:
         replace(load_model("qwen3_8b"), thinking="false")
+    assert "got 'false'" in str(caught.value)
