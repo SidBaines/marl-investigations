@@ -151,8 +151,7 @@ def test_type_validation_errors_name_key(tmp_path: Path, source: str) -> None:
         else:
             compose(Config, overrides=["train.lr=nope"])
     assert str(caught.value) == (
-        "invalid config key 'train.lr': "
-        "Value 'nope' of type 'str' could not be converted to Float"
+        "invalid config key 'train.lr': Value 'nope' of type 'str' could not be converted to Float"
     )
     assert isinstance(caught.value.__cause__, OmegaConfBaseException)
 
