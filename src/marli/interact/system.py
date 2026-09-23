@@ -118,10 +118,32 @@ class Protocol(ABC):
 PROTOCOLS: FnRegistry = FnRegistry("protocols")  # name -> factory(config) -> Protocol
 
 
+# Built-in protocol modules under marli.interact.protocols (registered on import).
+BUILTIN_PROTOCOL_MODULES: tuple[str, ...] = (
+    "single",
+    "multi_session",
+    "swarm",
+    "presets",
+    "coordinator",
+)
+
+
+def load_builtin_protocols() -> None:
+    """Import the built-in protocol modules so they register themselves."""
+    import importlib
+
+    for module in BUILTIN_PROTOCOL_MODULES:
+        qualified = f"marli.interact.protocols.{module}"
+        try:
+            importlib.import_module(qualified)
+        except ModuleNotFoundError as exc:  # not built yet on this branch
+            if exc.name != qualified:
+                raise
+
+
 def get_protocol(name: str, config: Any) -> Protocol:
     """Resolve built-in or externally registered orchestration by name."""
-    from marli.interact.protocols import single  # noqa: F401
-
+    load_builtin_protocols()
     return PROTOCOLS.get(name)(config)
 
 

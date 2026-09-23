@@ -1,0 +1,3 @@
+protocol: single
+config: {}
+notes: One solver with submit (the baseline cell of every comparison).

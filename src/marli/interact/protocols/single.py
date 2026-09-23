@@ -17,6 +17,7 @@ class SingleConfig:
 @PROTOCOLS.register("single")
 class SingleProtocol(Protocol):
     name = "single"
+    config_type = SingleConfig
 
     def __init__(self, config: SingleConfig | None = None) -> None:
         self.config = config if config is not None else SingleConfig()

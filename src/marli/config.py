@@ -89,6 +89,49 @@ def parse[T](cls: type[T], argv: list[str] | tuple[str, ...] | None = None) -> T
     return compose(cls, *paths, overrides=overrides)
 
 
+def from_mappings[T](cls: type[T], *layers: Any) -> T:
+    """Like :func:`compose`, from in-memory mappings (defaults < layers, left to right).
+
+    Used for configs nested in registry entries (e.g. a protocol YAML's ``config``
+    block). Unknown keys raise ``ConfigError``; ``tuple``-annotated fields come
+    back as tuples (OmegaConf returns lists).
+    """
+    if not isinstance(cls, type) or not dataclasses.is_dataclass(cls):
+        raise TypeError(f"from_mappings() takes a dataclass type, got {cls!r}")
+    _validate_enums(cls)
+    try:
+        merged = OmegaConf.merge(
+            OmegaConf.structured(cls), *(OmegaConf.create(dict(layer or {})) for layer in layers)
+        )
+        obj = OmegaConf.to_object(merged)
+    except (OmegaConfBaseException, ValueError) as exc:
+        raise _config_error(exc) from exc
+    assert isinstance(obj, cls)
+    return _retuple(obj)
+
+
+def _retuple(obj: Any) -> Any:
+    if not (dataclasses.is_dataclass(obj) and not isinstance(obj, type)):
+        return obj
+    hints = get_type_hints(type(obj))
+    changes: dict[str, Any] = {}
+    for f in dataclasses.fields(obj):
+        value = getattr(obj, f.name)
+        if isinstance(value, list) and _is_tuple(hints.get(f.name)):
+            changes[f.name] = tuple(value)
+        elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+            fixed = _retuple(value)
+            if fixed is not value:
+                changes[f.name] = fixed
+    return dataclasses.replace(obj, **changes) if changes else obj
+
+
+def _is_tuple(annotation: Any) -> bool:
+    if annotation is tuple or get_origin(annotation) is tuple:
+        return True
+    return any(_is_tuple(arg) for arg in get_args(annotation) if arg is not type(None))
+
+
 def save(cfg: Any, path: str | Path) -> Path:
     """Save a dataclass instance as a YAML configuration."""
     _require_instance(cfg)

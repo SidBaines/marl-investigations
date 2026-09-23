@@ -135,6 +135,7 @@ def _resolve(ref: str) -> Any:
 CATALOG: dict[str, str] = {
     "models": "marli.model:MODELS",
     "tasks": "marli.tasks.source:SOURCES",
+    "protocols": "marli.interact.configs:PROTOCOL_CONFIGS",
 }
 
 
