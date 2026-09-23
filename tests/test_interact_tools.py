@@ -79,6 +79,7 @@ def test_factories_and_tool_metadata(name: str, shared: bool, control: bool) -> 
     assert tool.spec.parameters["type"] == "object"
     assert tool.spec.parameters["additionalProperties"] is False
     assert tool.shared is shared
+    assert tool.blocking is False
     assert tool.control is control
 
 
@@ -149,6 +150,19 @@ async def test_list_scratchpads(ctx: ToolCtx) -> None:
     assert result == ToolResult(
         "alice v1 (4 chars): mine\nbob v1 (7 chars): one\nempty v0 (0 chars): ",
         control={"reads": [WorkspaceRead("bob", "scratchpad", 1, ReadVia.PULL)]},
+    )
+
+
+@pytest.mark.parametrize("staged", [False, True])
+async def test_list_omits_only_own_never_written_pad(ctx: ToolCtx, staged: bool) -> None:
+    ctx.workspace.staged = staged
+    tool = TOOLS.get("list_scratchpads")()
+    assert await run_tool(tool, ctx, {}) == ToolResult(
+        "bob v0 (0 chars): ", control={"reads": []}
+    )
+    await run_tool(TOOLS.get("write_scratchpad")(), ctx, {"content": ""})
+    assert await run_tool(tool, ctx, {}) == ToolResult(
+        "alice v1 (0 chars): \nbob v0 (0 chars): ", control={"reads": []}
     )
 
 

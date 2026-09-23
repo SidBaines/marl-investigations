@@ -65,6 +65,10 @@ class RuntimeProtocol(Protocol):
     def roles(self) -> list[RoleSpec]:
         return [self.role]
 
+    def adjust_limits(self, limits: Limits) -> Limits:
+        # This test protocol exercises runtime session limits directly.
+        return limits
+
     async def run(self, io: SystemIO) -> Outcome:
         handles = [
             await io.start_agent(
@@ -610,17 +614,17 @@ async def test_last_session_forces_final_and_tail_is_observation() -> None:
     def script(ctx: ScriptCtx) -> Sequence[int]:
         if ctx.meta.purpose == "final":
             return [*renderer.encode_text('{"answer": "5"}}'), S["/call"], S["eot"]]
-        return renderer.encode_completion(tool_calls=(("end_session", {}),))
+        return renderer.encode_completion("tail content", tool_calls=(("end_session", {}),))
 
     spec.policies["script"] = ScriptedPolicy("script", renderer, script)
     episode, buffers = await run_episode(spec)
     assert [call.purpose for call in episode.calls] == [Purpose.ACT, Purpose.ACT, Purpose.FINAL]
     assert episode.outcome.final_answer == "5"
-    first, second = episode.calls[:2]
-    assert (
-        buffers[second.segment_id][second.prompt_len - 12 : second.prompt_len]
-        == buffers[first.segment_id][-12:]
-    )
+    second = episode.calls[1]
+    prompt = buffers[second.segment_id][: second.prompt_len]
+    assert "[Tail of your previous session]\ntail content⟨eot⟩⟨asst⟩" in renderer.decode(prompt)
+    assert prompt[-1] == S["asst"]
+    assert_token_buffers(episode, buffers, spec.policies["script"])
     assert episode.limits_hit["solver0"] == ("session.max_sessions",)
 
 
@@ -717,7 +721,7 @@ async def test_worker_handle_reservation_forced_report_and_fallback(report: bool
     )
     episode, buffers = await run_episode(spec)
     worker_result = protocol.results[1]
-    assert worker_result.report == ("five" if report else "[worker worker0: no report]")
+    assert worker_result.report == ("five" if report else None)
     assert worker_result.ended_by == "budget"
     worker_segment = next(segment for segment in episode.segments if segment.agent_id == "worker0")
     assert worker_segment.start_reason == SegmentStart.SPAWN
@@ -974,7 +978,11 @@ async def test_deliveries_survive_compaction_and_session_reset(mode: str, reset:
     prompt = renderer.decode(buffers[final.segment_id][: final.prompt_len])
     assert "PEER-SECRET-VALUE" in prompt
     assert "ok: scratchpad" not in prompt and "Please use a tool" not in prompt
-    assert "⟨user⟩What is 2+3?" in prompt
+    session = 1 if reset == "compaction" else 2
+    label = f"[Session {session} of 2]"
+    if session == 2:
+        label += " — final session: you must submit before it ends"
+    assert f"⟨user⟩{label}\n\nWhat is 2+3?" in prompt
     assert_token_buffers(episode, buffers, policy)
 
 
@@ -1275,9 +1283,9 @@ async def test_harness_summary_on_fresh_segment(
 
     async def summary_only(runtime: AgentRuntime) -> None:
         ticket = await runtime.scheduler.turn(runtime.info.agent_id)
+        runtime._carry = "[Tail of your previous session]\ntail content"
         runtime._initial("delivery")
         assert runtime.segment_id == ""  # recorder segments are lazy
-        runtime._tail = list(b"tail prefill")
         await runtime._harness_call(ticket, purpose, "Summarize.", [], [], forced=False)
 
     monkeypatch.setattr(AgentRuntime, "_loop", summary_only)
@@ -1287,8 +1295,11 @@ async def test_harness_summary_on_fresh_segment(
     assert call.purpose == purpose
     policy = spec.policies["script"]
     prompt = policy.calls[0].prompt_text
-    assert "⟨user⟩What is 2+3?\n\ndelivery⟨eot⟩⟨user⟩Summarize.⟨eot⟩⟨asst⟩" in prompt
-    assert prompt.endswith("tail prefill⟨think⟩⟨/think⟩")
+    assert (
+        "⟨user⟩What is 2+3?\n\n[Tail of your previous session]\ntail content"
+        "\n\ndelivery⟨eot⟩⟨user⟩Summarize.⟨eot⟩⟨asst⟩" in prompt
+    )
+    assert prompt.endswith("⟨asst⟩⟨think⟩⟨/think⟩")
     assert_token_buffers(episode, buffers, policy)
 
 
@@ -1435,3 +1446,112 @@ async def test_episode_share_after_peer_submits(schedule: str) -> None:
             assert ctx.spec.max_tokens == expected
     assert episode.outcome.final_answer == "5"
     assert_token_buffers(episode, buffers, policy)
+
+
+@pytest.mark.parametrize("stop", ["ticks", "budget"])
+async def test_provisional_text_continues_then_survives_exhaustion_without_forced_final(
+    stop: str,
+) -> None:
+    cfg = Limits(on_no_tool_call="final_text_continue")
+    if stop == "ticks":
+        cfg.episode.max_ticks = 2
+    else:
+        cfg.agent.max_calls = 2
+    protocol = RuntimeProtocol(tools=())
+    spec = spec_for({"solver0": [Turn("draft"), Turn("revised")]}, protocol, limits=cfg)
+    episode, _ = await run_episode(spec)
+    assert episode.outcome.final_answer == "revised"
+    assert len(episode.calls) == 2 and not any(call.forced for call in episode.calls)
+    assert protocol.results[0].ended_by == ("max_ticks" if stop == "ticks" else "budget")
+
+
+async def test_no_tool_continuation_forces_visible_final_when_act_budget_cannot_fit() -> None:
+    class TextRenderer(FakeRenderer):
+        def forced_tool_prefix(self, tool_name: str) -> list[int]:
+            pytest.fail(f"No tools were advertised: {tool_name}")
+
+    spec = spec_for(
+        {"solver0": [Turn("5")]},
+        RuntimeProtocol(tools=()),
+        renderer=TextRenderer(),
+        limits=Limits(
+            on_no_tool_call="final_text_continue",
+            agent=AgentLimits(max_gen_tokens=80, final_reserve=64),
+            call=CallLimits(min_call_tokens=32),
+        ),
+    )
+    episode, buffers = await run_episode(spec)
+    assert episode.ok and episode.outcome.final_answer == "5"
+    (call,) = episode.calls
+    assert call.purpose == Purpose.FINAL and call.forced and not call.tool_calls
+    assert spec.protocol.results[0].ended_by == "budget"
+    assert episode.metrics["total_gen"] <= spec.limits.agent.max_gen_tokens
+    assert_token_buffers(episode, buffers, spec.policies["script"])
+
+
+async def test_async_blocking_tool_releases_then_reacquires_shared_phase() -> None:
+    from marli.interact.tools import Tool
+
+    seen: list[str] = []
+
+    class SharedAction:
+        shared = True
+        control = False
+        spec = ToolSpec(
+            "shared_action",
+            "Shared action",
+            {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        )
+
+        async def __call__(self, ctx: ToolCtx) -> ToolResult:
+            assert ctx.scheduler._tool_lock.locked()
+            seen.append("shared")
+            return ToolResult("ok")
+
+    class BlockingAction:
+        shared = False
+        control = False
+        blocking = True
+        spec = ToolSpec(
+            "blocking_action",
+            "Wait for shared work",
+            {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        )
+
+        async def __call__(self, ctx: ToolCtx) -> ToolResult:
+            async with ctx.scheduler.tool_phase(ctx.agent_id):
+                seen.append("blocking")
+            return ToolResult("ok")
+
+    class SharedEnv(ScratchEnv):
+        def tools(self, role: str) -> list[Tool]:
+            return [SharedAction(), BlockingAction()]
+
+    spec = spec_for(
+        {
+            "solver0": [
+                Turn(
+                    tool_calls=(
+                        ("shared_action", {}),
+                        ("blocking_action", {}),
+                        ("shared_action", {}),
+                        ("submit", {"answer": "5"}),
+                    )
+                )
+            ]
+        },
+        RuntimeProtocol(tools=("shared_action", "blocking_action", "submit")),
+    )
+    spec.env = SharedEnv()
+    spec.schedule = "async"
+    episode, _ = await asyncio.wait_for(run_episode(spec), 2)
+    assert episode.ok and episode.outcome.final_answer == "5"
+    assert seen == ["shared", "blocking", "shared"]

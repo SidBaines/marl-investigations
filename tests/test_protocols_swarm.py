@@ -339,3 +339,95 @@ async def test_system_prompt_formats_peer_fields_and_preserves_literal_braces() 
     assert "peer0: 01 peers peer0; literal {n_agents}; \\boxed{5}" in (
         spec.policies["script"].calls[0].prompt_text
     )
+
+
+class BoxedArithEnv(ArithEnv):
+    def canonical(self, submission: str | None) -> str | None:
+        import re
+
+        if submission is None:
+            return None
+        matches = re.findall(r"\\boxed\{([^{}]*)\}", submission)
+        return super().canonical(matches[-1] if matches else submission)
+
+
+class NoToolDebateRenderer(FakeRenderer):
+    def forced_tool_prefix(self, tool_name: str) -> list[int]:
+        pytest.fail(f"Debate cannot force an unadvertised tool: {tool_name}")
+
+
+async def test_debate_two_rounds_push_replies_keep_latest_answers_and_vote_deterministically() -> (
+    None
+):
+    from marli.interact.configs import build_protocol
+    from marli.interact.protocols.presets import DebateConfig, DebateProtocol
+
+    turns = {
+        f"peer{i}": [
+            Turn(f"Round one from {i}: candidate \\boxed{{{i}}}.", thinking=f"private {i}"),
+            Turn(f"Round two from {i}: checked \\boxed{{{('05', '5', '6')[i]}}}."),
+        ]
+        for i in range(3)
+    }
+    protocol = build_protocol("debate_n3_r2")
+    assert isinstance(protocol, DebateProtocol) and isinstance(protocol.config, DebateConfig)
+    spec = swarm_spec(turns, protocol=protocol, env=BoxedArithEnv())
+    spec.renderers["script"] = NoToolDebateRenderer
+    spec.clock = FakeClock()
+    episode, buffers = await run_episode(spec)
+    assert episode.ok and episode.replayable
+    assert episode.outcome.submissions == {
+        peer: replies[1].content for peer, replies in turns.items()
+    }
+    assert episode.outcome.final_answer == turns["peer0"][1].content
+    assert episode.outcome.votes == {"5": 2, "6": 1}
+    assert episode.grades["_system"] == {"correct": 1.0}
+    assert len(episode.calls) == len(episode.workspace_log) == 6
+    assert all(call.purpose == Purpose.ACT and not call.forced for call in episode.calls)
+    assert {e.data["ended_by"] for e in episode.events if e.kind == EventKind.DONE} == {"max_ticks"}
+    for i in range(3):
+        prompts = [ctx for ctx in spec.policies["script"].calls if ctx.meta.agent_id == f"peer{i}"]
+        assert len(prompts) == 2
+        assert "over 2 rounds" in prompts[0].prompt_text and r"\boxed{}" in prompts[0].prompt_text
+        assert "⟨tools⟩" not in prompts[0].prompt_text
+        for j in range(3):
+            if i != j:
+                assert turns[f"peer{j}"][0].content in prompts[1].prompt_text
+                assert f"private {j}" not in prompts[1].prompt_text
+        calls = [call for call in episode.calls if call.agent_id == f"peer{i}"]
+        assert [call.tick for call in calls] == [0, 1]
+        assert {(r.writer, r.version, r.via) for r in calls[1].reads} == {
+            (f"peer{j}", 1, ReadVia.PUSH) for j in range(3) if i != j
+        }
+        for call, ctx in zip(calls, prompts, strict=True):
+            assert tuple(buffers[call.segment_id][: call.prompt_len]) == ctx.prompt_ids
+    other = swarm_spec(turns, protocol=build_protocol("debate_n3_r2"), env=BoxedArithEnv())
+    other.renderers["script"] = NoToolDebateRenderer
+    other.clock = FakeClock()
+    assert await run_episode(other) == (episode, buffers)
+    assert spec.limits.on_no_tool_call == "nudge" and spec.limits.episode.max_ticks == 64
+
+
+@pytest.mark.parametrize("rounds", [0, -1, True, 1.5])
+def test_debate_rejects_invalid_round_count(rounds: int) -> None:
+    from marli.interact.protocols.presets import DebateConfig
+
+    with pytest.raises(ConfigError, match="rounds"):
+        DebateConfig(rounds=rounds)
+
+
+@pytest.mark.parametrize(
+    "protocol_name", ["single", "swarm", "independent", "coordinator", "debate"]
+)
+def test_non_session_protocols_pin_one_session_and_warn(protocol_name: str) -> None:
+    from marli.interact.configs import build_protocol
+    from marli.interact.limits import SessionLimits
+
+    protocol = build_protocol(protocol_name)
+    limits = Limits(session=SessionLimits(max_sessions=3))
+    with pytest.warns(
+        UserWarning, match="sessions are owned by the multi_session protocol"
+    ) as caught:
+        adjusted = protocol.adjust_limits(limits)
+    assert len(caught) == 1
+    assert adjusted.session.max_sessions == 1 and limits.session.max_sessions == 3

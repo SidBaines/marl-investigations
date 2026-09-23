@@ -80,7 +80,9 @@ def test_summary_instructions(kind: str, carry_max_tokens: int) -> None:
     )
     assert compact == (
         "Your context is almost full. It will now be cleared and replaced by the summary you "
-        "write in this reply; afterwards you will see only the original task and this summary. "
+        "write in this reply; afterwards you will see only the original task and this summary"
+        + (" plus your saved notes; don't repeat them" if kind == "both" else "")
+        + ". "
         + body
     )
     carry_opening = (
@@ -331,3 +333,31 @@ def test_kinds_without_summary_calls_do_not_require_reserves(kind: str) -> None:
 def test_non_tail_kinds_ignore_tail_tokens(kind: str) -> None:
     manager = make_context_manager(ContextSpec(kind=kind, tail_tokens=100_000), Limits())
     assert manager.tail_prefill(FakeRenderer().encode_completion("answer")) == []
+
+
+@pytest.mark.parametrize("tail_tokens", [5, 200])
+def test_tail_observation_parses_replies_before_truncating(tail_tokens: int) -> None:
+    renderer = FakeRenderer()
+    manager = make_context_manager(ContextSpec(kind="tail", tail_tokens=tail_tokens), Limits())
+    completions = [
+        renderer.encode_completion(
+            "visible one", thinking="thought one", tool_calls=[("read_notes", {})]
+        ),
+        renderer.encode_completion(
+            "visible two", thinking="thought two", raw_tool_bodies=['{"name":']
+        ),
+    ]
+    expected = "thought one\n\nvisible one\n\nthought two\n\nvisible two"
+    assert manager.tail_text(completions, renderer) == (
+        "[Tail of your previous session]\n"
+        + renderer.decode(renderer.encode_text(expected)[-tail_tokens:])
+    )
+    assert (
+        manager.tail_text([renderer.encode_completion(tool_calls=[("end_session", {})])], renderer)
+        == ""
+    )
+
+
+def test_both_compaction_instruction_includes_saved_notes() -> None:
+    manager = make_context_manager(ContextSpec(kind="both"), Limits())
+    assert "plus your saved notes" in manager.compaction_instruction()
