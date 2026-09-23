@@ -130,9 +130,6 @@ async def test_scripted_factory(monkeypatch: pytest.MonkeyPatch) -> None:
         ("ckpt:checkpoint", False, None, r"ckpt: refs are resolved by marli.train \(M3\)"),
         ("tinker:base", False, None, "require renderer_name"),
         ("vllm:http://local#model", True, "", "require renderer_name"),
-        (PolicyRef("unknown", "x"), False, None, "Unknown policy kind"),
-        (PolicyRef("api", "x", provider="unknown"), False, None, "Unknown API provider"),
-        (PolicyRef("vllm", "x"), False, "fake", "require base_url"),
         ("invalid", False, None, "Invalid policy ref"),
     ],
 )
@@ -174,3 +171,17 @@ def test_policy_imports_remain_light(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(builtins, "__import__", guarded)
     for name in ("api", "tinker", "vllm", "resolve"):
         importlib.reload(importlib.import_module(f"marli.policy.{name}"))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"kind": "unknown", "target": "x"},
+        {"kind": "api", "target": "x", "provider": "unknown"},
+        {"kind": "vllm", "target": "x"},
+    ],
+)
+def test_invalid_refs_are_rejected_at_construction(kwargs: dict) -> None:
+    # PolicyRef validates itself (M1 polish), so resolve_policy never sees these.
+    with pytest.raises(ConfigError):
+        PolicyRef(**kwargs)
