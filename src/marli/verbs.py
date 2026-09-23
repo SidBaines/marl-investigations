@@ -76,6 +76,34 @@ VERBS: dict[str, VerbSpec] = {
         "taskset.json",
         "Filter a taskset by pass rates from saved rollouts.",
     ),
+    "eval rollout": VerbSpec(
+        "eval rollout",
+        "marli.eval.rollout:rollout",
+        "marli.eval.rollout:RolloutConfig",
+        "episodes.json",
+        "Sample resumable episodes with bounded concurrency and a spend guard.",
+    ),
+    "eval score": VerbSpec(
+        "eval score",
+        "marli.eval.score:score",
+        "marli.eval.score:ScoreConfig",
+        "scores.json",
+        "Score saved episodes; optionally regrade with the environment verifier.",
+    ),
+    "eval report": VerbSpec(
+        "eval report",
+        "marli.eval.report:report",
+        "marli.eval.report:ReportConfig",
+        "report.json",
+        "Report one Scores input with compute and paired task statistics.",
+    ),
+    "eval grid": VerbSpec(
+        "eval grid",
+        "marli.eval.grid:grid",
+        "marli.eval.grid:GridConfig",
+        "report.json",
+        "Run labelled rollout/score cells and combine their compute-aware report.",
+    ),
 }
 BUILTINS: tuple[str, ...] = ("list", "describe", "inspect", "status")
 
