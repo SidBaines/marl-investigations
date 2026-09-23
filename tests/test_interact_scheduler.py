@@ -122,7 +122,12 @@ async def scripted_trace() -> tuple[list[tuple[Any, ...]], FakeRecorder]:
             for seat, name in enumerate(("low", "high"))
         ]
     assert [item[1] for item in log if item[0] == "stage"] == [
-        "high", "low", "low", "high", "high", "low"
+        "high",
+        "low",
+        "low",
+        "high",
+        "high",
+        "low",
     ]
     return log, recorder
 
