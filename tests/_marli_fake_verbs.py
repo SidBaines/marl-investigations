@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import ClassVar
 
 from marli.config import input_field, runtime_field
@@ -17,6 +18,11 @@ class EchoConfig:
     n: int = 3
     concurrency: int = runtime_field(4)
     source: str | None = input_field(None)
+
+
+@dataclass
+class PathConfig:
+    source: Path = input_field()
 
 
 @register_handle

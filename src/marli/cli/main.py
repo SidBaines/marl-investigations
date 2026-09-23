@@ -15,15 +15,23 @@ import os
 import re
 import sys
 import traceback
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
-from marli import __version__, config, errors, handles, registry, verbs
+from marli import (
+    __version__,
+    config,
+    handles,
+    registry,
+    rundir,  # noqa: F401 -- include run-directory errors in the reference.
+    verbs,
+)
 from marli.errors import ConfigError, MarliError
 
 
 class ArgumentParser(argparse.ArgumentParser):
-    def error(self, message: str) -> None:
+    def error(self, message: str) -> NoReturn:
         raise ConfigError(message)
 
 
@@ -35,8 +43,8 @@ def _build_parser() -> ArgumentParser:
     listing.add_argument("kind", nargs="?")
     describe = commands.add_parser("describe", help="describe verb configuration")
     describe.add_argument("verb", nargs="*")
-    describe.add_argument("--all", action="store_true")
-    describe.add_argument("--markdown", action="store_true")
+    describe.add_argument("--all", action="store_true", help="describe every registered verb")
+    describe.add_argument("--markdown", action="store_true", help="emit a Markdown reference")
     inspect = commands.add_parser("inspect", help="inspect a manifest's provenance chain")
     inspect.add_argument("path")
     status = commands.add_parser("status", help="read run status without taking its lock")
@@ -45,7 +53,10 @@ def _build_parser() -> ArgumentParser:
     groups = {}
     single_names = {spec.name for spec in verbs.VERBS.values() if " " not in spec.name}
     for name, spec in sorted(verbs.VERBS.items()):
-        if name != spec.name or re.fullmatch(r"[a-z0-9-]+(?: [a-z0-9-]+)?", name) is None:
+        if (
+            name != spec.name
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]*( [a-z0-9][a-z0-9-]*)?", name) is None
+        ):
             raise ConfigError(f"invalid verb table entry {name!r}: expected 1–2 lowercase words")
         words = name.split(" ")
         if words[0] in verbs.BUILTINS:
@@ -55,7 +66,10 @@ def _build_parser() -> ArgumentParser:
             if group in single_names:
                 raise ConfigError(f"verb group {group!r} collides with a one-word verb")
             if group not in groups:
-                groups[group] = commands.add_parser(group).add_subparsers(required=True)
+                help_text = f"{group} verbs"
+                groups[group] = commands.add_parser(
+                    group, help=help_text, description=help_text
+                ).add_subparsers(required=True)
             command = groups[group].add_parser(word, help=spec.help, description=spec.help)
         else:
             command = commands.add_parser(name, help=spec.help, description=spec.help)
@@ -95,9 +109,25 @@ def _markdown_cell(value: Any) -> str:
     return text.replace("|", "\\|").replace("\r\n", "\n").replace("\n", "<br>")
 
 
+def _error_types(cls: type[MarliError]) -> Iterator[type[MarliError]]:
+    yield cls
+    for child in cls.__subclasses__():
+        yield from _error_types(child)
+
+
 def _markdown(descriptions: list[dict[str, Any]]) -> str:
+    error_groups: dict[int, set[type[MarliError]]] = {}
+    for cls in _error_types(MarliError):
+        error_groups.setdefault(cls.exit_code, set()).add(cls)
+    error_rows = []
+    for code, classes in sorted(error_groups.items()):
+        meaning = "; ".join(
+            f"`{cls.__name__}`: {cls.__doc__ or ''}"
+            for cls in sorted(classes, key=lambda c: c.__name__)
+        )
+        error_rows.append(f"| {code} | {_markdown_cell(meaning)} |")
     lines = [
-        "<!-- Generated: uv run marli describe --all --markdown > docs/cli.md -->",
+        "Generated: `uv run marli describe --all --markdown > docs/cli.md`",
         "",
         "# marli CLI reference",
         "",
@@ -109,25 +139,23 @@ def _markdown(descriptions: list[dict[str, Any]]) -> str:
         "| `marli list [KIND]` | List all registries, or the entries in one registry. |",
         "| `marli describe VERB... [--markdown]` | Describe one verb and its config fields. |",
         "| `marli describe --all [--markdown]` | Describe every registered verb. |",
-        "| `marli inspect PATH` | Inspect a manifest and its input provenance chain. |",
+        "| `marli inspect PATH` | Inspect a manifest file or directory and its input chain. |",
         "| `marli status OUT` | Read saved run and progress records without taking a lock. |",
         "",
         "## Output and exit codes",
         "",
         "Commands emit exactly one compact JSON line on stdout; logs and stray verb",
-        "prints go to stderr. Success includes `ok: true`; errors include `ok: false`,",
+        "prints (including subprocess output) go to stderr. Success includes `ok: true`;",
+        "errors include `ok: false`,",
         "`error`, `message`, and `exit_code`. `describe --markdown` emits Markdown instead",
         "of JSON. `--help` prints normal argparse help to stdout and exits with code 0.",
+        "A verb's `SystemExit` is an unexpected failure (exit 1); `KeyboardInterrupt` exits 130.",
         "",
-        "| Exit code | Meaning (`marli.errors`) |",
+        "| Exit code | Meaning |",
         "| --- | --- |",
         "| 0 | Success |",
-        f"| {errors.MarliError.exit_code} | Unexpected failure (`MarliError`) |",
-        f"| {errors.ConfigError.exit_code} | "
-        "Usage/config error (`ConfigError`, `DirtyTreeError`) |",
-        f"| {errors.HashMismatchError.exit_code} | Config-hash mismatch (`HashMismatchError`) |",
-        f"| {errors.BudgetExceededError.exit_code} | Budget exceeded (`BudgetExceededError`) |",
-        f"| {errors.BackendError.exit_code} | Backend error (`BackendError`) |",
+        *error_rows,
+        "| 130 | Interrupted (`KeyboardInterrupt`) |",
         "",
         "## Verbs",
         "",
@@ -163,6 +191,8 @@ def _markdown(descriptions: list[dict[str, Any]]) -> str:
 
 def _dispatch(args: argparse.Namespace) -> dict[str, Any] | str:
     if args.version:
+        if args.command is not None:
+            raise ConfigError("--version cannot be combined with a command")
         return {"ok": True, "kind": "version", "version": __version__}
     if args.command == "list":
         if args.kind is not None:
@@ -198,17 +228,33 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any] | str:
             return _markdown(descriptions)
         return {"ok": True, "kind": "describe", "verbs": descriptions}
     if args.command == "inspect":
-        return {"ok": True, "kind": "inspect", "chain": handles.inspect_chain(args.path)}
+        path = verbs.input_manifest(args.path, "PATH")
+        return {"ok": True, "kind": "inspect", "chain": handles.inspect_chain(path)}
     if args.command == "status":
         return _status(args.out)
     if args.command is None:
         raise ConfigError("a command is required")
     spec = verbs.get_verb(args.verb_name)
     _, cls = verbs.resolve(spec)
-    yamls = [arg for arg in args.config_args if "=" not in arg]
-    overrides = [arg for arg in args.config_args if "=" in arg]
-    cfg = config.compose(cls, *yamls, overrides=overrides)
+    for y in args.config_args:
+        if "=" not in y and not Path(y).is_file():
+            raise ConfigError(f"config file not found: {y} (overrides must be key=value)")
+    cfg = config.parse(cls, args.config_args)
     result = asyncio.run(verbs.run_verb(spec, cfg, out=args.out, force=args.force))
+    summary = result.handle.summary()
+    reserved = {
+        "ok",
+        "verb",
+        "kind",
+        "manifest",
+        "status",
+        "config_hash",
+        "warnings",
+        "error",
+        "exit_code",
+    }
+    if overlap := summary.keys() & reserved:
+        raise MarliError(f"verb {spec.name!r} summary overwrites contract keys: {sorted(overlap)}")
     return {
         "ok": True,
         "verb": spec.name,
@@ -217,40 +263,62 @@ def _dispatch(args: argparse.Namespace) -> dict[str, Any] | str:
         "status": result.status.value,
         "config_hash": result.config_hash,
         "warnings": result.warnings,
-        **result.handle.summary(),
+        **summary,
     }
+
+
+def _error_output(exc: BaseException) -> tuple[int, str]:
+    if isinstance(exc, MarliError):
+        code = exc.exit_code
+    elif isinstance(exc, KeyboardInterrupt):
+        code = 130
+    else:
+        code = 1
+    if not isinstance(exc, MarliError):
+        traceback.print_exc(file=sys.stderr)
+    return code, json.dumps(
+        {"ok": False, "error": type(exc).__name__, "message": str(exc), "exit_code": code},
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
     """Translate every failure to JSON so callers never have to parse stderr."""
     exit_code = 0
     try:
-        logging.basicConfig(stream=sys.stderr, level=os.environ.get("MARLI_LOG_LEVEL", "INFO"))
-        args = _build_parser().parse_args(argv)
-        with contextlib.redirect_stdout(sys.stderr):
-            result = _dispatch(args)
-            output = (
-                result
-                if isinstance(result, str)
-                else json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n"
-            )
+        args, leftover = _build_parser().parse_known_args(argv)
+        if leftover:
+            if not hasattr(args, "verb_name") or any(arg.startswith("-") for arg in leftover):
+                raise ConfigError(f"unrecognized arguments: {' '.join(leftover)}")
+            args.config_args.extend(leftover)
     except Exception as exc:
-        exit_code = exc.exit_code if isinstance(exc, MarliError) else 1
-        if not isinstance(exc, MarliError):
-            traceback.print_exc(file=sys.stderr)
-        output = (
-            json.dumps(
-                {
-                    "ok": False,
-                    "error": type(exc).__name__,
-                    "message": str(exc),
-                    "exit_code": exit_code,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            + "\n"
-        )
+        exit_code, output = _error_output(exc)
+    else:
+        try:
+            level = os.environ.get("MARLI_LOG_LEVEL", "INFO").upper()
+            if level not in logging.getLevelNamesMapping():
+                raise ConfigError(f"invalid MARLI_LOG_LEVEL: {level!r}")
+            logging.basicConfig(stream=sys.stderr, level=level)
+            sys.stdout.flush()
+            saved = os.dup(1)
+            try:
+                os.dup2(2, 1)
+                with contextlib.redirect_stdout(sys.stderr):
+                    result = _dispatch(args)
+                    output = (
+                        result
+                        if isinstance(result, str)
+                        else json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n"
+                    )
+            finally:
+                try:
+                    sys.stdout.flush()
+                finally:
+                    os.dup2(saved, 1)
+                    os.close(saved)
+        except (Exception, SystemExit, KeyboardInterrupt) as exc:
+            exit_code, output = _error_output(exc)
     sys.stdout.write(output)
     return exit_code
 

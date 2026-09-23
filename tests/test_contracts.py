@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from marli import verbs
+from marli.cli.main import _build_parser
 
 ROOT = Path(__file__).resolve().parents[1]
 LIBRARY = ROOT / "src" / "marli"
@@ -32,17 +33,27 @@ HEAVY = (
 
 def _violations(source: str, rule: str) -> list[int]:
     tree = ast.parse(source)
-    asyncio_names = {"asyncio"}
-    run_names = set()
+    aliases = {
+        "asyncio": "asyncio",
+        "print": "builtins.print",
+        "builtins": "builtins",
+        "sys": "sys",
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            asyncio_names.update(
-                alias.asname or alias.name for alias in node.names if alias.name == "asyncio"
-            )
-        elif isinstance(node, ast.ImportFrom) and node.module == "asyncio":
-            run_names.update(
-                alias.asname or alias.name for alias in node.names if alias.name == "run"
-            )
+            for alias in node.names:
+                name = alias.asname or alias.name.split(".")[0]
+                aliases[name] = alias.name if alias.asname else name
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+
+    def qualified_name(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Name):
+            return aliases.get(node.id, node.id)
+        if isinstance(node, ast.Attribute):
+            return f"{qualified_name(node.value)}.{node.attr}"
+        return None
 
     found = []
     for node in ast.walk(tree):
@@ -60,22 +71,25 @@ def _violations(source: str, rule: str) -> list[int]:
             ):
                 found.append(node.lineno)
         elif isinstance(node, ast.Call):
-            fn = node.func
+            fn = qualified_name(node.func)
             if rule == "asyncio.run":
-                if (
-                    isinstance(fn, ast.Attribute)
-                    and fn.attr == "run"
-                    and isinstance(fn.value, ast.Name)
-                    and fn.value.id in asyncio_names
-                ) or (isinstance(fn, ast.Name) and fn.id in run_names):
+                if fn in {
+                    "asyncio.run",
+                    "asyncio.runners.run",
+                    "asyncio.Runner",
+                    "asyncio.runners.Runner",
+                }:
                     found.append(node.lineno)
-            elif (
-                rule == "print"
-                and isinstance(fn, ast.Name)
-                and fn.id == "print"
-                and not any(keyword.arg == "file" for keyword in node.keywords)
-            ):
-                found.append(node.lineno)
+            elif rule == "print" and fn == "builtins.print":
+                file = next(
+                    (keyword.value for keyword in node.keywords if keyword.arg == "file"), None
+                )
+                if (
+                    file is None
+                    or qualified_name(file) in {"sys.stdout", "sys.__stdout__"}
+                    or (isinstance(file, ast.Constant) and file.value is None)
+                ):
+                    found.append(node.lineno)
     return found
 
 
@@ -99,8 +113,24 @@ def test_cli_only_boundaries(rule: str) -> None:
         ("import asyncio as aio\naio.run(main())", "asyncio.run", [2]),
         ("from asyncio import run\nrun(main())", "asyncio.run", [2]),
         ("from asyncio import run as start\nstart(main())", "asyncio.run", [2]),
+        ("asyncio.runners.run(main())", "asyncio.run", [1]),
+        ("asyncio.Runner()", "asyncio.run", [1]),
+        ("from asyncio import Runner as Start\nStart()", "asyncio.run", [2]),
+        ("from asyncio import runners as r\nr.run(main())", "asyncio.run", [2]),
+        ("import asyncio.runners as r\nr.Runner()", "asyncio.run", [2]),
+        ("from asyncio.runners import run as start\nstart(main())", "asyncio.run", [2]),
         ("print('junk')", "print", [1]),
+        ("print('junk', file=sys.stdout)", "print", [1]),
+        ("print('junk', file=sys.__stdout__)", "print", [1]),
+        ("print('junk', file=None)", "print", [1]),
+        ("builtins.print('junk')", "print", [1]),
+        ("builtins.print('junk', file=sys.stdout)", "print", [1]),
+        ("import builtins as b\nb.print('junk')", "print", [2]),
+        ("import sys as s\nprint('junk', file=s.__stdout__)", "print", [2]),
+        ("from sys import stdout as out\nprint('junk', file=out)", "print", [2]),
         ("print('log', file=sys.stderr)", "print", []),
+        ("builtins.print('log', file=sys.__stderr__)", "print", []),
+        ("print('saved', file=stream)", "print", []),
         ("runner.run()", "asyncio.run", []),
     ],
 )
@@ -109,14 +139,58 @@ def test_boundary_scanner(source: str, rule: str, expected: list[int]) -> None:
 
 
 def _python(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    pythonpath = os.pathsep.join(filter(None, (str(ROOT / "src"), os.environ.get("PYTHONPATH"))))
+    result = subprocess.run(
         [sys.executable, *args],
         cwd=ROOT,
         capture_output=True,
         text=True,
-        env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
-        check=True,
+        env={**os.environ, "PYTHONPATH": pythonpath},
+        check=False,
     )
+    assert result.returncode == 0, result.stderr
+    return result
+
+
+def test_python_helper_reports_child_stderr() -> None:
+    with pytest.raises(AssertionError, match="child failure detail"):
+        _python("-c", "import sys; sys.stderr.write('child failure detail'); sys.exit(9)")
+
+
+def test_python_helper_preserves_pythonpath(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = os.pathsep.join((str(ROOT / "tests"), str(ROOT / "examples")))
+    monkeypatch.setenv("PYTHONPATH", existing)
+    result = _python("-c", "import os; print(os.environ['PYTHONPATH'])")
+    assert result.stdout.strip() == str(ROOT / "src") + os.pathsep + existing
+
+
+def test_warning_hook_is_installed_without_changing_filters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        os.pathsep.join(filter(None, (str(ROOT / "tests"), os.environ.get("PYTHONPATH")))),
+    )
+    result = _python(
+        "-c",
+        f"""
+import asyncio
+import warnings
+before = warnings.filters[:]
+from marli import verbs
+import _marli_fake_verbs as fake
+echo = fake.echo
+async def warn(cfg, run):
+    warnings.warn("captured warning")
+    return await echo(cfg, run)
+fake.echo = warn
+result = asyncio.run(verbs.run_verb(fake.SPEC, fake.EchoConfig(), out={str(tmp_path)!r}))
+assert result.warnings == ["captured warning"], result.warnings
+assert warnings.filters == before
+warnings.warn("outside warning")
+""",
+    )
+    assert "UserWarning: outside warning" in result.stderr
 
 
 @pytest.mark.parametrize("help_requested", [False, True])
@@ -158,9 +232,10 @@ def test_cli_module_help() -> None:
 
 
 def test_registered_verb_contracts() -> None:
+    _build_parser()
     for name, spec in verbs.VERBS.items():
         assert name == spec.name
-        assert re.fullmatch(r"[a-z0-9-]+(?: [a-z0-9-]+)?", name), name
+        assert re.fullmatch(r"[a-z0-9][a-z0-9-]*( [a-z0-9][a-z0-9-]*)?", name), name
         assert spec.manifest.endswith(".json"), name
         fn, cls = verbs.resolve(spec)
         assert inspect.iscoroutinefunction(fn), name
