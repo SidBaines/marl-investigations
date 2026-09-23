@@ -140,7 +140,10 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
     workspace = Workspace(
         roles={},
         permissions={
-            role.role: Permissions(notes=role.context.kind in {"notes", "both"}) for role in roles
+            role.role: replace(
+                role.permissions or Permissions(), notes=role.context.kind in {"notes", "both"}
+            )
+            for role in roles
         },
         delivery=spec.delivery,
         staged=spec.schedule == "lockstep",

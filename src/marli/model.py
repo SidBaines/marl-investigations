@@ -31,10 +31,7 @@ class TinkerPrices:
                 or value < 0
             ):
                 raise ValueError(f"{field} price must be finite and non-negative, got {value!r}")
-        date_error = (
-            "as_of must be a quoted ISO date string 'YYYY-MM-DD', "
-            f"got {self.as_of!r}"
-        )
+        date_error = f"as_of must be a quoted ISO date string 'YYYY-MM-DD', got {self.as_of!r}"
         if not isinstance(self.as_of, str):
             raise ValueError(date_error)
         try:
@@ -43,7 +40,6 @@ class TinkerPrices:
             raise ValueError(date_error) from exc
         if canonical_date != self.as_of:
             raise ValueError(date_error)
-
 
 
 def _renderer_names() -> tuple[str, ...]:
@@ -106,8 +102,7 @@ class ModelSpec:
             )
         if self.tinker_max_ctx is not None and self.max_ctx > self.tinker_max_ctx:
             raise ValueError(
-                f"max_ctx must be <= tinker_max_ctx ({self.tinker_max_ctx!r}), "
-                f"got {self.max_ctx!r}"
+                f"max_ctx must be <= tinker_max_ctx ({self.tinker_max_ctx!r}), got {self.max_ctx!r}"
             )
         if isinstance(self.tinker_prices, Mapping):
             try:

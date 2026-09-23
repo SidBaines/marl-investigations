@@ -106,7 +106,10 @@ async def test_chat_single_records_usage_and_unique_cache_salt() -> None:
     episode, buffers = await run_episode(spec)
     assert episode.ok and episode.replayable and not buffers and not episode.segments
     assert episode.outcome.final_answer == "5"
-    assert episode.metrics["total_gen"] == 10 and episode.metrics["total_prompt"] == 0
+    # API seats are accounted separately from token-level compute
+    assert episode.metrics["total_gen"] == 0 and episode.metrics["total_prompt"] == 0
+    assert episode.metrics["api_calls"] == len(episode.calls)
+    assert episode.metrics["api_gen_tokens"] == 10
     for index, call in enumerate(episode.calls):
         assert call.segment_id == "" and call.prompt_len == 0
         assert call.completion_ids == () and call.logprobs is None
@@ -137,7 +140,6 @@ async def test_chat_single_records_usage_and_unique_cache_salt() -> None:
         "context",
         "tool",
         "schedule",
-        "delivery",
         "context_kind",
     ],
 )
@@ -164,8 +166,6 @@ async def test_invalid_specs_fail_before_setup_and_sampling(problem: str) -> Non
         spec.protocol = SingleProtocol(SingleConfig(env_tools=("missing",)))
     elif problem == "schedule":
         spec.schedule = "invalid"
-    elif problem == "delivery":
-        spec.delivery = replace(spec.delivery, mode="invalid")
     else:
 
         class BadContextProtocol(SingleProtocol):
@@ -275,3 +275,9 @@ async def test_finalize_and_canonicalize_use_environment_and_new_agent() -> None
         agent: {"correct": 1.0} for agent in ("solver0", "finalizer0", "_system")
     }
     assert episode.calls[-1].tick == 1
+
+
+def test_invalid_delivery_is_rejected_at_construction() -> None:
+    spec = single_spec()
+    with pytest.raises(ConfigError, match="delivery mode"):
+        replace(spec.delivery, mode="invalid")

@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from marli.interact.records import Recorder
     from marli.interact.run import EpisodeSpec
     from marli.interact.scheduler import Scheduler
-    from marli.interact.workspace import Workspace
+    from marli.interact.workspace import Permissions, Workspace
 
 
 @dataclass(frozen=True)
@@ -59,6 +59,9 @@ class RoleSpec:
     count: int | None = 1  # None = dynamic (workers)
     context: ContextSpec = ContextSpec()
     limits_key: str = "agent"  # which Limits block applies: "agent" | "worker"
+    # workspace permissions (read others / readable roles / write own scratchpad);
+    # None = the default Permissions(). ``notes`` is always derived from ``context``.
+    permissions: Permissions | None = None
 
 
 @dataclass(frozen=True)

@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from marli.budget import SpendGuard
-from marli.errors import BackendError, ConfigError
+from marli.errors import BackendError, BudgetExceededError, ConfigError
 from marli.interact.types import Termination, Usage
 from marli.llm.client import OPENROUTER_BASE_URL, ChatClient, usage_of
 from marli.policy.base import CallMeta, ChatReply
@@ -20,6 +20,8 @@ def _messages(messages: Sequence[Msg]) -> list[dict[str, Any]]:
     pending: list[tuple[str, str]] = []
     for index, message in enumerate(messages):
         item: dict[str, Any] = {"role": message.role, "content": message.content}
+        if message.role == "assistant":
+            pending.clear()
         if message.role == "assistant" and message.tool_calls:
             calls = []
             for call_index, call in enumerate(message.tool_calls):
@@ -69,7 +71,11 @@ def _tool_call(call: dict[str, Any]) -> ParsedToolCall:
 
 
 class APIPolicy:
-    """Prices use ``{\"provider/model\": {\"output\": USD_per_million_tokens}}``."""
+    """Prices map ``provider/model`` to input/output USD per million tokens.
+
+    OpenRouter reports cost directly. Other providers require a price entry
+    before a finite spend guard can safely admit a call.
+    """
 
     trainable: bool = False
 
@@ -91,6 +97,14 @@ class APIPolicy:
         )
         self.spend = spend
         self.api_prices = api_prices or {}
+        model_key = f"{self.provider}/{client.endpoint.model}"
+        if (
+            spend is not None
+            and spend.remaining() is not None
+            and self.provider != "openrouter"
+            and model_key not in self.api_prices
+        ):
+            raise ConfigError(f"Finite API spend guard requires a price entry for {model_key}")
 
     async def chat(
         self,
@@ -128,10 +142,22 @@ class APIPolicy:
         price = self.api_prices.get(model_key)
         if self.spend is not None and price is not None:
             self.spend.check(max_tokens * price["output"] / 1_000_000, self.policy_id)
-        response = await self.client.chat(payload, cache_salt=cache_salt)
+        try:
+            response = await self.client.chat(payload, cache_salt=cache_salt)
+        except (BudgetExceededError, ConfigError):
+            raise
+        except (RuntimeError, ValueError) as exc:
+            raise BackendError(f"API chat failed: {exc}") from exc
         usage = usage_of(response)
-        cost = float(usage["cost_usd"] or 0.0)
-        if self.spend is not None and usage["cost_usd"] is not None:
+        prompt_tokens = int(usage["prompt_tokens"] or 0)
+        completion_tokens = int(usage["completion_tokens"] or 0)
+        cost = usage["cost_usd"]
+        if cost is None and price is not None:
+            cost = (prompt_tokens * price["input"] + completion_tokens * price["output"]) / 1e6
+        if cost is None and self.spend is not None and self.spend.remaining() is not None:
+            raise BackendError(f"API response for {model_key} has no cost or configured price")
+        cost = float(cost or 0.0)
+        if self.spend is not None:
             self.spend.charge(cost, self.policy_id)
         try:
             choice = response["choices"][0]
@@ -141,16 +167,17 @@ class APIPolicy:
             raise BackendError("API returned an invalid chat response") from exc
         return ChatReply(
             content=message.get("content") or "",
-            thinking=message.get("reasoning_content"),
+            thinking=message.get("reasoning_content", message.get("reasoning")),
             tool_calls=calls,
             termination={
                 "stop": Termination.STOP,
                 "tool_calls": Termination.STOP,
                 "length": Termination.LENGTH,
+                "content_filter": Termination.ERROR,
             }.get(choice.get("finish_reason"), Termination.ERROR),
             usage=Usage(
-                prompt_tokens=int(usage["prompt_tokens"] or 0),
-                completion_tokens=int(usage["completion_tokens"] or 0),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
                 cached_prompt_tokens=(
                     None
                     if usage["cached_prompt_tokens"] is None

@@ -105,7 +105,11 @@ async def test_termination(wire: tuple, reason: str, termination: Termination) -
     responses.append(httpx.Response(200, json=response(reason)))
     sample = await VLLMPolicy(
         "p", "http://local", "m", renderer_name="fake", trainable=True, client=client
-    ).sample(FakeRenderer().encode_text("p"), SamplingSpec(10), seed=1)
+    ).sample(
+        FakeRenderer().encode_text("p"),
+        SamplingSpec(10, stop_token_ids=FakeRenderer().stop_token_ids),
+        seed=1,
+    )
     assert sample.termination == termination
 
 
@@ -125,15 +129,58 @@ async def test_malformed_response_fails_without_retry(wire: tuple, malformed: st
     with pytest.raises(BackendError):
         await VLLMPolicy(
             "p", "http://local", "m", renderer_name="fake", trainable=True, client=client
-        ).sample(FakeRenderer().encode_text("p"), SamplingSpec(10), seed=1)
+        ).sample(
+            FakeRenderer().encode_text("p"),
+            SamplingSpec(10, stop_token_ids=FakeRenderer().stop_token_ids),
+            seed=1,
+        )
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("token_ids", True),
+        ("token_ids", 1.5),
+        ("token_ids", "1"),
+        ("token_ids", None),
+        ("token_logprobs", float("nan")),
+        ("token_logprobs", float("inf")),
+        ("token_logprobs", -float("inf")),
+        ("token_logprobs", "-0.5"),
+        ("token_logprobs", None),
+        ("token_logprobs", True),
+    ],
+)
+async def test_invalid_token_values_fail_without_retry(
+    wire: tuple, monkeypatch: pytest.MonkeyPatch, field: str, value: Any
+) -> None:
+    client, requests, responses = wire
+    data = response()
+    choice = data["choices"][0]
+    (choice if field == "token_ids" else choice["logprobs"])[field][0] = value
+    responses.append(httpx.Response(200, content=json.dumps(data)))
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    with pytest.raises(BackendError, match="integers|finite numbers"):
+        await VLLMPolicy(
+            "p", "http://local", "m", renderer_name="fake", trainable=True, client=client
+        ).sample(
+            FakeRenderer().encode_text("p"),
+            SamplingSpec(10, stop_token_ids=FakeRenderer().stop_token_ids),
+            seed=1,
+        )
+    assert len(requests) == 1
+    sleep.assert_not_called()
 
 
 @pytest.mark.parametrize(
     "failure",
     [
         httpx.ConnectError("connection lost"),
-        httpx.ReadTimeout("timed out"),
+        httpx.RemoteProtocolError("connection lost"),
+        httpx.ReadError("connection lost"),
+        httpx.WriteError("connection lost"),
         httpx.Response(503, text="unavailable"),
     ],
 )
@@ -152,14 +199,54 @@ async def test_bounded_retries(
     )
     if recover:
         assert (
-            await policy.sample(FakeRenderer().encode_text("p"), SamplingSpec(10), seed=1)
+            await policy.sample(
+                FakeRenderer().encode_text("p"),
+                SamplingSpec(10, stop_token_ids=FakeRenderer().stop_token_ids),
+                seed=1,
+            )
         ).termination == Termination.STOP
     else:
         with pytest.raises(BackendError, match="connection lost|timed out|unavailable"):
-            await policy.sample(FakeRenderer().encode_text("p"), SamplingSpec(10), seed=1)
+            await policy.sample(
+                FakeRenderer().encode_text("p"),
+                SamplingSpec(10, stop_token_ids=FakeRenderer().stop_token_ids),
+                seed=1,
+            )
     assert len(requests) == 3
     assert requests[0].content == requests[1].content == requests[2].content
     assert [call.args for call in sleep.call_args_list] == [(1.0,), (2.0,)]
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        httpx.ReadTimeout,
+        httpx.ConnectTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+        httpx.LocalProtocolError,
+        httpx.UnsupportedProtocol,
+    ],
+)
+async def test_other_transport_errors_are_not_retried(
+    wire: tuple, monkeypatch: pytest.MonkeyPatch, error_type: type[httpx.TransportError]
+) -> None:
+    client, requests, responses = wire
+    error = error_type("failure")
+    responses.append(error)
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    with pytest.raises(BackendError) as caught:
+        await VLLMPolicy(
+            "p", "http://local", "m", renderer_name="fake", trainable=True, client=client
+        ).sample(
+            FakeRenderer().encode_text("p"),
+            SamplingSpec(10, stop_token_ids=FakeRenderer().stop_token_ids),
+            seed=1,
+        )
+    assert caught.value.__cause__ is error
+    assert len(requests) == 1
+    sleep.assert_not_called()
 
 
 @pytest.mark.parametrize("status", [400, 401, 404, 429])
@@ -169,8 +256,44 @@ async def test_4xx_immediate_server_message(wire: tuple, status: int) -> None:
     with pytest.raises(BackendError, match=f"HTTP {status}.*prompt too long"):
         await VLLMPolicy(
             "p", "http://local", "m", renderer_name="fake", trainable=True, client=client
-        ).sample(FakeRenderer().encode_text("p"), SamplingSpec(10), seed=1)
+        ).sample(
+            FakeRenderer().encode_text("p"),
+            SamplingSpec(10, stop_token_ids=FakeRenderer().stop_token_ids),
+            seed=1,
+        )
     assert len(requests) == 1
+
+
+async def test_http_status_error_uses_exception_response_and_truncates(wire: tuple) -> None:
+    client, requests, responses = wire
+    request = httpx.Request("POST", "http://local/v1/completions")
+    error = httpx.HTTPStatusError(
+        "bad request",
+        request=request,
+        response=httpx.Response(400, text="x" * 500 + "truncated tail", request=request),
+    )
+    responses.append(error)
+    with pytest.raises(BackendError) as caught:
+        await VLLMPolicy(
+            "p", "http://local", "m", renderer_name="fake", trainable=True, client=client
+        ).sample(
+            FakeRenderer().encode_text("p"),
+            SamplingSpec(10, stop_token_ids=FakeRenderer().stop_token_ids),
+            seed=1,
+        )
+    assert str(caught.value) == "vLLM sampling failed: HTTP 400: " + "x" * 500
+    assert caught.value.__cause__ is error
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("trainable", [False, True])
+async def test_empty_stop_ids_rejected_before_request(wire: tuple, trainable: bool) -> None:
+    client, requests, _ = wire
+    with pytest.raises(ConfigError, match="non-empty stop_token_ids"):
+        await VLLMPolicy(
+            "p", "http://local", "m", renderer_name="fake", trainable=trainable, client=client
+        ).sample(FakeRenderer().encode_text("p"), SamplingSpec(10), seed=1)
+    assert not requests
 
 
 @pytest.mark.parametrize(

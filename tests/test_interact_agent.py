@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pytest
 from _marli_test_envs import ArithEnv, ScratchEnv
@@ -210,6 +211,8 @@ async def test_compaction_drops_pending_observation_and_starts_summary_segment()
         tools=("submit", "write_scratchpad"),
         context=ContextSpec(kind="compaction", compact_threshold=1000, compact_reserve=512),
     )
+    cfg = Limits()
+    cfg.session.carry_max_tokens = 256  # the summary cap must fit in compact_reserve
     spec = spec_for(
         {
             "solver0": [
@@ -219,6 +222,7 @@ async def test_compaction_drops_pending_observation_and_starts_summary_segment()
             ]
         },
         protocol,
+        limits=cfg,
     )
     episode, buffers = await run_episode(spec)
     assert [call.purpose for call in episode.calls] == [Purpose.ACT, Purpose.COMPACT, Purpose.ACT]
@@ -228,7 +232,7 @@ async def test_compaction_drops_pending_observation_and_starts_summary_segment()
     ]
     assert episode.segments[1].carry_from == episode.segments[0].segment_id
     compact_prompt = spec.policies["script"].calls[1].prompt_text
-    assert "Write a self-contained summary" in compact_prompt
+    assert "summary you write in this reply" in compact_prompt
     assert "ok: scratchpad" not in compact_prompt
     new_prompt = spec.policies["script"].calls[2].prompt_text
     assert "We found five." in new_prompt and "What is 2+3?" in new_prompt
@@ -496,6 +500,7 @@ async def test_compaction_can_discard_delta_that_would_exceed_context_cap() -> N
     )
     cfg = Limits()
     cfg.ctx.max_ctx = 1800
+    cfg.session.carry_max_tokens = 256
     spec = spec_for(
         {
             "solver0": [
@@ -572,7 +577,7 @@ async def test_last_session_forces_final_and_tail_is_observation() -> None:
     assert episode.limits_hit["solver0"] == ("session.max_sessions",)
 
 
-async def test_factory_receives_tool_context_and_renderers_are_fresh(
+async def test_tools_receive_call_context_and_renderers_are_fresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from marli.interact.tools import TOOLS
@@ -589,10 +594,8 @@ async def test_factory_receives_tool_context_and_renderers_are_fresh(
         control = False
         spec = ToolSpec("context_tool", "Context", {"properties": {}})
 
-        def __init__(self, ctx: ToolCtx) -> None:
-            seen.append(ctx)
-
         async def __call__(self, ctx: ToolCtx) -> ToolResult:
+            seen.append(ctx)
             return ToolResult(ctx.agent_id)
 
     monkeypatch.setattr("marli.interact.agent.TOOLS", registry)
@@ -605,10 +608,11 @@ async def test_factory_receives_tool_context_and_renderers_are_fresh(
         return renderer
 
     protocol = RuntimeProtocol(tools=("submit", "context_tool"), count=2)
-    spec = spec_for({"solver0": [submit()], "solver1": [submit()]}, protocol)
+    probe = Turn(tool_calls=(("context_tool", {}),))
+    spec = spec_for({"solver0": [probe, submit()], "solver1": [probe, submit()]}, protocol)
     spec.renderers["script"] = factory
     await run_episode(spec)
-    assert [ctx.agent_id for ctx in seen] == ["solver0", "solver1"]
+    assert sorted(ctx.agent_id for ctx in seen) == ["solver0", "solver1"]
     assert len(made) == 3 and len({id(renderer) for renderer in made}) == 3
 
 
@@ -697,3 +701,28 @@ async def test_no_tool_delivery_uses_user_message() -> None:
         if ctx.meta.agent_id == "solver0" and ctx.meta.call_index == 1
     )
     assert "⟨user⟩[workspace] solver1" in ctx.prompt_text
+
+
+async def test_role_permissions_restrict_reads() -> None:
+    from marli.interact.workspace import Permissions
+
+    protocol = RuntimeProtocol(tools=("submit", "write_scratchpad", "read_scratchpad"), count=2)
+    protocol.role = replace(protocol.role, permissions=Permissions(read_others=False))
+    spec = spec_for(
+        {
+            "solver0": [
+                Turn(tool_calls=(("write_scratchpad", {"content": "secret"}),)),
+                Turn(tool_calls=(("write_scratchpad", {"content": "more"}),)),
+                submit(),
+            ],
+            "solver1": [
+                Turn(tool_calls=(("write_scratchpad", {"content": "mine"}),)),
+                Turn(tool_calls=(("read_scratchpad", {"agent_id": "solver0"}),)),
+                submit(),
+            ],
+        },
+        protocol,
+    )
+    episode, _ = await run_episode(spec)
+    assert not any(read.writer == "solver0" for call in episode.calls for read in call.reads)
+    assert "secret" not in spec.policies["script"].calls[-1].prompt_text
