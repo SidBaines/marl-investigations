@@ -420,3 +420,25 @@ def test_failed_open_releases_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(rundir_module, "atomic_write_text", real_write)
     with run_dir(tmp_path) as recovered:
         assert recovered.status is RunStatus.FRESH
+
+
+def test_explicit_reopen_preserves_identity_rows_and_lock(tmp_path: Path) -> None:
+    with run_dir(tmp_path) as run:
+        run.append_row("rows.jsonl", {"id": 1})
+        run.finalize(RowsHandle(root=tmp_path))
+        record = run.path(".marli/run.json").read_bytes()
+        run.reopen()
+        assert run.status is RunStatus.RESUME
+        assert not run.path(RowsHandle.MANIFEST).exists()
+        assert run.path(".marli/run.json").read_bytes() == record
+        with pytest.raises(RunDirLockedError):
+            run_dir(tmp_path).open()
+    with pytest.raises(HashMismatchError):
+        run_dir(tmp_path, seed=2).open()
+    with run_dir(tmp_path) as run:
+        assert run.status is RunStatus.RESUME
+        assert run.read_rows("rows.jsonl") == [{"id": 1}]
+        run.append_row("rows.jsonl", {"id": 2})
+        run.finalize(RowsHandle(root=tmp_path))
+    with run_dir(tmp_path) as run:
+        assert run.status is RunStatus.COMPLETE

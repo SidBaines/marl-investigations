@@ -90,6 +90,9 @@ async def test_build_manifest_and_rows(tmp_path: Path, source: LoaderFixture) ->
     assert handle.inputs == ()
     assert handle.meta == {
         "task_kind": "math",
+        "n_raw": 8,
+        "n_duplicates": 0,
+        "n_conflicting_dropped": 0,
         "counts": {"loaded": 8, "kept": 8, "dropped_exact": 0, "dropped_ngram": 0},
     }
     tasks = read_tasks(handle)
@@ -171,15 +174,15 @@ async def test_decontamination(
     assert saved["exclude"] == str(excluded.manifest_path)
 
 
-async def test_exclusion_follows_source_sampling(tmp_path: Path, source: LoaderFixture) -> None:
+async def test_max_n_applies_after_exclusion(tmp_path: Path, source: LoaderFixture) -> None:
     excluded = exclusion(tmp_path, ["Synthetic item 0"])
     result = await run_verb(
         "data build",
         BuildConfig(source="synthetic", max_n=2, exclude=str(excluded.manifest_path)),
         out=tmp_path / "out",
     )
-    assert [task.task_id for task in read_tasks(result.handle)] == ["synthetic/1"]
-    assert result.handle.meta["counts"]["loaded"] == 2
+    assert [task.task_id for task in read_tasks(result.handle)] == ["synthetic/1", "synthetic/2"]
+    assert result.handle.meta["counts"]["loaded"] == 8
 
 
 def test_build_cli_idempotency(
@@ -235,3 +238,42 @@ async def test_resume_after_task_rows_are_saved(
 def test_invalid_config(kwargs: dict[str, Any]) -> None:
     with pytest.raises(ConfigError):
         BuildConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "prompt", ["Synthetic item 0.", "SYNTHETIC $item 0$!", r"Synthetic \(item 0\)"]
+)
+async def test_exact_decontamination_ignores_punctuation_and_latex(
+    tmp_path: Path,
+    source: LoaderFixture,
+    prompt: str,
+) -> None:
+    excluded = exclusion(tmp_path, [prompt])
+    result = await run_verb(
+        "data build",
+        BuildConfig(source="synthetic", max_n=2, exclude=str(excluded.root)),
+        out=tmp_path / "out",
+    )
+    assert [task.task_id for task in read_tasks(result.handle)] == ["synthetic/1", "synthetic/2"]
+    assert result.handle.meta["counts"]["dropped_exact"] == 1
+
+
+async def test_loader_deduplication_metadata_is_retained(
+    tmp_path: Path,
+    source: LoaderFixture,
+) -> None:
+    rows, _ = source
+    path = build_module.SOURCES.path("synthetic")
+    settings = yaml.safe_load(path.read_text())
+    path.write_text(yaml.safe_dump({**settings, "dedupe": True}))
+    rows[:] = [
+        {"question": "same", "answer": "1"},
+        {"question": "same", "answer": "1"},
+        {"question": "conflict", "answer": "1"},
+        {"question": "conflict", "answer": "2"},
+    ]
+    result = await run_verb("data build", BuildConfig(source="synthetic"), out=tmp_path / "out")
+    assert result.handle.meta["n_raw"] == 4
+    assert result.handle.meta["n_duplicates"] == 2
+    assert result.handle.meta["n_conflicting_dropped"] == 1
+    assert [task.prompt for task in read_tasks(result.handle)] == ["same"]

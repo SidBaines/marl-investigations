@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 import pytest
 from test_eval_rollout import json_rows
 
+from marli.cli.main import main
 from marli.eval.report import Report, ReportConfig
 from marli.eval.score import Scores
 from marli.rundir import RunStatus
@@ -66,10 +68,11 @@ async def test_report_table_compute_paired_lift_and_idempotence(tmp_path: Path) 
     assert candidate["compute"]["total_gen"] == {"mean": 20, "p50": 20, "p90": 20}
     lift = candidate["paired_lift"]
     assert lift["n_tasks"] == 4 and lift["difference"] == lift["low"] == lift["high"] == 1
-    assert lift["mcnemar_p"] == 0.125
+    assert lift["permutation_p"] == 0.125
+    assert lift["mcnemar_p"] is None and lift["test"] == "sign_flip"
     table = result.handle.file("markdown").read_text()
     assert "Tasks | Episodes" in table and "95% CI" in table
-    assert "1.000 [0.676, 1.000]" in table
+    assert "1.000 [1.000, 1.000]" in table
     assert "20.0/20.0/20.0" in table and "+1.000 [+1.000, +1.000]" in table
     assert "within-harness" in table and "critical-path tokens" in table
     assert Report.load(result.manifest).n_cells == 2
@@ -111,3 +114,33 @@ async def test_report_unknown_group_and_baseline_fail(tmp_path: Path) -> None:
             replace(cfg, group_by=["protocol"], baseline="absent"),
             out=tmp_path / "badbaseline",
         )
+
+
+def test_cli_reports_multiple_labelled_scores(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    combined = make_scores(tmp_path / "combined")
+    sources = []
+    for label in ("base", "candidate"):
+        root = tmp_path / label
+        root.mkdir()
+        rows = [row for row in json_rows(combined.file("rows")) if row["protocol"] == label]
+        (root / "scores.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+        scores = Scores(root=root, rows="scores.jsonl", n=len(rows))
+        scores.save()
+        sources.append(f"{label}={scores.manifest_path}")
+    args = [
+        "eval",
+        "report",
+        f"scores={os.pathsep.join(sources)}",
+        "baseline=base",
+        "--out",
+        str(tmp_path / "report"),
+    ]
+    assert main(args) == 0
+    output = capsys.readouterr().out.splitlines()
+    assert len(output) == 1
+    payload = json.loads(output[0])
+    assert payload["n_cells"] == 2 and any("failed" in msg for msg in payload["warnings"])
+    candidate = json_rows(tmp_path / "report" / "results.jsonl")[1]
+    assert candidate["paired_lift"]["difference"] == 1

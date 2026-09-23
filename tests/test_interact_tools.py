@@ -157,9 +157,7 @@ async def test_list_scratchpads(ctx: ToolCtx) -> None:
 async def test_list_omits_only_own_never_written_pad(ctx: ToolCtx, staged: bool) -> None:
     ctx.workspace.staged = staged
     tool = TOOLS.get("list_scratchpads")()
-    assert await run_tool(tool, ctx, {}) == ToolResult(
-        "bob v0 (0 chars): ", control={"reads": []}
-    )
+    assert await run_tool(tool, ctx, {}) == ToolResult("bob v0 (0 chars): ", control={"reads": []})
     await run_tool(TOOLS.get("write_scratchpad")(), ctx, {"content": ""})
     assert await run_tool(tool, ctx, {}) == ToolResult(
         "alice v1 (0 chars): \nbob v0 (0 chars): ", control={"reads": []}
