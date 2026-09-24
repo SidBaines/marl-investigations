@@ -1,0 +1,15 @@
+name: deepcoder
+hf_id: agentica-org/DeepCoder-Preview-Dataset
+subsets: [primeintellect, taco, lcbv5, codeforces]
+split: train
+kind: code
+fields: {prompt: problem}
+answer_format: tests
+test_format: deepcoder
+license: mit
+commit_text: false
+dedupe: true
+notes: >-
+  Keep the first parseable row per Unicode/whitespace-normalized problem.
+  Record empty-test, malformed-test and duplicate row counts.
+  Upstream Codeforces exposes only test; requesting its train split fails loudly.

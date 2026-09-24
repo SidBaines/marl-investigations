@@ -1,0 +1,14 @@
+name: lcb_v6
+hf_id: livecodebench/code_generation_lite
+data_files: test6.jsonl
+split: test
+kind: code
+fields: {id: question_id, prompt: question_content, difficulty: difficulty}
+answer_format: tests
+test_format: lcb
+license: cc
+commit_text: false
+filters: {contest_date_min: "2025-02-01", contest_date_max: "2025-05-01"}
+notes: >-
+  Inclusive contest-date window. Public examples are included in the full test
+  bundle; private tests are decoded with a restricted unpickler.
