@@ -24,6 +24,9 @@ from marli.serve.vllm import Server, VLLMServeConfig, launch_args
 from marli.verbs import run_verb
 
 ROOT = Path(__file__).resolve().parents[1]
+requires_loopback = pytest.mark.skipif(
+    os.environ.get("MARLI_TEST_NO_NETWORK") == "1", reason="builder forbids host network use"
+)
 
 
 def free_port() -> int:
@@ -57,6 +60,7 @@ def http_server(tmp_path: Path, *, detach: bool = False) -> Supervisor:
     )
 
 
+@requires_loopback
 async def test_supervisor_ready_tee_stop(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     old = signal.getsignal(signal.SIGTERM)
     child = http_server(tmp_path)
@@ -73,6 +77,7 @@ async def test_supervisor_ready_tee_stop(tmp_path: Path, capsys: pytest.CaptureF
     child.stop()
 
 
+@requires_loopback
 async def test_supervisor_crash_includes_last_50_lines(tmp_path: Path) -> None:
     child = Supervisor(
         [
@@ -93,6 +98,7 @@ async def test_supervisor_crash_includes_last_50_lines(tmp_path: Path) -> None:
     assert not process_alive(child.pid)
 
 
+@requires_loopback
 async def test_supervisor_deadline_and_missing_python(tmp_path: Path) -> None:
     child = Supervisor(
         [sys.executable, "-c", "import time; print('starting', flush=True); time.sleep(30)"],
@@ -113,6 +119,7 @@ async def test_supervisor_deadline_and_missing_python(tmp_path: Path) -> None:
         await child.start()
 
 
+@requires_loopback
 async def test_stop_kills_stubborn_descendant(tmp_path: Path) -> None:
     port = free_port()
     pid_file = tmp_path / "worker.pid"
@@ -152,6 +159,7 @@ def python_env() -> dict[str, str]:
 
 
 @pytest.mark.parametrize("mode", ["exit", "term", "detach"])
+@requires_loopback
 def test_parent_exit_cleanup_and_detached_survival(tmp_path: Path, mode: str) -> None:
     port = free_port()
     pid_file = tmp_path / "child.pid"
@@ -221,6 +229,8 @@ def test_vllm_argv_env_and_runtime_hash() -> None:
         "32",
         "--tensor-parallel-size",
         "1",
+        "--seed",
+        "0",
         "--port",
         "8000",
         "--host",
@@ -257,6 +267,7 @@ def test_validation_before_launch(overrides: dict, match: str) -> None:
         )
 
 
+@requires_loopback
 async def test_server_roundtrip_and_serve_detach(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -290,6 +301,7 @@ async def test_server_roundtrip_and_serve_detach(
             os.killpg(Server.load(tmp_path / "serve").pid, signal.SIGKILL)
 
 
+@requires_loopback
 async def test_cli_status_and_stop(tmp_path: Path) -> None:
     child = http_server(tmp_path)
     await child.start()
@@ -350,6 +362,7 @@ assert not {'torch', 'peft', 'vllm', 'transformers', 'datasets'} & sys.modules.k
 
 
 @pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+@requires_loopback
 def test_foreground_manifest_ready_then_signal_stops_group(tmp_path: Path, signum: int) -> None:
     port = free_port()
     (tmp_path / "v1").mkdir()
@@ -400,6 +413,7 @@ assert result.handle.pid > 1
             os.killpg(child_pid, signal.SIGKILL)
 
 
+@requires_loopback
 async def test_foreground_reports_post_ready_crash(tmp_path: Path) -> None:
     child = http_server(tmp_path)
     await child.start()
@@ -409,6 +423,7 @@ async def test_foreground_reports_post_ready_crash(tmp_path: Path) -> None:
     assert not process_alive(child.pid)
 
 
+@requires_loopback
 async def test_cancelled_start_cleans_up(tmp_path: Path) -> None:
     child = Supervisor(
         [sys.executable, "-c", "import time; time.sleep(30)"],

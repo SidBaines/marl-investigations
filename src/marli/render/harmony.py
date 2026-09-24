@@ -196,6 +196,15 @@ class HarmonyRenderer:
                         arguments = json.loads(raw)
                     except (ValueError, RecursionError):
                         arguments = None
+                        # Native code tools emit an unquoted body, under either
+                        # `code` or `<|constrain|>code` headers. Only an unambiguous
+                        # single string parameter can receive that body verbatim.
+                        spec = specs.get(name)
+                        properties = spec.parameters.get("properties", {}) if spec else {}
+                        if len(properties) == 1:
+                            parameter, schema = next(iter(properties.items()))
+                            if schema.get("type") == "string":
+                                arguments = {parameter: raw}
                     ok = name in specs and isinstance(arguments, dict)
                     calls.append(
                         ParsedToolCall(

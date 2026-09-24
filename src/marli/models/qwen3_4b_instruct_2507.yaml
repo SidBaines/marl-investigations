@@ -9,3 +9,4 @@ thinking: false
 tool_format: qwen3_json
 local: unverified
 notes: "Retired on Tinker 2026-06-12."
+lora: {}

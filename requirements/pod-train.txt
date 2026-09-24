@@ -1,11 +1,20 @@
-# Learner-only CUDA 12.8 environment. vLLM gets its own venv, pinned separately
-# in requirements/pod-vllm.txt (M4-2); align its torch/CUDA ABI before pod tests.
-# The repository lock's torch 2.14 default uses CUDA 13, so do not reuse it here.
---extra-index-url https://download.pytorch.org/whl/cu128
-torch==2.10.0+cu128
+# H100 / CUDA >= 13.0. Default PyPI torch wheel is cu130; keep vLLM separate.
+torch==2.14.0
 transformers==5.5.4
 peft==0.21.0
 accelerate==1.15.0
 safetensors==0.8.0
-# Optional flash-attn: build against this torch/CUDA stack on the pod.
-# The learner defaults to PyTorch SDPA and does not require flash-attn.
+tokenizers==0.22.2
+flash-linear-attention==0.5.2
+fla-core==0.5.2
+einops==0.8.2
+triton==3.8.0
+openai-harmony==0.0.8
+numpy==2.5.3
+httpx
+pyyaml
+omegaconf
+jinja2
+huggingface-hub==1.32.0
+# Do not install kernels>=0.13: incompatible with transformers 5.5.4.
+# causal-conv1d has no cu130 wheel; the torch fallback is sufficient.
