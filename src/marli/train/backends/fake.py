@@ -71,9 +71,17 @@ class FakeLearner:
             learner=self.name,
             n_datums=len(datums),
             n_tokens=sum(len(d.tokens) - 1 for d in datums),
-            n_action_tokens=sum(d.n_action_tokens for d in datums),
-            loss=-sum(m * a for d in datums for m, a in zip(d.mask, d.advantages, strict=True)),
-            kl_sample_train=0.0,
+            n_action_tokens=(
+                sum(m > 0 for d in datums for m in d.mask)
+                if self.spec.loss == "cross_entropy"
+                else sum(d.n_action_tokens for d in datums)
+            ),
+            loss=(
+                -sum(m for d in datums for m in d.mask)
+                if self.spec.loss == "cross_entropy"
+                else -sum(m * a for d in datums for m, a in zip(d.mask, d.advantages, strict=True))
+            ),
+            kl_sample_train=None if self.spec.loss == "cross_entropy" else 0.0,
         )
 
     def policy(self, *, policy_id: str | None = None) -> ScriptedPolicy:

@@ -71,6 +71,22 @@ Manifest produced: `taskset.json`.
 | min_episodes | int | 2 | false | false | false |  |
 | metric | str | correct | false | false | false | system grade; max_wall_s failures count as zero |
 
+### data sft
+
+Build exact-token SFT datums from rejection-filtered teacher episodes.
+
+Manifest produced: `sft.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| episodes | str \| None | null | false | false | true | teacher EpisodeSet (eval rollout with record_tokens=true) |
+| require_correct | bool | true | false | false | false |  |
+| require_ok | bool | true | false | false | false |  |
+| roles | tuple[str, ...] | [] | false | false | false |  |
+| require_conformant | bool | true | false | false | false |  |
+| student_model | str |  | false | false | false |  |
+| max_len | int \| None | null | false | false | false |  |
+
 ### eval grid
 
 Run labelled rollout/score cells and combine their compute-aware report.
@@ -250,7 +266,7 @@ Manifest produced: `checkpoint.json`.
 | limits.spawn.max_depth | int | 1 | false | false | false | spawn depth (v1: workers cannot spawn) |
 | limits.ctx.max_ctx | int | 32768 | false | false | false | max prompt+completion tokens in one segment; <= model and backend max_seq_len |
 | limits.on_exhaust | str | force_final | false | false | false | force_final \| none |
-| limits.on_no_tool_call | str | nudge | false | false | false | what to do when a turn makes no tool call: nudge \| end_agent \| final_text_as_answer |
+| limits.on_no_tool_call | str | nudge | false | false | false | no-tool turn: nudge \| end_agent \| final_text_as_answer \| final_text_continue |
 | limits.max_nudges | int | 2 | false | false | false | consecutive nudges before the agent is ended |
 | limits.tool_output_chars | int | 8000 | false | false | false | tool results are truncated (head+tail) to this many chars |
 | schedule | str | lockstep | false | false | false |  |
@@ -264,6 +280,35 @@ Manifest produced: `checkpoint.json`.
 | concurrency | int | 16 | false | true | false | concurrent episodes |
 | max_usd | float \| None | null | false | true | false | spend guard (sampling + training) |
 | base_url | str \| None | null | false | true | false | Tinker base URL (explicit) |
+
+### train sft
+
+Warm-start a student with cross-entropy and resumable token batches.
+
+Manifest produced: `checkpoint.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| data | str \| None | null | false | false | true | SFTSet |
+| learner.base_model | str |  | false | false | false | models registry name (marli list models) |
+| learner.backend | str | tinker | false | false | false | tinker \| local \| fake |
+| learner.rank | int | 32 | false | false | false |  |
+| learner.learning_rate | float | 1e-05 | false | false | false |  |
+| learner.beta1 | float | 0.9 | false | false | false |  |
+| learner.beta2 | float | 0.95 | false | false | false |  |
+| learner.eps | float | 1e-08 | false | false | false |  |
+| learner.weight_decay | float | 0.0 | false | false | false |  |
+| learner.grad_clip | float | 0.0 | false | false | false |  |
+| learner.loss | str | cross_entropy | false | false | false | importance_sampling \| ppo (RL) \| cross_entropy (SFT) |
+| learner.init_from | str \| None | null | false | false | false | checkpoint manifest (state) to resume/warm-start |
+| epochs | int | 1 | false | false | false |  |
+| batch_tokens | int | 65536 | false | false | false |  |
+| seed | int | 0 | false | false | false |  |
+| checkpoint_every | int | 50 | false | false | false |  |
+| run_name | str |  | false | false | false |  |
+| loss_agg | str | token_sum | false | false | false | token_sum \| mean_per_token (batch action tokens) |
+| max_usd | float \| None | null | false | true | false |  |
+| base_url | str \| None | null | false | true | false |  |
 
 ### view
 
