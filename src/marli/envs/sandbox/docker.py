@@ -124,9 +124,11 @@ class DockerSandboxConfig:
         for name in ("allow_network", "read_only_root"):
             if type(getattr(self, name)) is not bool:
                 raise ConfigError(f"{name} must be a boolean")
-        user = self.user.partition(":")[0]
-        if user == "root" or (user.isdecimal() and int(user) == 0):
-            raise ConfigError("sandbox user must not be root")
+        # Require an explicit numeric non-root uid:gid (names and an empty user
+        # fall back to /etc/passwd or the image default, which may be root).
+        match = re.fullmatch(r"([0-9]+):([0-9]+)", self.user)
+        if match is None or int(match[1]) == 0 or int(match[2]) == 0:
+            raise ConfigError("sandbox user must be a numeric non-root uid:gid, e.g. 65534:65534")
         if self.network == "host" or self.network.startswith(("container:", "ns:")):
             raise ConfigError("host and shared-namespace networking are forbidden")
         if self.network != "none" and not self.allow_network:

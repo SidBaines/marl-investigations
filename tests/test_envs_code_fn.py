@@ -879,5 +879,20 @@ async def test_prelude_preserves_builtin_modular_pow(functional: bool) -> None:
     assert (await CodeFnEnv({}, task).grade(source))["pass_all"] == 1
 
 
+@pytest.mark.usefixtures("sandbox_host")
+async def test_prelude_matches_lcb_star_imports() -> None:
+    # Names LCB's import_string provides without an import (sys, copy, json,
+    # statistics, random, re, ...) must resolve for stdin solutions too. Shadowing
+    # follows LCB's order: e.g. `sub` is operator.sub, as under LCB.
+    task = code_task(functional=False)
+    task.answer["tests"] = [{"input": "3\n", "output": "3 [1] 2 3 True True"}]
+    source = (
+        "n = int(stdin.readline())\n"
+        "print(n, deepcopy([1]), loads('2'), int(mean([2, 4])), "
+        "callable(randint), findall('a', 'aa') == ['a', 'a'])\n"
+    )
+    assert (await CodeFnEnv({}, task).grade(source))["pass_all"] == 1
+
+
 def test_training_tolerance_rejects_decimal_arithmetic_overflow() -> None:
     assert not _stdio_matches("1e999999999", "0", 0.01)

@@ -33,17 +33,31 @@ from marli.render.base import ToolSpec
 logger = logging.getLogger(__name__)
 
 _MAX_SOURCE_BYTES = 1 << 20
+# LiveCodeBench's `import_string` (lcb_runner/evaluation/testing_util.py), in its
+# order (later star-imports shadow earlier ones; builtins and typing come last),
+# so unimported names that pass under LCB pass here. The recursion limit is
+# higher than LCB's 50000 (deep recursions pass here that LCB may reject).
 _LCB_PRELUDE = """\
-from typing import *
-from functools import *
+from string import *
+from re import *
+from datetime import *
 from collections import *
-from itertools import *
 from heapq import *
 from bisect import *
+from copy import *
 from math import *
+from random import *
+from statistics import *
+from itertools import *
+from functools import *
+from operator import *
+from io import *
+from sys import *
+from json import *
 from builtins import *
-import math, string, re, sys, random, copy, operator
-import collections, itertools, functools, heapq, bisect
+from typing import *
+import string, re, datetime, collections, heapq, bisect, copy, math, random
+import statistics, itertools, functools, operator, io, sys, json
 sys.setrecursionlimit(600000)
 """
 
