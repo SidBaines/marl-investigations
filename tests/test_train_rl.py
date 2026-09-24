@@ -27,7 +27,7 @@ from marli.render.fake import FakeRenderer
 from marli.train import loop
 from marli.train.checkpoint import Checkpoint, resolve_checkpoint_ref
 from marli.train.rl import TrainRLConfig
-from marli.train.types import CreditConfig
+from marli.train.types import CreditConfig, LearnerSpec
 from marli.verbs import run_verb
 
 
@@ -113,7 +113,7 @@ async def test_tinker_context_checked_before_backend(
 ) -> None:
     model = replace(load_model("qwen3_8b"), max_ctx=1024, tinker_max_ctx=1024)
     monkeypatch.setattr(loop, "load_model", lambda name: model)
-    cfg = config(make_taskset(tmp_path / "tasks"))
+    cfg = config(make_taskset(tmp_path / "tasks"), max_usd=1)
     for learner in cfg.learners.values():
         learner.backend = "tinker"
     with pytest.raises(ConfigError, match="ctx.max_ctx"):
@@ -214,3 +214,104 @@ async def test_eval_rollout_with_checkpoint_seat(tmp_path: Path, fake_setup: Fak
         out=tmp_path / "eval",
     )
     assert result.handle.n == 1
+
+
+@pytest.mark.parametrize("fraction", [-0.1, 1.1, float("nan"), float("inf")])
+def test_failed_fraction_validation(fraction: float) -> None:
+    with pytest.raises(ConfigError, match="max_failed_frac"):
+        TrainRLConfig(max_failed_frac=fraction)
+
+
+@pytest.mark.parametrize("backend", ["tinker", "local"])
+def test_paid_learners_require_budget(backend: str) -> None:
+    with pytest.raises(ConfigError, match="paid learners require max_usd"):
+        TrainRLConfig(learners={"a": LearnerSpec(backend=backend)})
+
+
+async def test_rl_rejects_cross_entropy_before_backend(
+    tmp_path: Path, fake_setup: FakeSetup
+) -> None:
+    cfg = config(make_taskset(tmp_path / "tasks"))
+    cfg.learners["a"].loss = "cross_entropy"
+    with pytest.raises(ConfigError, match="use train sft"):
+        await run_verb("train rl", cfg, out=tmp_path / "train")
+    assert not fake_setup.backends
+
+
+@pytest.mark.parametrize("missing_manifest", [False, True])
+async def test_init_from_validation_precedes_all_backends(
+    tmp_path: Path, fake_setup: FakeSetup, missing_manifest: bool
+) -> None:
+    path = tmp_path / "warm"
+    if not missing_manifest:
+        Checkpoint(root=path, step=0, learners={}, run_config_hash="warm").save()
+    cfg = config(make_taskset(tmp_path / "tasks"))
+    cfg.learners["b"].init_from = str(path)
+    message = "no checkpoint" if missing_manifest else "no learner 'b'"
+    with pytest.raises(ConfigError, match=message):
+        await run_verb("train rl", cfg, out=tmp_path / "train")
+    assert not fake_setup.backends
+
+
+@pytest.mark.parametrize("suffix", ["#learner=b", "#step=0&learner=b"])
+async def test_frozen_training_seat_selects_checkpoint_learner(
+    tmp_path: Path, fake_setup: FakeSetup, suffix: str
+) -> None:
+    taskset = make_taskset(tmp_path / "tasks")
+    warm = tmp_path / "warm"
+    await run_verb("train rl", config(taskset, steps=1), out=warm)
+    cfg = config(taskset, steps=1)
+    cfg.learners.pop("b")
+    cfg.seating["b"] = f"ckpt:{warm}{suffix}"
+    result = await run_verb("train rl", cfg, out=tmp_path / "train")
+    assert set(result.handle.learners) == {"a"}
+    assert all(
+        c.policy_version is None
+        for e, _ in read_episodes(result.handle.root / "rollouts/step_00000", with_tokens=False)
+        for c in e.calls
+        if c.role == "b"
+    )
+
+
+async def test_training_provenance_uses_marli_checkout_outside_cwd(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import marli
+    from marli.runlog import GitInfo
+
+    expected = Path(marli.__file__).resolve().parent
+    checked: list[Path | None] = []
+
+    def git_info(repo_dir: Path | None = None) -> GitInfo:
+        checked.append(repo_dir)
+        return GitInfo("checkout", repo_dir != expected)
+
+    cfg = config(make_taskset(tmp_path / "tasks"), steps=1)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MARLI_ALLOW_DIRTY")
+    monkeypatch.setattr(loop.runlog, "git_info", git_info)
+    result = await run_verb("train rl", cfg, out=tmp_path / "train")
+    assert expected in checked
+    assert result.handle.meta["provenance"]["git_commit"] == "checkout"
+    assert result.handle.meta["provenance"]["git_dirty"] is False
+
+
+def test_all_failed_cli_returns_backend_error(
+    tmp_path: Path,
+    fake_setup: FakeSetup,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg = config(make_taskset(tmp_path / "tasks"), steps=1)
+    original = loop.run_episode
+
+    async def failed(spec: Any) -> Any:
+        episode, buffers = await original(spec)
+        return replace(episode, ok=False, grades={}), buffers
+
+    monkeypatch.setattr(loop, "run_episode", failed)
+    path = save(cfg, tmp_path / "config.yaml")
+    with pytest.warns(UserWarning, match="2/2 episodes failed"):
+        assert main(["train", "rl", str(path), "--out", str(tmp_path / "train")]) == 5
+    output = json.loads(capsys.readouterr().out)
+    assert not output["ok"] and output["exit_code"] == 5

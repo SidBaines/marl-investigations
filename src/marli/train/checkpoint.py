@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar, NotRequired, TypedDict
+from typing import Any, ClassVar, NotRequired, Self, TypedDict
 
 from marli.errors import ConfigError
 from marli.handles import Handle, register_handle
@@ -45,6 +45,14 @@ class Checkpoint(Handle):
     rae_state: dict[str, Any] = field(default_factory=dict)
     data_cursor: dict[str, Any] = field(default_factory=dict)
     history: list[SavedStep] = field(default_factory=list)
+
+    @classmethod
+    def load(cls, path: str | Path) -> Self:
+        """Report missing checkpoints as configuration errors for every consumer."""
+        try:
+            return super().load(path)
+        except FileNotFoundError as exc:
+            raise ConfigError(f"no checkpoint at {str(path)!r}") from exc
 
     def require_state(self, learner: str) -> str:
         record = self._record(learner)
@@ -99,9 +107,13 @@ def resolve_checkpoint_ref(ref: PolicyRef, learner: str | None) -> str:
         raise ConfigError(f"expected ckpt policy ref, got {ref.kind!r}")
     checkpoint = Checkpoint.load(Path(ref.target))
     step = ref.step if isinstance(ref.step, int) else None
+    learner = learner if learner is not None else ref.learner
     if learner is None:
         names = checkpoint._records(step)
         if len(names) != 1:
-            raise ConfigError("checkpoint must have exactly one learner or specify learner")
+            raise ConfigError(
+                "checkpoint must have exactly one learner or specify learner "
+                f"with #learner=<name>; learners: {sorted(names)}"
+            )
         learner = next(iter(names))
     return checkpoint.policy_ref(learner, step)

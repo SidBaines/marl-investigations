@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -33,6 +34,7 @@ class TrainRLConfig:
     checkpoint_every: int = 5
     seed: int = 0
     allow_idle: bool = False
+    max_failed_frac: float = 0.5
     run_name: str = ""
     concurrency: int = runtime_field(16, help="concurrent episodes")
     max_usd: float | None = runtime_field(None, help="spend guard (sampling + training)")
@@ -46,6 +48,8 @@ class TrainRLConfig:
             raise ConfigError("seed must be an integer")
         if self.schedule not in {"lockstep", "async"}:
             raise ConfigError("schedule must be lockstep or async")
+        if not isfinite(self.max_failed_frac) or not 0 <= self.max_failed_frac <= 1:
+            raise ConfigError("max_failed_frac must be finite and in [0, 1]")
         for name in (self.run_name, *self.learners):
             if name and (
                 name in {".", ".."}
@@ -70,6 +74,10 @@ class TrainRLConfig:
                 raise ConfigError("base_url must be an HTTP URL without credentials or query")
         for spec in self.learners.values():
             spec.__post_init__()
+            if spec.loss == "cross_entropy":
+                raise ConfigError("train rl does not support cross_entropy; use train sft")
+            if spec.backend in {"tinker", "local"} and self.max_usd is None:
+                raise ConfigError("paid learners require max_usd")
         for sampling in self.frozen_sampling.values():
             sampling.__post_init__()
         self.credit.__post_init__()
