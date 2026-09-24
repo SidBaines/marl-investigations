@@ -1,0 +1,5 @@
+run_name: marli-smoke-coord-shared
+protocol: coordinator_default
+learners:
+  shared: {base_model: qwen3_5_4b, backend: tinker, rank: 32, learning_rate: 1.0e-5}
+seating: {coordinator: "learner:shared", worker: "learner:shared"}

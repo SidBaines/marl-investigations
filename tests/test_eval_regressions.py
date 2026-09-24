@@ -24,6 +24,7 @@ from marli.eval.grid import CellSpec, GridConfig, RolloutDefaults
 from marli.eval.grid import rollout_config as cell_config
 from marli.eval.policies import PolicySpec
 from marli.eval.report import ReportConfig
+from marli.eval.rollout import EpisodeSet
 from marli.eval.score import ScoreConfig, Scores
 from marli.eval.stats import bootstrap_mean, paired_comparison, sign_flip_p, wilson_ci
 from marli.eval.store import read_episodes
@@ -481,3 +482,24 @@ async def test_grid_preserves_forced_run_spend_after_interrupted_checkpoint(
     result = await run_verb("eval grid", replace(changed, force_cells=[]), out=out)
     assert result.handle.n_cells == 1
     assert json.loads((out / "progress.json").read_text())["cost_usd"] == pytest.approx(1.2)
+
+
+async def test_referenced_scores_do_not_draw_on_grid_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A rerun grid reuses a baseline's saved Scores; that baseline was paid for
+    # by another run, so only the newly sampled cells count against max_usd.
+    install_charging(monkeypatch, lambda meta: None)
+    common = RolloutDefaults(**vars(rollout_config(make_taskset(tmp_path / "tasks", 2))))
+    store = tmp_path / "first"
+    await run_verb("eval grid", GridConfig(cells=[CellSpec("base")], common=common), out=store)
+    base_cost = EpisodeSet.load(store / "cells" / "base" / "rollout").cost_usd
+    assert base_cost > 0
+    rerun = GridConfig(
+        cells=[CellSpec("base", scores=str(store / "cells" / "base" / "score")), CellSpec("new")],
+        common=common,
+        baseline="base",
+        max_usd=base_cost * 1.2,  # enough for "new" alone, not for base + new
+    )
+    result = await run_verb("eval grid", rerun, out=tmp_path / "rerun")
+    assert result.handle.n_cells == 2

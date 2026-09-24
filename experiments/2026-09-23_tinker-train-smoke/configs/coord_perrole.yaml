@@ -1,0 +1,6 @@
+run_name: marli-smoke-coord-perrole
+protocol: coordinator_default
+learners:
+  coord: {base_model: qwen3_5_4b, backend: tinker, rank: 32, learning_rate: 1.0e-5}
+  work: {base_model: qwen3_5_4b, backend: tinker, rank: 32, learning_rate: 1.0e-5}
+seating: {coordinator: "learner:coord", worker: "learner:work"}
