@@ -143,6 +143,12 @@ def test_dangerous_extra_args_are_rejected(args: list[str]) -> None:
         {"network": "host", "allow_network": True},
         {"network": "bridge"},
         {"network": "container:other", "allow_network": True},
+        {"network": "ns:/proc/1/ns/net", "allow_network": True},
+        {"user": "root"},
+        {"user": "0"},
+        {"user": "0:0"},
+        {"user": "root:users"},
+        {"user": "000:65534"},
         {"cpus": 0},
         {"cpus": float("nan")},
         {"pids": 0},
@@ -327,7 +333,9 @@ async def test_copy_roundtrip_overwrite_reset(sandbox: DockerSandbox, fake_docke
     assert list(workspace(fake_docker, sandbox).iterdir()) == []
     with pytest.raises(FileNotFoundError):
         await sandbox.read_file("missing")
-    assert any(call[0] == "cp" for call in calls(fake_docker))
+    assert not any(call[0] == "cp" for call in calls(fake_docker))
+    assert any(call[:2] == ["exec", "-i"] for call in calls(fake_docker))
+    assert any(call[2:4] == ["cat", "--"] for call in calls(fake_docker))
 
 
 async def test_reset_interrupts_running_exec(sandbox: DockerSandbox, fake_docker: Path) -> None:
@@ -627,3 +635,61 @@ else:
     pid = (await real_docker.read_file("child")).strip()
     result = await real_docker.exec(f"test ! -d /proc/{pid}", timeout_s=3)
     assert result.exit_code == 0
+
+
+@pytest.mark.parametrize(
+    "content", ["", "nul\0héllo\n", "é" * 100_000], ids=["empty", "binary", "large"]
+)
+async def test_exec_file_io_transports_bytes_and_literal_paths(
+    sandbox: DockerSandbox,
+    fake_docker: Path,
+    content: str,
+) -> None:
+    name = "-nested/$(touch injected); 'quoted'\nfile\n"
+    await sandbox.write_file(name, content)
+    assert await sandbox.read_file(name) == content
+    assert not (workspace(fake_docker, sandbox) / "injected").exists()
+    assert not any(call[0] == "cp" for call in calls(fake_docker))
+
+
+async def test_exec_file_read_is_capped(fake_docker: Path) -> None:
+    sandbox = DockerSandbox(DockerSandboxConfig(max_output_bytes=100))
+    await sandbox.start()
+    try:
+        await sandbox.write_file("big", "é" * 50)
+        assert await sandbox.read_file("big") == "é" * 50
+        await sandbox.write_file("big", "é" * 51)
+        with pytest.raises(ValueError, match="max_output_bytes"):
+            await sandbox.read_file("big")
+        await sandbox.write_file("big", "é" * 100_000)
+        with pytest.raises(ValueError, match="max_output_bytes"):
+            await sandbox.read_file("big")
+        await sandbox.write_file("big", "recovered")
+        assert await sandbox.read_file("big") == "recovered"
+    finally:
+        await sandbox.close()
+
+
+async def test_internal_symlinks_are_rejected(sandbox: DockerSandbox, fake_docker: Path) -> None:
+    root = workspace(fake_docker, sandbox)
+    await sandbox.write_file("sub/target", "unchanged")
+    (root / "link").symlink_to("sub/target")
+    (root / "dirlink").symlink_to("sub", target_is_directory=True)
+    for name in ("link", "dirlink/target"):
+        with pytest.raises(ValueError):
+            await sandbox.read_file(name)
+        with pytest.raises(ValueError):
+            await sandbox.write_file(name, "bad")
+    assert await sandbox.read_file("sub/target") == "unchanged"
+
+
+async def test_file_reads_reject_invalid_utf8(sandbox: DockerSandbox) -> None:
+    result = await sandbox.exec(
+        ["python3", "-c", "open('invalid', 'wb').write(bytes([255]))"],
+        timeout_s=3,
+    )
+    assert result.exit_code == 0
+    with pytest.raises(UnicodeDecodeError):
+        await sandbox.read_file("invalid")
+    await sandbox.write_file("valid", "a�b")
+    assert await sandbox.read_file("valid") == "a�b"

@@ -110,6 +110,8 @@ def main(args: list[str]) -> int:
             command,
             cwd=root / "workspace",
             start_new_session=True,
+            # exec -i passes the Docker client's byte stream unchanged, including
+            # NULs and empty input; other exec calls have no stdin.
             stdin=None if interactive else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -119,6 +121,8 @@ def main(args: list[str]) -> int:
 
         def forward(source: BinaryIO, target: BinaryIO) -> None:
             while data := source.read1(65536):
+                if "marli-file" in command and target is sys.stdout.buffer:
+                    data = data.replace(str(root / "workspace").encode(), workdir.encode())
                 target.write(data)
                 target.flush()
 
@@ -135,20 +139,8 @@ def main(args: list[str]) -> int:
         # Keep the pgid until explicit cleanup: a shell can exit leaving children.
         return rc if rc >= 0 else 128 - rc
     if verb == "cp":
-        source, destination = args
-
-        def path(value: str) -> Path:
-            if ":" not in value:
-                return Path(value)
-            cid, container_path = value.split(":", 1)
-            root = state / cid
-            workdir = json.loads((root / "metadata.json").read_text())["workdir"]
-            if container_path.startswith("/tmp/"):
-                return root / "tmp" / str(Path(container_path).relative_to("/tmp"))
-            return root / "workspace" / str(Path(container_path).relative_to(workdir))
-
-        shutil.copy2(path(source), path(destination), follow_symlinks=False)
-        return 0
+        sys.stderr.write("docker cp is unavailable for the read-only rootfs/tmpfs workspace\n")
+        return 1
     raise ValueError(f"unhandled fake docker command: {verb}")
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ import pytest
 from _marli_code_fixtures import SUM_SOLUTION, code_task
 from test_envs_sandbox import sandbox_host  # noqa: F401
 
-from marli.envs.code_fn import CodeFnEnv, CodeFnEnvConfig
+from marli.envs.code_fn import CodeFnEnv, CodeFnEnvConfig, _stdio_matches
 from marli.envs.registry import make_env
 from marli.envs.sandbox.base import ExecResult
 from marli.envs.sandbox.subprocess import SubprocessSandbox
@@ -80,6 +81,14 @@ async def test_vote_equivalence_errors(a: str | None, b: str | None) -> None:
         {"memory_mb": 0},
         {"memory_mb": True},
         {"memory_mb": 2.5},
+        {"max_grade_s": 0},
+        {"max_grade_s": float("inf")},
+        {"max_grade_s": True},
+        {"stop_on_first_failure": 1},
+        {"float_tol": -1},
+        {"float_tol": float("nan")},
+        {"float_tol": float("inf")},
+        {"float_tol": True},
     ],
 )
 def test_invalid_config(kwargs: dict[str, Any]) -> None:
@@ -212,7 +221,10 @@ async def test_scripted_policy_full_loop_writes_tests_and_submits() -> None:
         "timeouts": 0.0,
         "correct": 1.0,
     }
-    assert episode.grades == {"solver0": expected, "_system": expected}
+    assert episode.grades["solver0"] == episode.grades["_system"]
+    assert episode.grades["_system"].items() >= expected.items()
+    assert episode.grades["_system"]["grade_truncated"] == 0
+    assert episode.grades["_system"]["python_major"] == 3
     assert len(episode.calls) == 2 and buffers
     assert env.sandbox is None
 
@@ -225,7 +237,7 @@ async def test_scripted_policy_full_loop_writes_tests_and_submits() -> None:
         ("print(9)\n", 1 / 3, 1.0, 0.0),  # First test fails; later success still counts.
         ("this is invalid python!\n", 0.0, 0.0, 0.0),
         ("raise RuntimeError('no')\n", 0.0, 1.0, 0.0),
-        ("while True: pass\n", 0.0, 1.0, 3.0),
+        ("while True: pass\n", 0.0, 1.0, 1.0),
         ("print('{\"pass_all\": 1}')\n", 0.0, 1.0, 0.0),
     ],
 )
@@ -238,14 +250,19 @@ async def test_grading_components(
         assert env.sandbox is not None
         await env.sandbox.write_file("solution.py", solution)
         grade = await env.grade(solution)
-        assert grade == {
-            "pass_all": float(fraction == 1),
-            "correct": float(fraction == 1),
-            "pass_frac": fraction,
-            "compiled": compiled,
-            "n_tests": 3.0,
-            "timeouts": timeouts,
-        }
+        assert (
+            grade.items()
+            >= {
+                "pass_all": float(fraction == 1),
+                "correct": float(fraction == 1),
+                "pass_frac": fraction,
+                "compiled": compiled,
+                "n_tests": 3.0,
+                "timeouts": timeouts,
+            }.items()
+        )
+        assert grade["grade_truncated"] == float(timeouts > 0)
+        assert grade["python_major"] == 3
     finally:
         await env.teardown()
 
@@ -285,6 +302,7 @@ async def test_submit_snapshots_source_and_grade_never_reads_agent_workspace(
     [
         "def add(a, b):\n    return a + b\n",
         "class Solution:\n    def add(self, a, b):\n        print('debug')\n        return a + b\n",
+        "class Solution: pass\ndef add(a, b):\n    return a + b\n",
     ],
 )
 async def test_functional_and_leetcode_method(solution: str) -> None:
@@ -304,7 +322,7 @@ async def test_functional_and_leetcode_method(solution: str) -> None:
     [
         ("  1\t  2 \r\n 3   \n\n", 1),
         ("1 2\n3", 1),
-        ("1 2\n\n 3", 1),
+        ("1 2\n\n 3", 0),
         ("1 2 3\n", 0),
         ("1 2\n4", 0),
     ],
@@ -591,3 +609,275 @@ async def test_saved_code_episode_regrades_from_source(tmp_path: Path) -> None:
     row = json.loads(result.handle.file("rows").read_text())
     assert row["correct"] == 1 and row["own_correct"] == {"solver0": 1}
     assert rollout.handle.file("episodes").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "actual,expected,matches",
+    [
+        ("1.0", "1", True),
+        ("1.50", "1.5", True),
+        ("-0", "0", True),
+        ("1e3", "1000", True),
+        ("0.1 0.2", "0.10 0.20", True),
+        ("3 4", "3  4", True),
+        ("a  b", "a b", False),
+        ("1\n\n2", "1\n2", False),
+        ("1\n\n2", "1.0\n\n2.0", True),
+        ("Yes", "yes", False),
+        ("1\r\n2\r\n", "1\n2", True),
+        ("\n\n5\n\n", "5", True),
+        ("5 ", "5", True),
+        ("", "\n", True),
+        ("1 2", "1 2 3", False),
+        ("NaN", "1", False),
+        ("sNaN", "nan", False),
+        ("100000000000000000000000000001", "100000000000000000000000000000", False),
+    ],
+)
+def test_lcb_decimal_and_line_semantics(actual: str, expected: str, matches: bool) -> None:
+    assert _stdio_matches(actual, expected, None) == matches
+
+
+@pytest.mark.usefixtures("sandbox_host")
+@pytest.mark.parametrize(
+    "source,expected,functional",
+    [
+        ("import sys; sys.stderr.write('x' * 2_000_000); print('ok')", "ok", False),
+        (
+            "print('\\n'.join(str(i) for i in range(200000)))",
+            "\n".join(str(i) for i in range(200000)),
+            False,
+        ),
+        ("print('ok'); exit()", "ok", False),
+        ("print('ok'); quit()", "ok", False),
+        (
+            "assert sys.flags.isolated and __file__ == 'solution.py' "
+            "and __name__ == '__main__'; print('ok')",
+            "ok",
+            False,
+        ),
+        ("from __future__ import annotations\nprint('ok')", "ok", False),
+        (
+            "class Solution:\n    def add(self, a: List[int], b: Optional[int]):\n"
+            "        return sum(a) + b",
+            "6",
+            True,
+        ),
+        ("def add(a, b):\n    print('x' * 2_000_000)\n    return sum(a) + b", "6", True),
+        ("def add(a, b):\n    return tuple(a + [b])", "[1, 2, 3]", True),
+        (
+            "def depth(n): return 0 if n == 0 else 1 + depth(n - 1)\nprint(depth(5000))",
+            "5000",
+            False,
+        ),
+        (
+            "def depth(n): return 0 if n == 0 else 1 + depth(n - 1)\n"
+            "def add(a, b): return depth(5000)",
+            "5000",
+            True,
+        ),
+        ("print(Counter([1, 1])[1] + bisect_left([0, 1], 1) + factorial(3))", "9", False),
+    ],
+    ids=[
+        "stderr",
+        "large-output",
+        "exit",
+        "quit",
+        "isolated",
+        "future-import",
+        "bare-annotations",
+        "functional-debug",
+        "tuple-json",
+        "stdin-recursion",
+        "functional-recursion",
+        "prelude",
+    ],
+)
+async def test_correct_solutions_with_lcb_harness(
+    source: str,
+    expected: str,
+    functional: bool,
+) -> None:
+    task = code_task(functional=functional)
+    task.answer["tests"] = [{"input": "[1, 2]\n3" if functional else "", "output": expected}]
+    result = await CodeFnEnv({}, task).grade(source)
+    assert result["pass_all"] == 1
+    assert result["python_major"] == 3
+    assert result["python_minor"] >= 10
+    assert result["python_micro"] >= 0
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_stdout_truncation_cannot_pass_even_if_head_tail_match() -> None:
+    task = code_task()
+    task.answer["tests"] = [{"input": "", "output": "a" * (1 << 20)}]
+    env = CodeFnEnv({}, task)
+    # The expected output determines a larger cap, but output past it still fails.
+    assert env._grader_output_bytes == 2 * (1 << 20) + (64 << 10)
+    assert (await env.grade("print('a' * 5_000_000)"))["pass_all"] == 0
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_float_tolerance_is_opt_in_and_only_for_stdio() -> None:
+    task = code_task()
+    task.answer["tests"] = [{"input": "", "output": "1.5"}]
+    assert (await CodeFnEnv({}, task).grade("print(1.5001)"))["pass_all"] == 0
+    assert (await CodeFnEnv({"float_tol": 0.001}, task).grade("print(1.5001)"))["pass_all"] == 1
+    task = code_task(functional=True)
+    task.answer["tests"] = [{"input": "1\n2", "output": "1.5"}]
+    result = await CodeFnEnv({"float_tol": 0.001}, task).grade("def add(a,b): return 1.5001")
+    assert result["pass_all"] == 0
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_grade_memo_counts_starts_and_returns_independent_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starts = 0
+    original = SubprocessSandbox.start
+
+    async def counted(sandbox: SubprocessSandbox) -> None:
+        nonlocal starts
+        starts += 1
+        await original(sandbox)
+
+    monkeypatch.setattr(SubprocessSandbox, "start", counted)
+    env = CodeFnEnv({}, code_task())
+    first, second = await asyncio.gather(env.grade(SUM_SOLUTION), env.grade(SUM_SOLUTION))
+    assert first == second and starts == 1
+    first["pass_all"] = 0
+    assert (await env.grade(SUM_SOLUTION))["pass_all"] == 1
+    assert starts == 1
+    assert (await env.grade("print(9)"))["pass_frac"] == 1 / 3
+    assert starts == 2
+    assert (await CodeFnEnv({}, code_task()).grade(SUM_SOLUTION))["pass_all"] == 1
+    assert starts == 3
+
+
+@pytest.mark.usefixtures("sandbox_host")
+@pytest.mark.parametrize("early_stop,fraction", [(False, 1 / 3), (True, 0)])
+async def test_stop_on_first_failure_preserves_denominator(
+    early_stop: bool,
+    fraction: float,
+) -> None:
+    env = CodeFnEnv({"stop_on_first_failure": early_stop}, code_task())
+    result = await env.grade("print(9)")
+    assert result["pass_frac"] == fraction and result["n_tests"] == 3
+    assert result["grade_truncated"] == float(early_stop)
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_timeout_stops_before_later_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = SubprocessSandbox.exec
+    inputs: list[str] = []
+
+    async def record(sandbox: SubprocessSandbox, cmd: Any, **kwargs: Any) -> ExecResult:
+        if kwargs.get("stdin") is not None:
+            inputs.append(kwargs["stdin"])
+        return await original(sandbox, cmd, **kwargs)
+
+    monkeypatch.setattr(SubprocessSandbox, "exec", record)
+    result = await CodeFnEnv({"timeout_per_test_s": 0.5}, code_task()).grade("while True: pass")
+    assert len(inputs) == 1
+    assert result["timeouts"] == 1 and result["grade_truncated"] == 1
+    assert result["pass_frac"] == 0 and result["n_tests"] == 3
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_grade_wall_budget_preserves_completed_tests_and_cleans_up() -> None:
+    env = CodeFnEnv({"max_grade_s": 2, "timeout_per_test_s": 10}, code_task())
+    source = "import time\na,b = map(int, input().split())\nif a == 4: time.sleep(10)\nprint(a+b)"
+    started = time.monotonic()
+    result = await env.grade(source)
+    assert time.monotonic() - started < 4
+    assert result["grade_truncated"] == 1 and result["n_tests"] == 3
+    assert result["pass_frac"] == 1 / 3 and result["compiled"] == 1
+    assert not env._graders
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_grade_wall_budget_includes_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = SubprocessSandbox.start
+    paths: list[Path] = []
+
+    async def slow_start(sandbox: SubprocessSandbox) -> None:
+        await original(sandbox)
+        paths.append(sandbox.workdir)
+        await asyncio.sleep(10)
+
+    monkeypatch.setattr(SubprocessSandbox, "start", slow_start)
+    env = CodeFnEnv({"max_grade_s": 0.5}, code_task())
+    result = await env.grade(SUM_SOLUTION)
+    assert result["grade_truncated"] == 1 and result["compiled"] == 0
+    assert paths and all(not path.exists() for path in paths)
+    assert not env._graders
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_submit_size_limit_counts_utf8_bytes_and_allows_retry() -> None:
+    env = CodeFnEnv({}, code_task())
+    await env.setup()
+    try:
+        assert env.sandbox is not None
+        tool = env.tools("solver")[1]
+        limit = 1 << 20
+        await env.sandbox.write_file("solution.py", "#" * limit)
+        assert (await run_tool(tool, context(env.sandbox), {})).control["submit"] == "#" * limit
+        await env.sandbox.write_file("solution.py", "é" * (limit // 2 + 1))
+        result = await run_tool(tool, context(env.sandbox), {})
+        assert result.error and "1 MiB" in result.error and not result.control
+        await env.sandbox.write_file("solution.py", SUM_SOLUTION)
+        assert (await run_tool(tool, context(env.sandbox), {})).control == {"submit": SUM_SOLUTION}
+    finally:
+        await env.teardown()
+
+
+def test_no_public_examples_are_not_advertised() -> None:
+    task = code_task()
+    task.answer["public"] = []
+    message = CodeFnEnv({}, task).task_message("solver")
+    assert "examples/" not in message and "public examples" not in message
+    assert "numpy is not available" in message
+    assert "examples/NN.in" in CodeFnEnv({}, code_task()).task_message("solver")
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_code_consensus_is_rejected_before_any_llm_call() -> None:
+    renderer = FakeRenderer()
+    task = code_task()
+    policy = ScriptedPolicy("script", renderer, turns_by_agent(renderer, {}))
+    spec = EpisodeSpec(
+        SwarmProtocol(SwarmConfig(n_agents=2, aggregation="finalizer", stop_on_consensus=2)),
+        CodeFnEnv({}, task),
+        task,
+        {"peer": "script", "finalizer": "script"},
+        {"script": policy},
+        {"script": FakeRenderer},
+        Limits(),
+    )
+    with pytest.raises(ConfigError, match="stop_on_consensus.*code_fn"):
+        await run_episode(spec)
+    assert not policy.calls
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_large_functional_unicode_output_fits_expected_byte_cap() -> None:
+    task = code_task(functional=True)
+    task.answer["tests"] = [
+        {"input": "1\n2", "output": json.dumps("é" * 600_000, ensure_ascii=False)}
+    ]
+    result = await CodeFnEnv({}, task).grade("def add(a, b): return 'é' * 600_000")
+    assert result["pass_all"] == 1
+
+
+@pytest.mark.usefixtures("sandbox_host")
+@pytest.mark.parametrize("functional", [False, True])
+async def test_prelude_preserves_builtin_modular_pow(functional: bool) -> None:
+    task = code_task(functional=functional)
+    task.answer["tests"] = [{"input": "2\n10" if functional else "", "output": "2"}]
+    source = "def add(a, b): return pow(a, b, 7)" if functional else "print(pow(2, 10, 7))"
+    assert (await CodeFnEnv({}, task).grade(source))["pass_all"] == 1
+
+
+def test_training_tolerance_rejects_decimal_arithmetic_overflow() -> None:
+    assert not _stdio_matches("1e999999999", "0", 0.01)

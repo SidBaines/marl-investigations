@@ -4,6 +4,8 @@ The runtime owns forced finalization at the episode's max_ticks (or stops
 without an answer for on_exhaust=none). Aggregation waits for those results,
 including exhaustion results whose ended_by is not 'submit'. A separate
 finalizer reads the committed latest pads only after every peer has finished.
+Peers share one environment sandbox (one solution.py for code_fn); separate
+code sandboxes for the N-independent baseline are future work.
 """
 
 from __future__ import annotations
@@ -181,6 +183,8 @@ class SwarmProtocol(Protocol):
     async def run(self, io: SystemIO) -> Outcome:
         if self.config.aggregation == "vote" and not io.env.supports_vote:
             raise ConfigError(f"vote aggregation is undefined for {io.env.name}")
+        if self.config.stop_on_consensus and not io.env.supports_vote:
+            raise ConfigError(f"stop_on_consensus is undefined for {io.env.name}")
         handles = [
             await io.start_agent(
                 "peer",

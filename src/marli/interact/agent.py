@@ -91,6 +91,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
+from copy import copy
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
@@ -180,8 +181,10 @@ def role_tools(
     for name in dict.fromkeys(names):
         if name in available:
             tool = available[name]
-            if name in TOOLS.names():
-                tool.control = tool.control or TOOLS.get(name)().control
+            if name in TOOLS.names() and not tool.control and TOOLS.get(name)().control:
+                tool = copy(tool)
+                # Env tools may be frozen records; alter only this role's copy.
+                object.__setattr__(tool, "control", True)
             resolved.append(tool)
         elif name in TOOLS.names():
             resolved.append(TOOLS.get(name)())

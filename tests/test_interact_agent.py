@@ -1610,3 +1610,33 @@ async def test_env_submit_overrides_builtin_once_and_retains_control() -> None:
     assert len(episode.calls) == 1 and not episode.workspace_log
     assert episode.calls[0].tool_calls[1].error
     assert protocol.results[0].ended_by == "submit"
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+async def test_role_tools_does_not_mutate_shared_environment_override(frozen: bool) -> None:
+    from dataclasses import dataclass
+
+    from marli.interact.agent import role_tools
+    from marli.interact.context import ContextSpec, make_context_manager
+
+    @dataclass(frozen=frozen)
+    class EnvSubmit:
+        control: bool = False
+        shared: bool = True
+        blocking: bool = True
+        spec = ToolSpec("submit", "Save.", {"type": "object", "properties": {}})
+
+        async def __call__(self, ctx: ToolCtx) -> ToolResult:
+            return ToolResult("saved", control={"submit": "source"})
+
+    original = EnvSubmit()
+    role = RoleSpec("solver", ("submit", "submit"), "Solve.")
+    ctx = ToolCtx("solver0", "solver", None, 0, None, None, None, None, None)
+    context = make_context_manager(ContextSpec(), Limits())
+    for _ in range(2):
+        (resolved,) = role_tools(role, [original], context, ctx)
+        assert resolved is not original and resolved.control
+        assert resolved.shared and resolved.blocking
+        assert resolved.spec == original.spec
+        assert (await resolved(ctx)).control == {"submit": "source"}
+        assert original.control is False
