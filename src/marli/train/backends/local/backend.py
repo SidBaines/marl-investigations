@@ -157,11 +157,20 @@ class LocalBackend:
             raise ConfigError("learner rank exceeds server max_lora_rank")
         if len(self.learners) + 2 > server.max_loras:
             raise ConfigError("max_loras must reserve one slot beyond the learner count")
-        state = (
-            Checkpoint.load(spec.init_from).require_state(name)
-            if spec.init_from is not None
-            else None
-        )
+        # Like Tinker: a checkpoint manifest restores its recorded sampler version
+        # (a resume continues the version sequence the datums were sampled under).
+        state, version = None, 0
+        if spec.init_from is not None:
+            checkpoint = Checkpoint.load(spec.init_from)
+            state = checkpoint.require_state(name)
+            record = checkpoint.learners[name]
+            if record["backend"] != "local":
+                raise ConfigError("local init_from requires a backend=local checkpoint")
+            if record["base_model"] != model.name:
+                raise ConfigError("local checkpoint base_model does not match the model")
+            if record["rank"] != spec.rank:
+                raise ConfigError("local checkpoint rank does not match learner.rank")
+            version = record["version"]
 
         # M4-1 owns torch/PEFT construction, training and checkpoint I/O. Its
         # constructors are synchronous; no heavy import occurs before validation.
@@ -184,7 +193,7 @@ class LocalBackend:
         self.learners[name] = learner
         if state is not None:
             await learner.load_state(state)
-            await self._publish(learner, f"{self._owner}-{name}-init", version=0)
+            await self._publish(learner, f"{self._owner}-{name}-init", version=version)
         return learner
 
     async def _request(self, endpoint: str, body: dict[str, object]) -> httpx.Response:

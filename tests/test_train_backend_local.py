@@ -345,7 +345,7 @@ async def test_concurrent_publications_increase_versions(local: tuple) -> None:
     assert learner.policy().model == "run-x-s2" and learner.version == 2
 
 
-async def test_init_from_publishes_restored_weights_at_version_zero(local: tuple) -> None:
+async def test_init_from_publishes_restored_weights_at_the_recorded_version(local: tuple) -> None:
     backend, calls, _ = local
     checkpoint = Checkpoint(
         root=backend.adapters_dir.parent / "checkpoint",
@@ -370,10 +370,49 @@ async def test_init_from_publishes_restored_weights_at_version_zero(local: tuple
         "x", spec, model=replace(load_model(spec.base_model), renderer="fake"), seed=1
     )
     assert learner.loaded == [(str(checkpoint.root / "state"), True)]
-    assert learner.version == 0
+    # A resume continues the checkpoint's version sequence (train rl asserts it).
+    assert learner.version == 2 and learner.policy().policy_version == 2
     assert learner.policy().model.endswith("-x-init")
     assert calls[0].url.path == "/v1/load_lora_adapter"
-    assert (await learner.sync_sampler("run-x-s3")).version == 1
+    assert (await learner.sync_sampler("run-x-s3")).version == 3
+
+
+@pytest.mark.parametrize(
+    "record,match",
+    [
+        ({"backend": "tinker"}, "backend=local"),
+        ({"rank": 8}, "rank"),
+        ({"base_model": "qwen3_5_9b"}, "base_model"),
+    ],
+)
+async def test_init_from_rejects_mismatched_checkpoints(
+    local: tuple, record: dict[str, Any], match: str
+) -> None:
+    backend, _, _ = local
+    checkpoint = Checkpoint(
+        root=backend.adapters_dir.parent / "checkpoint",
+        step=2,
+        run_config_hash="hash",
+        learners={
+            "x": {
+                "state": "state",
+                "sampler": None,
+                "version": 2,
+                "base_model": "qwen3_5_4b",
+                "backend": "local",
+                "rank": 16,
+                **record,
+            }
+        },
+    )
+    checkpoint.save()
+    spec = LearnerSpec(
+        base_model="qwen3_5_4b", backend="local", rank=16, init_from=str(checkpoint.manifest_path)
+    )
+    with pytest.raises(ConfigError, match=match):
+        await backend.create_learner(
+            "x", spec, model=replace(load_model(spec.base_model), renderer="fake"), seed=1
+        )
 
 
 async def test_close_preserves_adapters_owned_by_another_run(local: tuple) -> None:
