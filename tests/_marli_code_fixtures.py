@@ -6,6 +6,7 @@ import base64
 import json
 import pickle
 import zlib
+from pathlib import Path
 from typing import Any
 
 from marli.envs.base import Task
@@ -76,3 +77,82 @@ def code_task(*, functional: bool = False) -> Task:
         },
         {"source": "synthetic", "starter_code": "# Start here\n", "n_tests": 3},
     )
+
+
+def prime_function_row() -> dict[str, Any]:
+    return {
+        "problem": "Synthetic: echo a list, a mapping and a string.",
+        "tests": json.dumps(
+            [
+                {
+                    "type": "function_call",
+                    "fn_name": "echo",
+                    "input": [[1, 2], {"key": True}, "line\nbreak"],
+                    "output": [[[1, 2], {"key": True}, "line\nbreak"]],
+                },
+            ]
+        ),
+    }
+
+
+def taco_lines_row() -> dict[str, Any]:
+    return {
+        "problem": "Synthetic: echo two lines.",
+        "tests": json.dumps({"inputs": [["one", "two"]], "outputs": [["one", "two"]]}),
+    }
+
+
+def many_tests_row(name: str, *, n: int = 50, public: bool = True) -> dict[str, Any]:
+    tests = [{"input": str(i), "output": str(i), "testtype": "stdin"} for i in range(n)]
+    examples = [{"input": "example" * 10, "output": "example" * 10, "testtype": "stdin"}]
+    if name == "lcb_v6":
+        return {
+            **lcb_row(),
+            "public_test_cases": json.dumps(examples if public else []),
+            "private_test_cases": private_payload(json.dumps(tests)),
+        }
+    return {
+        "problem": "Synthetic: echo an integer.",
+        "tests": json.dumps(tests),
+        "public_test_cases": json.dumps(examples if public else []),
+    }
+
+
+def parquet_snapshot(root: Path, rows: dict[str, list[dict[str, Any]]]) -> Path:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    snapshot = (
+        root / "datasets--agentica-org--DeepCoder-Preview-Dataset" / "snapshots" / "synthetic"
+    )
+    for subset, values in rows.items():
+        directory = snapshot / subset
+        directory.mkdir(parents=True)
+        # Multiple shards verify stable row indices and filename ordering.
+        for index, row in enumerate(values):
+            table = pa.Table.from_pylist(
+                [{**row, "solutions": ["REFERENCE_SOLUTION_MUST_NOT_LEAK"]}]
+            )
+            pq.write_table(table, directory / f"train-{index:05d}-of-{len(values):05d}.parquet")
+    return snapshot
+
+
+MALFORMED_PICKLES = {
+    "memo_miss": b"\x80\x02h\x05.",
+    "stack_underflow": b"\x80\x02R.",
+    "mark_missing": b"\x80\x02t.",
+    "build_dict": b"(dp0\n(dp1\nS'x'\nS'y'\nsb.",
+    "setitem_on_list": b"]S'a'\nS'b'\ns.",
+    "append_on_dict": b"}K\x01a.",
+    "binbytes8_huge": b"\x80\x04\x8e" + (2**62).to_bytes(8, "little") + b".",
+    "long4_neg": b"\x80\x02\x8b\xff\xff\xff\xff.",
+    "frame_huge": b"\x80\x04\x95" + (2**60).to_bytes(8, "little") + b".",
+    "dict_unhashable_key": b"\x80\x02}]K\x01s.",
+}
+
+
+def pickle_dag(depth: int) -> list[Any]:
+    value: list[Any] = []
+    for _ in range(depth):
+        value = [value, value]
+    return value

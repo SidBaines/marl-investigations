@@ -37,7 +37,7 @@ def local_loader(
 @pytest.mark.parametrize("name", SOURCES.names())
 def test_all_source_schemas(name: str) -> None:
     source = SOURCES.load(name)
-    tasks = load_tasks(source, loader=local_loader)
+    tasks = list(load_tasks(source, loader=local_loader))
     assert tasks
     task = tasks[0]
     assert task.task_id.startswith(f"{name}/")
@@ -250,3 +250,30 @@ def test_strip_dapo_wrapper_preserves_problem_bytes(newline: str) -> None:
 )
 def test_strip_dapo_wrapper_does_not_strip_problem_content(prompt: str) -> None:
     assert strip_dapo_wrapper(prompt) == prompt
+
+
+@pytest.mark.parametrize("shuffle", [False, True])
+def test_code_loading_keeps_only_bounded_live_bundles(shuffle: bool) -> None:
+    import weakref
+
+    source = replace(SOURCES.load("deepcoder"), subsets=[], subset_splits={})
+    rows_seen = 0
+    meta: dict[str, Any] = {}
+    references = []
+
+    def loader(*args: Any, **kwargs: Any) -> Any:
+        nonlocal rows_seen
+        for i in range(100):
+            rows_seen += 1
+            yield {
+                "problem": f"Synthetic {i}",
+                "tests": json.dumps([{"input": "x" * 100_000, "output": str(i)}]),
+            }
+
+    tasks = load_tasks(source, loader=loader, shuffle=shuffle, meta=meta, max_n=5)
+    assert rows_seen == 0 and iter(tasks) is tasks
+    for task in tasks:
+        references.append(weakref.ref(task))
+        assert sum(ref() is not None for ref in references) <= 1
+    assert rows_seen == 100 and meta["n_raw"] == 100
+    assert len(references) == 5

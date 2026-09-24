@@ -31,6 +31,8 @@ class TaskSourceSpec:
     subsets: list[str] = field(default_factory=list)
     subset_splits: dict[str, str] = field(default_factory=dict)
     data_files: str | None = None
+    max_tests: int | None = None
+    max_test_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in ("math", "code"):
@@ -43,9 +45,12 @@ class TaskSourceSpec:
                 or self.subsets
                 or self.subset_splits
                 or self.data_files is not None
+                or self.max_tests is not None
+                or self.max_test_bytes is not None
             ):
                 raise ValueError(
-                    "test_format, subsets, subset_splits and data_files are code-only fields"
+                    "test_format, subsets, subset_splits, data_files and test caps "
+                    "are code-only fields"
                 )
         else:
             if self.answer_format != "tests":
@@ -74,6 +79,10 @@ class TaskSourceSpec:
                 raise ValueError("data_files must be a nonempty filename")
             if self.test_format == "lcb" and self.data_files is None:
                 raise ValueError("lcb sources require data_files")
+            for name in ("max_tests", "max_test_bytes"):
+                value = getattr(self, name)
+                if value is not None and (type(value) is not int or value <= 0):
+                    raise ValueError(f"{name} must be a positive integer or None")
         allowed = {"id", "prompt", "answer", "difficulty", "topic"}
         if not isinstance(self.fields, dict) or self.fields.keys() - allowed:
             raise ValueError(f"fields must map names from {sorted(allowed)} to columns")

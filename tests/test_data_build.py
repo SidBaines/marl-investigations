@@ -277,3 +277,54 @@ async def test_loader_deduplication_metadata_is_retained(
     assert result.handle.meta["n_duplicates"] == 2
     assert result.handle.meta["n_conflicting_dropped"] == 1
     assert [task.prompt for task in read_tasks(result.handle)] == ["same"]
+
+
+@pytest.mark.parametrize("field", ["max_tests", "max_test_bytes"])
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_invalid_code_build_caps(field: str, value: Any) -> None:
+    with pytest.raises(ConfigError, match=field):
+        BuildConfig(**{field: value})
+
+
+async def test_math_rejects_code_build_caps(tmp_path: Path, source: LoaderFixture) -> None:
+    with pytest.raises(ConfigError, match="code source"):
+        await run_verb(
+            "data build", BuildConfig(source="synthetic", max_tests=4), out=tmp_path / "out"
+        )
+
+
+async def test_code_build_records_overrides_counts_and_streams_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from functools import partial
+
+    from _marli_code_fixtures import many_tests_row
+
+    from marli.tasks.loaders import load_tasks
+
+    def rows(*args: Any, **kwargs: Any) -> Any:
+        for i in range(4):
+            yield {**many_tests_row("deepcoder", public=False), "problem": f"Synthetic {i}"}
+
+    monkeypatch.setattr(build_module, "load_tasks", partial(load_tasks, loader=rows))
+    writer = build_module.write_tasks
+
+    def streamed(directory: Path, tasks: Any) -> Path:
+        assert iter(tasks) is tasks
+        return writer(directory, tasks)
+
+    monkeypatch.setattr(build_module, "write_tasks", streamed)
+    built = await run_verb(
+        "data build",
+        BuildConfig(source="deepcoder", max_n=2, max_tests=2, max_test_bytes=3),
+        out=tmp_path / "built",
+    )
+    handle = TaskSet.load(built.manifest)
+    assert handle.n == 2
+    assert handle.meta["max_tests"] == 2 and handle.meta["max_test_bytes"] == 3
+    # 3 subsets, 4 unique prompts: only first parseable rows contribute test drops.
+    assert handle.meta["n_raw"] == 12 and handle.meta["n_duplicates"] == 8
+    assert handle.meta["n_tests_dropped_bytes"] == 160
+    assert handle.meta["n_tests_dropped_cap"] == 32
+    assert handle.meta["counts"]["loaded"] == 4
+    assert all(task.meta["n_tests"] == 2 for task in read_tasks(handle))

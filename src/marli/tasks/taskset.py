@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+import os
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, ClassVar
+from uuid import uuid4
 
 from marli.envs.base import Task
 from marli.errors import ConfigError
-from marli.handles import Handle, atomic_write_text, register_handle
+from marli.handles import Handle, register_handle
 
 
 @register_handle
@@ -56,20 +58,39 @@ class TaskSet(Handle):
 def write_tasks(dir: str | Path, tasks: Iterable[Task]) -> Path:
     """Durably replace task rows before the caller publishes a completion manifest."""
     path = Path(dir) / "tasks.jsonl"
-    atomic_write_text(
-        path,
-        "".join(json.dumps(asdict(task), ensure_ascii=False) + "\n" for task in tasks),
-    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            for task in tasks:
+                stream.write(json.dumps(asdict(task), ensure_ascii=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
     return path
 
 
-def read_tasks(taskset: TaskSet) -> list[Task]:
-    """Read every row and enforce the manifest count; atomic writes need no tail recovery."""
-    tasks = []
-    with taskset.file("tasks").open("rb") as stream:
-        for line in stream:
-            row = json.loads(line)
-            tasks.append(Task(**row))
-    if len(tasks) != taskset.n:
-        raise ConfigError(f"TaskSet row count mismatch: expected {taskset.n}, read {len(tasks)}")
-    return tasks
+def read_tasks(taskset: TaskSet, *, stream: bool = False) -> list[Task] | Iterator[Task]:
+    """Read rows and enforce the manifest count; atomic writes need no tail recovery.
+
+    ``stream=True`` bounds memory to one row and checks the count on exhaustion.
+    The default retains the list interface used by rollout and data filter.
+    """
+
+    def rows() -> Iterator[Task]:
+        count = 0
+        with taskset.file("tasks").open("rb") as file:
+            for line in file:
+                count += 1
+                yield Task(**json.loads(line))
+        if count != taskset.n:
+            raise ConfigError(f"TaskSet row count mismatch: expected {taskset.n}, read {count}")
+
+    return rows() if stream else list(rows())

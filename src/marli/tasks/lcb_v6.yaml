@@ -8,6 +8,8 @@ answer_format: tests
 test_format: lcb
 license: cc
 commit_text: false
+max_tests: null
+max_test_bytes: null
 filters: {contest_date_min: "2025-02-01", contest_date_max: "2025-05-01"}
 notes: >-
   Inclusive contest-date window. Public examples are included in the full test
