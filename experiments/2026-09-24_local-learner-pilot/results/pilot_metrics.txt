@@ -21,4 +21,4 @@ step acc  r_coord r_work zvar  gen   | coord: n  ratio_mean ratio_max kl       g
   19 0.41  0.41    0.43    4   4632 |  16 1.00000   1.314     2.97e-04   2471 |   9 1.00011   1.283     2.77e-04   1563 | 20/19     58    19
 coord: steps=20 ratio_mean mean=0.99996 min=0.99970 max=1.00035; kl mean=3.90e-04 max=6.83e-04
 work: steps=19 ratio_mean mean=1.00005 min=0.99950 max=1.00126; kl mean=3.44e-04 max=9.17e-04
-accuracy: first half 0.331, second half 0.297 (n_steps=20, 32 episodes/step)
+accuracy: first half 0.331, second half 0.297 (n_steps=20)
