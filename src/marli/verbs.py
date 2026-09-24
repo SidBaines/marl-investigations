@@ -83,6 +83,20 @@ VERBS: dict[str, VerbSpec] = {
         "server-status.json",
         "Stop the server process group, escalating after the grace period.",
     ),
+    "data sft": VerbSpec(
+        "data sft",
+        "marli.data.sft:data_sft",
+        "marli.data.sft:DataSFTConfig",
+        "sft.json",
+        "Build exact-token SFT datums from rejection-filtered teacher episodes.",
+    ),
+    "train sft": VerbSpec(
+        "train sft",
+        "marli.train.sft:train_sft",
+        "marli.train.sft:TrainSFTConfig",
+        "checkpoint.json",
+        "Warm-start a student with cross-entropy and resumable token batches.",
+    ),
     "train rl": VerbSpec(
         "train rl",
         "marli.train.loop:train_rl",

@@ -93,7 +93,12 @@ class TinkerLearner:
         if len(versions) != 1 or versions != {self.version}:
             raise ConfigError(f"datums must use current policy version {self.version}")
         n_tokens = sum(len(d.tokens) - 1 for d in datums)
-        n_action_tokens = sum(d.n_action_tokens for d in datums)
+        cross_entropy = self.spec.loss == "cross_entropy"
+        n_action_tokens = (
+            sum(m > 0 for d in datums for m in d.mask)
+            if cross_entropy
+            else sum(d.n_action_tokens for d in datums)
+        )
 
         with _sdk_errors(
             "datum/optimizer configuration", configuration=True, failures=self._failures
@@ -103,7 +108,10 @@ class TinkerLearner:
             data = [
                 tinker.Datum(
                     model_input=tinker.ModelInput.from_ints(list(d.tokens[:-1])),
-                    loss_fn_inputs={
+                    # SDK 0.30.1 coerces target lists to int64, weights to float32.
+                    loss_fn_inputs={"target_tokens": list(d.tokens[1:]), "weights": list(d.mask)}
+                    if cross_entropy
+                    else {
                         "target_tokens": list(d.tokens[1:]),
                         "logprobs": list(d.logprobs),
                         "advantages": list(d.advantages),
@@ -144,6 +152,8 @@ class TinkerLearner:
                 logprobs = output["logprobs"].tolist()
                 if len(logprobs) != len(datum.logprobs):
                     raise BackendError("Tinker training logprob length mismatch")
+                if cross_entropy:
+                    continue
                 diffs.extend(
                     sample - train
                     for sample, train, mask in zip(
@@ -162,7 +172,9 @@ class TinkerLearner:
                 n_action_tokens=n_action_tokens,
                 loss=forward_result.metrics["loss:sum"],
                 grad_norm=metrics.get("grad_norm"),
-                kl_sample_train=sum(diffs) / len(diffs) if diffs else 0.0,
+                kl_sample_train=None
+                if cross_entropy
+                else (sum(diffs) / len(diffs) if diffs else 0.0),
                 metrics=metrics,
             )
 
