@@ -167,4 +167,9 @@ Sid pre-approved the M4 pod for the local smoke, pilot and debugging on
 
 | Item | Budget | Actual |
 |---|---|---|
-| H100 pod `qy3ylhqo101lua`: spike, smoke, pilot, resume check | ≤ $25 | see below |
+| H100 pod `qy3ylhqo101lua`: M2 model spike + M4 smoke, pilot, two resume checks (4h 16m, 2026-09-23 22:36 → 2026-09-24 02:53 UTC) | ≤ $25 | ~$14.92 |
+
+The pod was deleted after its outputs were copied to the orchestration box and
+verified: 394 files and 29.25 GB identical, and sha256 matched for 43 key
+files (checkpoints, metrics, optimizer states, final adapters). The receipt is
+`out/CLEANUP_RECEIPT.md`.
