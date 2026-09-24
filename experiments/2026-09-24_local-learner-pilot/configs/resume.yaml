@@ -1,0 +1,8 @@
+# Kill+resume check: 6 steps, B=2 x G=2, checkpoints after steps 1/3/5. SIGKILLed once
+# steps 0-2 are done (latest checkpoint: step 1), then resumed with the same command,
+# so step 2 is re-run: stale adapters of the dead process, re-used sampler names, restore.
+run_name: marli-local-resume
+batch_tasks: 2
+group_size: 2
+steps: 6
+checkpoint_every: 2

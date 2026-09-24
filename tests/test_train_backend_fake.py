@@ -221,7 +221,7 @@ async def test_resume_version_comes_from_checkpoint_record(tmp_path: Path) -> No
 
 def test_registry_selection_and_lazy_imports() -> None:
     assert isinstance(make_backend("fake", spend=None, policy_factory=FACTORY), FakeBackend)
-    with pytest.raises(ConfigError, match="not implemented until M4"):
+    with pytest.raises(ConfigError, match="requires server_json and adapters_dir"):
         make_backend("local", spend=None)
     with pytest.raises(ConfigError, match="unknown training backend"):
         make_backend("unknown", spend=None)

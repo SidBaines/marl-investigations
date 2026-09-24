@@ -1,0 +1,6 @@
+# 2 steps, B=2 x G=2: does the local backend train, hot-load, and pass the effect check?
+run_name: marli-local-smoke
+batch_tasks: 2
+group_size: 2
+steps: 2
+checkpoint_every: 1

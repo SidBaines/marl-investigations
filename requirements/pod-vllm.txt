@@ -1,0 +1,4 @@
+# Separate /opt/vllm venv; vLLM brings torch 2.13 cu130.
+# 0.30.x token-id completions + runtime LoRA API; argv is pinned by CPU tests.
+vllm==0.30.0
+hf-transfer

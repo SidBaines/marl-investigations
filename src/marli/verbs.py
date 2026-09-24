@@ -62,6 +62,27 @@ class VerbSpec:
 
 
 VERBS: dict[str, VerbSpec] = {
+    "serve vllm": VerbSpec(
+        "serve vllm",
+        "marli.serve.vllm:vllm",
+        "marli.serve.vllm:VLLMServeConfig",
+        "server.json",
+        "Supervise a token-native vLLM server with versioned runtime LoRA loading.",
+    ),
+    "serve status": VerbSpec(
+        "serve status",
+        "marli.serve.vllm:status",
+        "marli.serve.vllm:ServerControlConfig",
+        "server-status.json",
+        "Record server process liveness and HTTP readiness.",
+    ),
+    "serve stop": VerbSpec(
+        "serve stop",
+        "marli.serve.vllm:stop",
+        "marli.serve.vllm:ServerControlConfig",
+        "server-status.json",
+        "Stop the server process group, escalating after the grace period.",
+    ),
     "data sft": VerbSpec(
         "data sft",
         "marli.data.sft:data_sft",

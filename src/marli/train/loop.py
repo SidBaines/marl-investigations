@@ -25,6 +25,7 @@ from pathlib import Path
 from statistics import fmean
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 import marli
 from marli import runlog
@@ -134,8 +135,11 @@ def _preflight(
         model = models[name]
         if spec.init_from and not spec.init_from.startswith("tinker://"):
             Checkpoint.load(spec.init_from).require_state(name)
-        if spec.backend == "local":
-            raise ConfigError("local training backend not implemented until M4")
+        if spec.backend == "local" and not cfg.local_server_json:
+            raise ConfigError(
+                f"learner {name!r}: the local backend needs local_server_json "
+                "(start one with `marli serve vllm`)"
+            )
         if spec.backend == "tinker" and (
             model.tinker_max_ctx is None or cfg.limits.ctx.max_ctx > model.tinker_max_ctx
         ):
@@ -382,6 +386,9 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
     backends: dict[str, TrainBackend] = {}
     learners: dict[str, Learner] = {}
     run_name = cfg.run_name or run.config_hash[:12]
+    # Sampler names must never be reused, but a resume re-runs the steps after its
+    # last checkpoint: suffix this attempt so re-run snapshots get fresh names.
+    attempt = uuid4().hex[:6]
     inputs = (InputRef.of(taskset),)
     safe_to_save = True
 
@@ -411,7 +418,15 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
         frozen, renderers = await build_policies(frozen_specs, spend=spend)
         for name, spec in cfg.learners.items():
             if spec.backend not in backends:
-                kwargs = {"state_dir": run.path("states")} if spec.backend == "fake" else {}
+                kwargs: dict[str, Any] = {}
+                if spec.backend == "fake":
+                    kwargs = {"state_dir": run.path("states")}
+                elif spec.backend == "local":
+                    kwargs = {
+                        "server_json": cfg.local_server_json,
+                        "adapters_dir": cfg.local_adapters_dir or str(run.path("adapters")),
+                        "state_dir": str(run.path("states")),
+                    }
                 backends[spec.backend] = make_backend(
                     spec.backend, spend=spend, base_url=cfg.base_url, **kwargs
                 )
@@ -530,7 +545,10 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                 if isinstance(result, BaseException):
                     raise result
             snapshots = await asyncio.gather(
-                *(learners[name].sync_sampler(f"{run_name}-{name}-s{step}") for name in stepped),
+                *(
+                    learners[name].sync_sampler(f"{run_name}-{name}-s{step}-{attempt}")
+                    for name in stepped
+                ),
                 return_exceptions=True,
             )
             for snapshot in snapshots:

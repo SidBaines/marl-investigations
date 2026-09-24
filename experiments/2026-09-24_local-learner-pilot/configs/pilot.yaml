@@ -1,0 +1,6 @@
+# 20 steps, B=8 x G=4 (32 episodes/step); killed after the step-5 checkpoint and resumed.
+run_name: marli-local-pilot
+batch_tasks: 8
+group_size: 4
+steps: 20
+checkpoint_every: 5

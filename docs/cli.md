@@ -211,6 +211,52 @@ Manifest produced: `scores.json`.
 | episodes | str \| None | null | false | false | true | EpisodeSet manifest or dir |
 | regrade | bool | false | false | false | false |  |
 
+### serve status
+
+Record server process liveness and HTTP readiness.
+
+Manifest produced: `server-status.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| server_json | str |  | false | false | true | server.json written by serve vllm |
+| timeout_s | float | 5.0 | false | true | false | HTTP timeout and stop grace period |
+
+### serve stop
+
+Stop the server process group, escalating after the grace period.
+
+Manifest produced: `server-status.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| server_json | str |  | false | false | true | server.json written by serve vllm |
+| timeout_s | float | 5.0 | false | true | false | HTTP timeout and stop grace period |
+
+### serve vllm
+
+Supervise a token-native vLLM server with versioned runtime LoRA loading.
+
+Manifest produced: `server.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| model | str |  | false | false | false | models registry name |
+| python | str |  | false | false | false | python of the separate vLLM venv, e.g. /opt/vllm/bin/python |
+| port | int | 8000 | false | false | false |  |
+| host | str | 127.0.0.1 | false | false | false |  |
+| max_model_len | int \| None | null | false | false | false |  |
+| gpu_memory_utilization | float | 0.85 | false | false | false |  |
+| enable_lora | bool | true | false | false | false |  |
+| max_loras | int | 4 | false | false | false |  |
+| max_lora_rank | int | 32 | false | false | false |  |
+| tensor_parallel_size | int | 1 | false | false | false |  |
+| cuda_visible_devices | str \| None | null | false | false | false |  |
+| extra_args | list[str] | [] | false | false | false | escape hatch: argv entries appended verbatim to vLLM |
+| learner_ranks | list[int] | [] | false | false | false | optional planned learner ranks; reserve one snapshot slot |
+| ready_timeout_s | float | 900.0 | false | true | false |  |
+| detach | bool | false | false | true | false | return after ready; serve stop owns later cleanup |
+
 ### train rl
 
 Train synchronous on-policy learners with checkpoint and optimizer resume.
@@ -281,6 +327,8 @@ Manifest produced: `checkpoint.json`.
 | concurrency | int | 16 | false | true | false | concurrent episodes |
 | max_usd | float \| None | null | false | true | false | spend guard (sampling + training) |
 | base_url | str \| None | null | false | true | false | Tinker base URL (explicit) |
+| local_server_json | str \| None | null | false | true | false | server.json of `marli serve vllm` |
+| local_adapters_dir | str \| None | null | false | true | false | adapter snapshots dir |
 
 ### train sft
 

@@ -39,6 +39,10 @@ class TrainRLConfig:
     concurrency: int = runtime_field(16, help="concurrent episodes")
     max_usd: float | None = runtime_field(None, help="spend guard (sampling + training)")
     base_url: str | None = runtime_field(None, help="Tinker base URL (explicit)")
+    # local backend (M4): the vLLM server started by `marli serve vllm` and where
+    # versioned adapters are written (default <out>/adapters; must be readable by vLLM)
+    local_server_json: str | None = runtime_field(None, help="server.json of `marli serve vllm`")
+    local_adapters_dir: str | None = runtime_field(None, help="adapter snapshots dir")
 
     def __post_init__(self) -> None:
         for name in ("batch_tasks", "group_size", "steps", "checkpoint_every", "concurrency"):

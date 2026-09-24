@@ -328,3 +328,58 @@ def test_thinking_must_be_boolean() -> None:
     with pytest.raises(ValueError, match="thinking") as caught:
         replace(load_model("qwen3_8b"), thinking="false")
     assert "got 'false'" in str(caught.value)
+
+
+@pytest.mark.parametrize("name", ["qwen3_5_4b", "qwen3_5_9b", "qwen3_6_35b_a3b"])
+def test_hybrid_lora_registry(name: str) -> None:
+    model = load_model(name)
+    assert model.lora["target_modules"] == [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "in_proj_qkv",
+        "in_proj_z",
+        "in_proj_a",
+        "in_proj_b",
+        "out_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
+    assert model.lora["export_key_map"] == {
+        "base_model.model.model.layers.": "base_model.model.model.language_model.layers."
+    }
+    assert ModelSpec(**asdict(model)) == model
+
+
+@pytest.mark.parametrize("name", ["gpt_oss_20b", "gpt_oss_120b"])
+def test_gpt_oss_defaults_to_attention_lora(name: str) -> None:
+    assert load_model(name).lora == {
+        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+        "export_key_map": {},
+    }
+
+
+@pytest.mark.parametrize(
+    "lora",
+    [
+        {"typo": []},
+        {"target_modules": "all-linear"},
+        {"target_modules": [1]},
+        {"export_key_map": {"": "model."}},
+        {"export_key_map": {"x": 1}},
+        {"export_key_map": {"a": "c", "b": "c"}},
+    ],
+)
+def test_invalid_lora_registry_block(tmp_path: Path, lora: dict[str, object]) -> None:
+    data = asdict(load_model("qwen3_8b")) | {"lora": lora}
+    (tmp_path / "qwen3_8b.yaml").write_text(yaml.safe_dump(data))
+    with pytest.raises(ConfigError, match="lora"):
+        Registry("models", tmp_path, ModelSpec).load("qwen3_8b")
+
+
+def test_lora_registry_block_is_optional() -> None:
+    data = asdict(load_model("qwen3_8b"))
+    del data["lora"]
+    assert ModelSpec(**data).lora == {}
