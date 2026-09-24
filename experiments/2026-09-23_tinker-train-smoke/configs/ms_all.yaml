@@ -1,0 +1,8 @@
+run_name: marli-smoke-ms-all
+protocol: multi_session_s3_notes
+learners:
+  solver: {base_model: qwen3_5_4b, backend: tinker, rank: 32, learning_rate: 1.0e-5}
+seating: {solver: "learner:solver"}
+limits:
+  agent: {max_gen_tokens: 6400, final_reserve: 256}
+credit: {segment_credit: all, segment_unit: session}

@@ -394,6 +394,7 @@ class AgentRuntime:
         self._tool_messages = []
         self._reads = []
         self._nudges = []
+        self._n_nudges = 0  # a fresh context starts a fresh nudge budget
         if reason == SegmentStart.SESSION:
             self._session += 1
             self.ledger.start_session(self.info.agent_id)
@@ -593,9 +594,27 @@ class AgentRuntime:
                 return
             elif self._n_nudges >= self.limits.max_nudges:
                 self.ledger.limit_hit(self.info.agent_id, "max_nudges")
+                self.ended_by = "max_nudges"
+                if (
+                    self.limits.on_exhaust == "force_final"
+                    and self.submission is None
+                    and self.report is None
+                ):
+                    worker = self.role.limits_key == "worker"
+                    await self._harness_call(
+                        ticket,
+                        Purpose.REPORT if worker else Purpose.FINAL,
+                        self._final_instruction,
+                        [],
+                        [],
+                        forced=True,
+                    )
                 return
             else:
-                self._n_nudges += 1
+                # A turn cut off by its token allocation did not decline the
+                # tools; it only gets the nudge message, not a strike.
+                if parsed.termination != Termination.LENGTH:
+                    self._n_nudges += 1
                 self._nudges = [
                     Msg(
                         "user",

@@ -1,0 +1,16 @@
+# Tiny, token-sized Tinker RL smoke: 3 steps, B=2 tasks x G=2 episodes.
+env: math
+env_config: {python_tool: false}
+schedule: lockstep
+batch_tasks: 2
+group_size: 2
+steps: 3
+checkpoint_every: 3
+seed: 0
+limits:
+  call: {max_tokens: 3072}
+  agent: {max_gen_tokens: 4096, final_reserve: 256}
+  worker: {max_gen_tokens: 2048, final_reserve: 256, max_calls: 12}
+  episode: {max_gen_tokens: 8192, max_ticks: 24, max_wall_s: 1800}
+  spawn: {max_per_call: 2, max_total: 2}
+  ctx: {max_ctx: 16384}

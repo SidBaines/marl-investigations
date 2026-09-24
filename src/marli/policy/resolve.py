@@ -23,7 +23,9 @@ async def resolve_policy(
     if isinstance(ref, str):
         ref = refs.parse_ref(ref)
     if ref.kind == "ckpt":
-        raise ConfigError("ckpt: refs are resolved by marli.train (M3)")
+        from marli.train.checkpoint import resolve_checkpoint_ref
+
+        ref = refs.parse_ref(resolve_checkpoint_ref(ref, ref.learner))
     if ref.kind == "scripted":
         policy = refs.resolve_scripted(ref)
         if policy.trainable != trainable:
