@@ -1,9 +1,9 @@
-"""Grade workspace solutions in isolation, with expected answers held by the parent.
+"""Save solution source at submission so isolated grading is reproducible offline.
 
-The submission is a completion note, never executable code or a claimed answer.
-Only solution.py crosses into a fresh grader uid/workdir. Each test starts from
-that same snapshot so one candidate invocation cannot alter later tests. Inputs
-arrive on stdin; expected outputs never enter either sandbox.
+The submit tool snapshots solution.py; grading sees only that source and the
+task's tests, never the agent workspace. Each test starts from the same saved
+source in a fresh grader uid/workdir so candidate invocations cannot alter later
+tests. Inputs arrive on stdin; expected outputs never enter either sandbox.
 """
 
 from __future__ import annotations
@@ -58,7 +58,8 @@ class CodeFnEnvConfig:
         "and solution.py. Write your Python solution in solution.py: read stdin and "
         "print stdout for stdin tasks, or define the named function (or Solution method) "
         "for functional tasks. Use bash to test with the public examples. "
-        "When done, call submit with a short note. The files are graded, not the note."
+        "When done, call submit() to save solution.py as your final submission. "
+        "Only that saved source is graded; an optional answer note is ignored."
     )
     memory_mb: int = 2048
 
@@ -101,6 +102,32 @@ class _BashTool:
         return ToolResult(json.dumps(asdict(result)))
 
 
+class _SubmitTool:
+    shared = True
+    control = True
+    spec = ToolSpec(
+        "submit",
+        "Save solution.py as your final solution source. An optional answer note is ignored.",
+        {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    )
+
+    def __init__(self) -> None:
+        validate_tool_spec(self.spec)
+
+    async def __call__(self, ctx: ToolCtx, *, answer: str = "") -> ToolResult:
+        if ctx.sandbox is None:
+            raise ToolError("submit requires an active episode sandbox")
+        try:
+            source = await ctx.sandbox.read_file("solution.py")
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ToolError("submit could not read solution.py") from exc
+        return ToolResult("submitted solution.py", control={"submit": source})
+
+
 def _stdout_lines(text: str) -> list[str]:
     return [" ".join(line.split()) for line in text.splitlines() if line.strip()]
 
@@ -108,6 +135,7 @@ def _stdout_lines(text: str) -> list[str]:
 @ENVS.register("code_fn")
 class CodeFnEnv(Env):
     name = "code_fn"
+    supports_vote = False
 
     def __init__(self, config: dict[str, Any] | CodeFnEnvConfig, task: Task) -> None:
         if isinstance(config, dict):
@@ -216,16 +244,15 @@ class CodeFnEnv(Env):
         return f"{self.task.prompt}\n\n{interface}\n\n{self.config.instruction}"
 
     def tools(self, role: str) -> list[Tool]:
-        return [_BashTool(self.config.bash_timeout_s)]
+        return [_BashTool(self.config.bash_timeout_s), _SubmitTool()]
 
     async def grade(self, submission: str | None) -> dict[str, float]:
         """Count all selected tests even after failure; compiled means syntax-valid.
 
-        Missing/unreadable/invalid source fails the whole selected suite. n_tests
+        No submission or invalid source fails the whole selected suite. n_tests
         records the suite size, including tests rejected by a compilation failure.
+        Grading needs no setup and never reads the agent's sandbox.
         """
-        if self._sandbox is None:
-            raise RuntimeError("code_fn requires setup before grading")
         grades = {
             "pass_all": 0.0,
             "pass_frac": 0.0,
@@ -234,15 +261,13 @@ class CodeFnEnv(Env):
             "timeouts": 0.0,
             "correct": 0.0,
         }
-        try:
-            solution = await self._sandbox.read_file("solution.py")
-        except (OSError, ValueError, UnicodeError):
+        if submission is None:
             return grades
         grader = self._new_sandbox()
         self._graders.add(grader)
         try:
             await grader.start()
-            await grader.write_file("solution.py", solution)
+            await grader.write_file("solution.py", submission)
             compiled = await grader.exec(
                 ["python3", "-I", "-S", "-c", _COMPILE],
                 timeout_s=self.config.timeout_per_test_s,
@@ -253,7 +278,7 @@ class CodeFnEnv(Env):
             passed = 0
             for index in self._test_indices:
                 await grader.reset()
-                await grader.write_file("solution.py", solution)
+                await grader.write_file("solution.py", submission)
                 test = self.task.answer["tests"][index]
                 if self.task.answer["kind"] == "functional":
                     await grader.write_file("harness.py", _FUNCTIONAL_HARNESS)

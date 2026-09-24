@@ -11,6 +11,7 @@ import subprocess
 import sys
 import zlib
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,9 +19,15 @@ from typing import Any
 import pytest
 from _marli_code_fixtures import deepcoder_row, lcb_row, private_payload
 
+from marli.cli.main import main
+from marli.data import build as build_module
+from marli.data.build import BuildConfig
+from marli.handles import InputRef
 from marli.tasks.code import decode_private_tests, normalize_code_row
 from marli.tasks.loaders import load_tasks
 from marli.tasks.source import SOURCES
+from marli.tasks.taskset import TaskSet, read_tasks
+from marli.verbs import run_verb
 
 
 def test_code_registry_specs() -> None:
@@ -30,6 +37,12 @@ def test_code_registry_specs() -> None:
     assert deepcoder.test_format == "deepcoder" and lcb.test_format == "lcb"
     assert deepcoder.subsets == ["primeintellect", "taco", "lcbv5", "codeforces"]
     assert deepcoder.split == "train" and deepcoder.dedupe
+    assert deepcoder.subset_splits == {
+        "primeintellect": "train",
+        "taco": "train",
+        "lcbv5": "train",
+        "codeforces": "test",
+    }
     assert lcb.data_files == "test6.jsonl"
     assert lcb.filters == {"contest_date_min": "2025-02-01", "contest_date_max": "2025-05-01"}
     assert not deepcoder.commit_text and not lcb.commit_text
@@ -147,7 +160,9 @@ def test_filter_dedupe_and_counts_precede_sampling() -> None:
         calls.append((hf_id, subset, split))
         return rows
 
-    source = replace(SOURCES.load("deepcoder"), subsets=["codeforces"])
+    source = replace(
+        SOURCES.load("deepcoder"), subsets=["codeforces"], subset_splits={"codeforces": "test"}
+    )
     meta: dict[str, Any] = {"existing": True}
     tasks = load_tasks(source, split="test", loader=loader, meta=meta)
     assert [task.task_id for task in tasks] == ["deepcoder/codeforces/1", "deepcoder/codeforces/4"]
@@ -180,7 +195,7 @@ def test_all_subsets_and_cross_subset_deduplication() -> None:
 
     meta: dict[str, Any] = {}
     tasks = load_tasks(SOURCES.load("deepcoder"), loader=loader, meta=meta)
-    assert calls == [(name, "train") for name in SOURCES.load("deepcoder").subsets]
+    assert calls == list(SOURCES.load("deepcoder").subset_splits.items())
     assert len(tasks) == 1 and meta["n_raw"] == 4 and meta["n_duplicates"] == 3
 
 
@@ -229,6 +244,10 @@ def test_date_window_inclusive_and_configurable() -> None:
         {"config": "taco"},
         {"subsets": ["taco", "taco"]},
         {"subsets": [1]},
+        {"subset_splits": {"typo": "train"}},
+        {"subset_splits": {"taco": ""}},
+        {"subset_splits": {"taco": 1}},
+        {"subset_splits": []},
     ],
 )
 def test_code_spec_validation(changes: dict[str, Any]) -> None:
@@ -254,7 +273,12 @@ def test_malformed_cases_drop_entire_row(tests: Any) -> None:
 
     meta: dict[str, Any] = {}
     assert (
-        load_tasks(replace(SOURCES.load("deepcoder"), subsets=[]), loader=loader, meta=meta) == []
+        load_tasks(
+            replace(SOURCES.load("deepcoder"), subsets=[], subset_splits={}),
+            loader=loader,
+            meta=meta,
+        )
+        == []
     )
     assert meta["n_unparseable"] == 1
 
@@ -289,7 +313,16 @@ def test_lazy_deepcoder_backend(monkeypatch: pytest.MonkeyPatch) -> None:
         return [deepcoder_row("taco")]
 
     monkeypatch.setitem(sys.modules, "datasets", SimpleNamespace(load_dataset=loader))
-    assert len(load_tasks(replace(SOURCES.load("deepcoder"), subsets=["taco"]))) == 1
+    assert (
+        len(
+            load_tasks(
+                replace(
+                    SOURCES.load("deepcoder"), subsets=["taco"], subset_splits={"taco": "train"}
+                )
+            )
+        )
+        == 1
+    )
 
 
 def test_lcb_reads_exact_jsonl_without_dataset_script(
@@ -321,7 +354,9 @@ def test_lcb_reads_exact_jsonl_without_dataset_script(
         ("lcb_v6", None),
     ],
 )
-def test_cached_registry_rows(name: str, subset: str | None) -> None:
+async def test_cached_registry_rows(
+    name: str, subset: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = SOURCES.load(name)
     hub = Path(
         os.environ.get(
@@ -338,7 +373,7 @@ def test_cached_registry_rows(name: str, subset: str | None) -> None:
     if subset:
         pq = pytest.importorskip("pyarrow.parquet")
         rows = next(pq.ParquetFile(paths[0]).iter_batches(batch_size=3)).to_pylist()
-        source = replace(source, subsets=[subset], split=split)
+        source = replace(source, subsets=[subset], subset_splits={subset: split})
     else:
         rows = []
         with paths[0].open() as stream:
@@ -356,8 +391,16 @@ def test_cached_registry_rows(name: str, subset: str | None) -> None:
     def loader(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         return rows
 
-    tasks = load_tasks(source, loader=loader, max_n=3)
+    # Use real cached bytes through the build verb without backend downloads or writes.
+    monkeypatch.setattr(build_module, "load_tasks", partial(load_tasks, loader=loader))
+    monkeypatch.setattr(build_module.SOURCES, "load", lambda name: source)
+    result = await run_verb(
+        "data build", BuildConfig(source=name, max_n=3), out=tmp_path / "cached"
+    )
+    handle = TaskSet.load(result.manifest)
+    tasks = read_tasks(handle)
     # Assertions inspect structure only; never include source text in test output.
+    assert handle.kind == "code" and handle.answer_format == "tests"
     assert len(tasks) == 3
     for task in tasks:
         assert isinstance(task.prompt, str)
@@ -365,3 +408,71 @@ def test_cached_registry_rows(name: str, subset: str | None) -> None:
         assert task.answer["kind"] in ("stdin", "functional")
         assert task.meta["n_tests"] > 0
         assert all(isinstance(test["input"], str) for test in task.answer["tests"])
+
+
+@pytest.mark.parametrize("split", [None, "validation"])
+def test_subset_split_defaults_and_explicit_override(split: str | None) -> None:
+    source = SOURCES.load("deepcoder")
+    calls: list[tuple[str, str]] = []
+
+    def loader(hf_id: str, subset: str, *, split: str) -> list[dict[str, Any]]:
+        calls.append((subset, split))
+        return [{**deepcoder_row(subset), "problem": f"Synthetic: {subset} sum."}]
+
+    tasks = load_tasks(source, loader=loader, split=split)
+    expected = [(subset, split or source.subset_splits[subset]) for subset in source.subsets]
+    assert calls == expected
+    assert [(task.meta["subset"], task.meta["split"]) for task in tasks] == expected
+    assert len(tasks) == 4
+
+
+@pytest.mark.parametrize("name", ["deepcoder", "lcb_v6"])
+def test_code_data_build_cli(
+    name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def loader(hf_id: str, subset: str | None, **kwargs: Any) -> list[dict[str, Any]]:
+        if subset is None:
+            return [lcb_row()]
+        assert kwargs["split"] == SOURCES.load("deepcoder").subset_splits[subset]
+        return [{**deepcoder_row(subset), "problem": f"Synthetic: {subset} sum."}]
+
+    monkeypatch.setattr(build_module, "load_tasks", partial(load_tasks, loader=loader))
+    out = tmp_path / name
+    assert main(["data", "build", f"source={name}", "--out", str(out)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] and payload["kind"] == "taskset"
+    handle = TaskSet.load(payload["manifest"])
+    assert handle.kind == "code" and handle.answer_format == "tests"
+    assert read_tasks(handle) == load_tasks(SOURCES.load(name), loader=loader)
+    assert handle.n == (4 if name == "deepcoder" else 1)
+
+
+async def test_deepcoder_build_excludes_normalized_lcb_text_before_truncation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def loader(hf_id: str, subset: str | None, **kwargs: Any) -> list[dict[str, Any]]:
+        if subset is None:
+            return [lcb_row()]
+        return [
+            {**deepcoder_row(subset), "problem": "  SYNTHETIC: add\n two integers!  "},
+            {**deepcoder_row(subset), "problem": f"Synthetic: {subset} unique."},
+        ]
+
+    monkeypatch.setattr(build_module, "load_tasks", partial(load_tasks, loader=loader))
+    excluded = await run_verb("data build", BuildConfig(source="lcb_v6"), out=tmp_path / "eval")
+    built = await run_verb(
+        "data build",
+        BuildConfig(source="deepcoder", exclude=str(excluded.manifest), max_n=2),
+        out=tmp_path / "train",
+    )
+    assert [task.task_id for task in read_tasks(built.handle)] == [
+        "deepcoder/primeintellect/1",
+        "deepcoder/taco/1",
+    ]
+    assert built.handle.meta["counts"] == {
+        "loaded": 5,
+        "kept": 2,
+        "dropped_exact": 1,
+        "dropped_ngram": 0,
+    }
+    assert built.handle.inputs == (InputRef.of(excluded.handle),)

@@ -22,6 +22,8 @@ EXPECTED = {
     "polaris_53k": ("POLARIS-Project/Polaris-Dataset-53K", "train", "latex", "apache-2.0"),
     "deepmath_103k": ("zwhe99/DeepMath-103K", "train", "latex", "mit"),
     "dapo_math_17k": ("BytedTsinghua-SIA/DAPO-Math-17k", "train", "integer", "apache-2.0"),
+    "deepcoder": ("agentica-org/DeepCoder-Preview-Dataset", "train", "tests", "mit"),
+    "lcb_v6": ("livecodebench/code_generation_lite", "test", "tests", "cc"),
 }
 
 
@@ -32,7 +34,7 @@ def test_catalog_entries() -> None:
     for name, spec in SOURCES.load_all().items():
         assert (spec.hf_id, spec.split, spec.answer_format, spec.license) == EXPECTED[name]
         assert spec.name == name
-        assert spec.kind == "math"
+        assert spec.kind == ("code" if name in {"deepcoder", "lcb_v6"} else "math")
         assert spec.commit_text is False
         assert spec.config is None
 
@@ -66,6 +68,8 @@ def test_frozen_and_conservative_defaults() -> None:
     [
         {"kind": "unsupported"},
         {"answer_format": "float"},
+        {"answer_format": "tests"},
+        {"subset_splits": {"math": "train"}},
         {"fields": {"answer": "answer"}},
         {"fields": {"prompt": "problem"}},
         {"fields": {"prompt": "problem", "answer": "answer", "typo": "column"}},

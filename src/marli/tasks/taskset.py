@@ -16,7 +16,7 @@ from marli.handles import Handle, atomic_write_text, register_handle
 @register_handle
 @dataclass(frozen=True)
 class TaskSet(Handle):
-    """A saved collection; ``kind`` is its domain (currently ``math``).
+    """A saved collection; ``kind`` is its domain (``math`` or ``code``).
 
     Handle reserves the top-level manifest ``kind`` for dispatch (``taskset``).
     Its extensible metadata therefore stores the domain as ``meta.task_kind``;
@@ -38,13 +38,14 @@ class TaskSet(Handle):
     def __post_init__(self) -> None:
         if type(self.n) is not int or self.n < 0:
             raise ValueError("TaskSet n must be a non-negative integer")
-        if self.answer_format not in ("integer", "latex"):
-            raise ValueError("answer_format must be 'integer' or 'latex'")
         if type(self.commit_text) is not bool:
             raise ValueError("commit_text must be a boolean")
         kind = self.meta.get("task_kind") if self.kind == self.KIND else self.kind
-        if kind != "math":
-            raise ValueError("TaskSet kind must be 'math'")
+        if kind not in ("math", "code"):
+            raise ValueError("TaskSet kind must be 'math' or 'code'")
+        formats = ("tests",) if kind == "code" else ("integer", "latex")
+        if self.answer_format not in formats:
+            raise ValueError(f"{kind} answer_format must be one of {formats}")
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "meta", {**self.meta, "task_kind": kind})
 

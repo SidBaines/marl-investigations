@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _marli_code_fixtures import code_task
 
 from marli.envs.base import Task
 from marli.handles import HANDLE_TYPES, InputRef, load_any
@@ -127,3 +128,32 @@ def test_corrupt_middle_row_is_loud(tmp_path: Path) -> None:
 def test_handle_path_must_stay_relative_to_root(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="outside handle root"):
         replace(make_taskset(tmp_path), tasks="../tasks.jsonl").save()
+
+
+@pytest.mark.parametrize("functional", [False, True])
+def test_code_taskset_roundtrips_large_bundles(tmp_path: Path, functional: bool) -> None:
+    task = code_task(functional=functional)
+    task.answer["tests"].append({"input": "1\n" * 100_000, "output": "2" * 100_000})
+    root = tmp_path / "original"
+    write_tasks(root, [task])
+    handle = replace(make_taskset(root, n=1), kind="code", answer_format="tests")
+    handle.save()
+    raw = json.loads(handle.manifest_path.read_text())
+    assert raw["kind"] == "taskset" and raw["meta"]["task_kind"] == "code"
+    assert "answer" not in raw and handle.manifest_path.stat().st_size < 2048
+    moved = tmp_path / "moved"
+    root.rename(moved)
+    loaded = TaskSet.load(moved)
+    assert loaded.kind == "code" and loaded.answer_format == "tests"
+    assert read_tasks(loaded) == [task]
+
+
+@pytest.mark.parametrize(
+    "kind,answer_format",
+    [("math", "tests"), ("code", "integer"), ("code", "latex"), ("bad", "tests")],
+)
+def test_taskset_domain_and_answer_format_agree(
+    tmp_path: Path, kind: str, answer_format: str
+) -> None:
+    with pytest.raises(ValueError):
+        replace(make_taskset(tmp_path), kind=kind, answer_format=answer_format)
