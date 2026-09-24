@@ -1,0 +1,28 @@
+name: deepcoder
+hf_id: agentica-org/DeepCoder-Preview-Dataset
+subsets: [primeintellect, taco, lcbv5]
+subset_splits: {primeintellect: train, taco: train, lcbv5: train}
+split: train
+kind: code
+fields: {prompt: problem}
+answer_format: tests
+test_format: deepcoder
+license: mit
+commit_text: false
+dedupe: true
+max_tests: 32
+max_test_bytes: null
+notes: >-
+  Keep the first parseable row per Unicode/whitespace-normalized problem.
+  Record empty-test, malformed-test and duplicate row counts.
+  Train on primeintellect, taco and lcbv5 only. Codeforces and lcbv5-test are
+  evaluation splits, as in tinker_cookbook/recipes/code_rl/code_env.py
+  (_load_deepcoder_split, installed tinker-cookbook 0.5.7).
+  Cap hidden tests at a seeded sample of 32 to balance reward quality against
+  grading cost; public examples are untouched. This is our build default:
+  the installed cookbook's DeepcoderReward passes the entire task.tests list to
+  code_grading.sandbox_check_correctness, and lcb_utils.run_test iterates it
+  with early return on failure; it does not implement a 32-test subsample.
+  Keep lcb_v6 as the evaluation set. Decontaminate this training source against a
+  built lcb_v6 TaskSet by normalized problem text using data build source=deepcoder
+  exclude=<lcb_v6 TaskSet manifest>.

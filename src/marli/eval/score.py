@@ -67,15 +67,17 @@ async def score(cfg: ScoreConfig, run: RunDir) -> Scores:
         if all(episode.episode_id in done for episode in episodes):
             continue
         env = make_env(source.env, source.env_config, tasks[task_id])
+        # Answer equivalence (maj@k) is undefined for envs without votes (code).
+        groupable = getattr(env, "supports_vote", True)
         representatives: list[str] = []
-        needs_env = cfg.regrade or len(episodes) > 1
+        needs_env = cfg.regrade or (groupable and len(episodes) > 1)
         try:
             if needs_env:
                 await env.setup()
             for episode in episodes:
                 answer = episode.outcome.final_answer
                 answer_group = None
-                if answer is not None and answer.strip():
+                if groupable and answer is not None and answer.strip():
                     for index, representative in enumerate(representatives):
                         if await env.same_answer(answer, representative):
                             answer_group = index
@@ -117,7 +119,7 @@ async def score(cfg: ScoreConfig, run: RunDir) -> Scores:
                         "answered": answer is not None and bool(answer.strip()),
                         "oracle_any": any(value == 1 for value in own.values()),
                         "own_correct": own,
-                        "answer_group": answer_group,
+                        **({"answer_group": answer_group} if groupable else {}),
                         "ok": episode.ok,
                     },
                 )

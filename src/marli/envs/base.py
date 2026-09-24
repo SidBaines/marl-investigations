@@ -36,6 +36,7 @@ class Task:
 
 class Env(ABC):
     name: str
+    supports_vote: bool = True
 
     @abstractmethod
     async def setup(self) -> None: ...  # create the sandbox if the env needs one
@@ -47,8 +48,13 @@ class Env(ABC):
     def task_message(self, role: str) -> str: ...  # the problem as presented to a given role
 
     @abstractmethod
-    # env tools (marli.interact.tools.Tool) for this role
-    def tools(self, role: str) -> list[Any]: ...
+    def tools(self, role: str) -> list[Any]:
+        """Trusted environment tools override built-ins with the same advertised name.
+
+        The runtime preserves built-in control semantics. Overrides must return
+        the corresponding control effect, e.g. ``control={"submit": source}``.
+        """
+        ...
 
     @abstractmethod
     async def grade(self, submission: str | None) -> dict[str, float]: ...

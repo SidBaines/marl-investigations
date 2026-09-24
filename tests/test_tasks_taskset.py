@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _marli_code_fixtures import code_task
 
 from marli.envs.base import Task
 from marli.handles import HANDLE_TYPES, InputRef, load_any
@@ -127,3 +128,119 @@ def test_corrupt_middle_row_is_loud(tmp_path: Path) -> None:
 def test_handle_path_must_stay_relative_to_root(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="outside handle root"):
         replace(make_taskset(tmp_path), tasks="../tasks.jsonl").save()
+
+
+@pytest.mark.parametrize("functional", [False, True])
+def test_code_taskset_roundtrips_large_bundles(tmp_path: Path, functional: bool) -> None:
+    task = code_task(functional=functional)
+    task.answer["tests"].append({"input": "1\n" * 100_000, "output": "2" * 100_000})
+    root = tmp_path / "original"
+    write_tasks(root, [task])
+    handle = replace(make_taskset(root, n=1), kind="code", answer_format="tests")
+    handle.save()
+    raw = json.loads(handle.manifest_path.read_text())
+    assert raw["kind"] == "taskset" and raw["meta"]["task_kind"] == "code"
+    assert "answer" not in raw and handle.manifest_path.stat().st_size < 2048
+    moved = tmp_path / "moved"
+    root.rename(moved)
+    loaded = TaskSet.load(moved)
+    assert loaded.kind == "code" and loaded.answer_format == "tests"
+    assert read_tasks(loaded) == [task]
+
+
+@pytest.mark.parametrize(
+    "kind,answer_format",
+    [("math", "tests"), ("code", "integer"), ("code", "latex"), ("bad", "tests")],
+)
+def test_taskset_domain_and_answer_format_agree(
+    tmp_path: Path, kind: str, answer_format: str
+) -> None:
+    with pytest.raises(ValueError):
+        replace(make_taskset(tmp_path), kind=kind, answer_format=answer_format)
+
+
+def test_streamed_rows_are_written_individually_and_roundtrip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import Mock
+
+    original = Path.open
+    writes: list[int] = []
+
+    def opened(path: Path, *args: Any, **kwargs: Any) -> Any:
+        stream = original(path, *args, **kwargs)
+        if path.name.startswith(".tasks.jsonl.tmp-"):
+            wrapper = Mock(wraps=stream)
+
+            def write(value: str) -> int:
+                writes.append(len(value))
+                return stream.write(value)
+
+            wrapper.write.side_effect = write
+            wrapper.__enter__ = Mock(return_value=wrapper)
+            wrapper.__exit__ = Mock(side_effect=stream.__exit__)
+            return wrapper
+        return stream
+
+    monkeypatch.setattr(Path, "open", opened)
+    n = 30
+
+    def rows() -> Any:
+        for index in range(n):
+            # The previous row must reach the writer before another is requested.
+            assert len(writes) == index
+            yield Task(str(index), "Synthetic", "x" * 100_000)
+
+    write_tasks(tmp_path, rows())
+    assert len(writes) == n and max(writes) < 101_000
+    handle = make_taskset(tmp_path, n=n)
+    streamed = read_tasks(handle, stream=True)
+    assert iter(streamed) is streamed
+    for index, task in enumerate(streamed):
+        assert task.task_id == str(index) and len(task.answer) == 100_000
+
+
+def test_streamed_read_checks_manifest_count_on_exhaustion(tmp_path: Path) -> None:
+    from marli.errors import ConfigError
+
+    write_tasks(tmp_path, [Task("0", "Synthetic")])
+    rows = read_tasks(make_taskset(tmp_path, n=2), stream=True)
+    assert next(rows).task_id == "0"
+    with pytest.raises(ConfigError, match="expected 2, read 1"):
+        next(rows)
+
+
+def test_failed_streamed_write_preserves_previous_rows_and_cleans_temporary(tmp_path: Path) -> None:
+    def broken() -> Any:
+        yield Task("1", "Synthetic replacement")
+        raise ValueError("synthetic interrupted input")
+
+    path = write_tasks(tmp_path, [Task("0", "Synthetic previous")])
+    previous = path.read_bytes()
+    with pytest.raises(ValueError, match="interrupted"):
+        write_tasks(tmp_path, broken())
+    assert path.read_bytes() == previous
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_streamed_write_syncs_rows_before_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import marli.tasks.taskset as module
+
+    events = []
+    fsync, replace_file = module.os.fsync, module.os.replace
+
+    def sync(fd: int) -> None:
+        events.append("sync")
+        fsync(fd)
+
+    def replace_synced(src: Path, dst: Path) -> None:
+        assert events == ["sync"]
+        events.append("replace")
+        replace_file(src, dst)
+
+    monkeypatch.setattr(module.os, "fsync", sync)
+    monkeypatch.setattr(module.os, "replace", replace_synced)
+    write_tasks(tmp_path, [Task("0", "Synthetic")])
+    assert events == ["sync", "replace", "sync"]

@@ -52,6 +52,7 @@ asyncio_mode = "auto"
 # e.g. `uv run pytest -m live` (a later -m overrides this one).
 addopts = "-m 'not gpu and not live'"
 markers = [
+    "docker: opt-in real Docker integration (MARLI_TEST_DOCKER=1)",
     "gpu: needs a CUDA device",
     "live: hits the network or spends money (APIs, Tinker, pods)",
     "tinker: needs the [tinker] extra (tinker + tinker-cookbook)",

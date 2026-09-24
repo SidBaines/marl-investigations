@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import unicodedata
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
 from typing import Any
 
 from marli.config import doc_field, input_field
+from marli.envs.base import Task
 from marli.errors import ConfigError
 from marli.handles import InputRef
 from marli.rundir import RunDir
@@ -22,6 +24,12 @@ class BuildConfig:
     max_n: int | None = doc_field(None, help="maximum tasks after decontamination")
     seed: int = 0
     shuffle: bool = False
+    max_tests: int | None = doc_field(
+        None, help="code hidden-test cap; None uses the source default (deepcoder: 32, lcb_v6: all)"
+    )
+    max_test_bytes: int | None = doc_field(
+        None, help="code hidden-test input + output UTF-8 byte cap; None uses the source default"
+    )
     exclude: str | None = input_field(
         None,
         help="TaskSet whose prompts are removed (decontamination by exact/normalised match)",
@@ -35,6 +43,10 @@ class BuildConfig:
             raise ConfigError("max_n must be a non-negative integer or None")
         if type(self.ngram_exclude) is not int or self.ngram_exclude < 0:
             raise ConfigError("ngram_exclude must be a non-negative integer")
+        for name in ("max_tests", "max_test_bytes"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value <= 0):
+                raise ConfigError(f"{name} must be a positive integer or None")
 
 
 def _normalize(prompt: str) -> str:
@@ -59,8 +71,21 @@ async def build(cfg: BuildConfig, run: RunDir) -> TaskSet:
     The runner publishes the manifest only after task rows are durably replaced.
     """
     source = SOURCES.load(cfg.source)
+    caps = {
+        name: getattr(cfg, name)
+        for name in ("max_tests", "max_test_bytes")
+        if getattr(cfg, name) is not None
+    }
+    if caps:
+        if source.kind != "code":
+            raise ConfigError("max_tests and max_test_bytes require a code source")
+        source = replace(source, **caps)
     excluded = TaskSet.load(cfg.exclude) if cfg.exclude is not None else None
-    prompts = {_normalize(task.prompt) for task in read_tasks(excluded)} if excluded else set()
+    prompts = (
+        {_normalize(task.prompt) for task in read_tasks(excluded, stream=True)}
+        if excluded
+        else set()
+    )
     ngrams: set[tuple[str, ...]] = set()
     if cfg.ngram_exclude:
         for prompt in prompts:
@@ -69,29 +94,31 @@ async def build(cfg: BuildConfig, run: RunDir) -> TaskSet:
     tasks = load_tasks(
         source, split=cfg.split, seed=cfg.seed, shuffle=cfg.shuffle, meta=loader_meta
     )
-    counts = {"loaded": len(tasks), "kept": 0, "dropped_exact": 0, "dropped_ngram": 0}
-    kept = []
-    for task in tasks:
-        prompt = _normalize(task.prompt)
-        if prompt in prompts:
-            counts["dropped_exact"] += 1
-        elif cfg.ngram_exclude and not ngrams.isdisjoint(_ngrams(prompt, cfg.ngram_exclude)):
-            counts["dropped_ngram"] += 1
-        else:
-            kept.append(task)
-    kept = kept[: cfg.max_n]
-    counts["kept"] = len(kept)
+    counts = {"loaded": 0, "kept": 0, "dropped_exact": 0, "dropped_ngram": 0}
+
+    def kept() -> Iterator[Task]:
+        for task in tasks:
+            counts["loaded"] += 1
+            prompt = _normalize(task.prompt)
+            if prompt in prompts:
+                counts["dropped_exact"] += 1
+            elif cfg.ngram_exclude and not ngrams.isdisjoint(_ngrams(prompt, cfg.ngram_exclude)):
+                counts["dropped_ngram"] += 1
+            elif cfg.max_n is None or counts["kept"] < cfg.max_n:
+                counts["kept"] += 1
+                yield task
+
+    path = write_tasks(run.out, kept())
     inputs = (InputRef.of(excluded),) if excluded is not None else ()
     meta: dict[str, Any] = {**loader_meta, "counts": counts}
     if excluded is not None:
         meta.update(decontaminated_against=inputs[0].path, ngram_exclude=cfg.ngram_exclude)
-    path = write_tasks(run.out, kept)
     return TaskSet(
         root=run.out,
         tasks=path.name,
         source=source.name,
         split=source.split if cfg.split is None else cfg.split,
-        n=len(kept),
+        n=counts["kept"],
         kind=source.kind,
         answer_format=source.answer_format,
         commit_text=source.commit_text,

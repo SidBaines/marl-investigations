@@ -91,6 +91,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 from contextlib import AsyncExitStack
+from copy import copy
 from dataclasses import dataclass, field, replace
 from typing import Any, cast
 
@@ -166,17 +167,27 @@ def role_tools(
     context: ContextManager,
     ctx: ToolCtx,
 ) -> list[Tool]:
-    """Resolve only advertised environment tools, plus the role's built-ins."""
+    """Resolve advertised tools, preferring trusted environment tools to built-ins.
+
+    Overrides retain the built-in's turn-ending control semantics and must return
+    its control effect, e.g. ``control={"submit": source}`` to end the agent.
+    Each name is advertised once, even when the role lists it more than once.
+    """
     available = {tool.spec.name: tool for tool in tools}
     names = list(role.tools)
     if context.has_notes_tools:
         names.extend(["read_notes", "write_notes"])
     resolved: list[Tool] = []
     for name in dict.fromkeys(names):
-        if name in TOOLS.names():
+        if name in available:
+            tool = available[name]
+            if name in TOOLS.names() and not tool.control and TOOLS.get(name)().control:
+                tool = copy(tool)
+                # Env tools may be frozen records; alter only this role's copy.
+                object.__setattr__(tool, "control", True)
+            resolved.append(tool)
+        elif name in TOOLS.names():
             resolved.append(TOOLS.get(name)())
-        elif name in available:
-            resolved.append(available[name])
         else:
             raise ConfigError(f"role {role.role!r}: unknown tool {name!r}")
     return resolved

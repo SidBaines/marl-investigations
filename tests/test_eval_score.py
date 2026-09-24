@@ -10,6 +10,7 @@ import pytest
 from _marli_test_envs import ArithEnv
 from test_eval_rollout import json_rows, make_taskset, rollout_config
 
+from marli.envs.registry import ENVS
 from marli.eval.policies import PolicySpec
 from marli.eval.score import ScoreConfig, Scores
 from marli.interact.records import read_episodes
@@ -151,3 +152,44 @@ async def test_unanswered_and_failed_rows_are_retained(
     (row,) = json_rows(scored.handle.file("rows"))
     assert row["correct"] == 0 and not row["answered"] and not row["ok"]
     assert row["oracle_any"] is False and row["own_correct"] == {"solver0": 0}
+
+
+class _NoVoteEnv(ArithEnv):
+    supports_vote = False
+
+    async def same_answer(self, a: str | None, b: str | None) -> bool:
+        raise AssertionError("scoring must not compare answers for a no-vote env")
+
+
+@ENVS.register("eval_novote")
+def _novote_env(config: dict[str, Any], task: Any) -> _NoVoteEnv:
+    env = _NoVoteEnv()
+    env.task = task
+    return env
+
+
+async def test_no_vote_envs_skip_answer_classes(tmp_path: Path) -> None:
+    cfg = rollout_config(make_taskset(tmp_path / "tasks", 1), episodes_per_task=2)
+    cfg.env = "eval_novote"
+    episodes = await run_verb("eval rollout", cfg, out=tmp_path / "rollout")
+    result = await run_verb("eval score", ScoreConfig(str(episodes.manifest)), out=tmp_path / "s")
+    rows = json_rows(result.handle.file("rows"))
+    assert len(rows) == 2 and all("answer_group" not in row for row in rows)
+
+
+async def test_saved_no_vote_scores_never_setup_an_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = rollout_config(make_taskset(tmp_path / "tasks", 1), episodes_per_task=3)
+    cfg.env = "eval_novote"
+    episodes = await run_verb("eval rollout", cfg, out=tmp_path / "rollout")
+
+    async def forbidden(self: _NoVoteEnv) -> None:
+        pytest.fail("saved code scores do not need a sandbox")
+
+    monkeypatch.setattr(_NoVoteEnv, "setup", forbidden)
+    monkeypatch.setattr(_NoVoteEnv, "teardown", forbidden)
+    result = await run_verb(
+        "eval score", ScoreConfig(str(episodes.manifest)), out=tmp_path / "scores"
+    )
+    assert len(json_rows(result.handle.file("rows"))) == 3

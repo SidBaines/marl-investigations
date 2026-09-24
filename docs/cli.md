@@ -52,6 +52,8 @@ Manifest produced: `taskset.json`.
 | max_n | int \| None | null | false | false | false | maximum tasks after decontamination |
 | seed | int | 0 | false | false | false |  |
 | shuffle | bool | false | false | false | false |  |
+| max_tests | int \| None | null | false | false | false | code hidden-test cap; None uses the source default (deepcoder: 32, lcb_v6: all) |
+| max_test_bytes | int \| None | null | false | false | false | code hidden-test input + output UTF-8 byte cap; None uses the source default |
 | exclude | str \| None | null | false | false | true | TaskSet whose prompts are removed (decontamination by exact/normalised match) |
 | ngram_exclude | int | 0 | false | false | false | if >0, also drop tasks sharing any n-gram of this length (words) with `exclude` |
 

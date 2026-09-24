@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import random
 import re
-from collections.abc import Callable, Iterable, Mapping
+import tempfile
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import asdict
 from fractions import Fraction
+from pathlib import Path
 from typing import Any
 
 from marli.envs.base import Task
@@ -48,6 +52,33 @@ def _difficulty(value: Any) -> float | None:
     return float(value)
 
 
+def _select_code_tasks(
+    tasks: Iterable[Task], *, max_n: int | None, seed: int, shuffle: bool
+) -> Iterator[Task]:
+    """Shuffle offsets, not bundles; unshuffled builds need no scratch disk.
+
+    Exhaust the input even after max_n so manifest counts cover the full pool.
+    For exact seeded shuffle semantics, spool normalized rows to a temporary
+    file in the working directory, retaining only byte offsets in memory. Read
+    back one selected row at a time and close/remove the spool on exit. This
+    trades bounded scratch disk for memory even when max_n is unlimited.
+    """
+    if not shuffle:
+        for index, task in enumerate(tasks):
+            if max_n is None or index < max_n:
+                yield task
+        return
+    with tempfile.TemporaryFile(dir=Path.cwd()) as spool:
+        offsets: list[int] = []
+        for task in tasks:
+            offsets.append(spool.tell())
+            spool.write((json.dumps(asdict(task), ensure_ascii=False) + "\n").encode("utf-8"))
+        random.Random(seed).shuffle(offsets)
+        for offset in offsets[:max_n]:
+            spool.seek(offset)
+            yield Task(**json.loads(spool.readline()))
+
+
 def load_tasks(
     source: TaskSourceSpec,
     *,
@@ -57,7 +88,7 @@ def load_tasks(
     shuffle: bool = False,
     loader: DatasetLoader | None = None,
     meta: dict[str, Any] | None = None,
-) -> list[Task]:
+) -> Iterable[Task]:
     """Load, filter and deduplicate before seeded shuffling and truncation.
 
     Explicit dataset ids are kept verbatim; otherwise ids use the zero-based
@@ -69,9 +100,21 @@ def load_tasks(
     before filtering, shuffle, or truncation: ``n_raw`` counts source rows,
     ``n_duplicates`` counts rows beyond each prompt's first, and
     ``n_conflicting_dropped`` counts unique prompt groups excluded for conflicts.
+
+    Code sources return an iterator; consume it completely to finalize ``meta``.
+    Their hidden tests are capped using the source settings and this seed.
     """
     if max_n is not None and (type(max_n) is not int or max_n < 0):
         raise ValueError("max_n must be a non-negative integer or None")
+    if source.kind == "code":
+        from marli.tasks.code import load_code_tasks
+
+        return _select_code_tasks(
+            load_code_tasks(source, split=split, loader=loader, meta=meta, seed=seed),
+            max_n=max_n,
+            seed=seed,
+            shuffle=shuffle,
+        )
     if loader is None:
         from datasets import load_dataset
 
