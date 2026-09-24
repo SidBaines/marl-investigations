@@ -175,3 +175,21 @@ async def test_no_vote_envs_skip_answer_classes(tmp_path: Path) -> None:
     result = await run_verb("eval score", ScoreConfig(str(episodes.manifest)), out=tmp_path / "s")
     rows = json_rows(result.handle.file("rows"))
     assert len(rows) == 2 and all("answer_group" not in row for row in rows)
+
+
+async def test_saved_no_vote_scores_never_setup_an_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = rollout_config(make_taskset(tmp_path / "tasks", 1), episodes_per_task=3)
+    cfg.env = "eval_novote"
+    episodes = await run_verb("eval rollout", cfg, out=tmp_path / "rollout")
+
+    async def forbidden(self: _NoVoteEnv) -> None:
+        pytest.fail("saved code scores do not need a sandbox")
+
+    monkeypatch.setattr(_NoVoteEnv, "setup", forbidden)
+    monkeypatch.setattr(_NoVoteEnv, "teardown", forbidden)
+    result = await run_verb(
+        "eval score", ScoreConfig(str(episodes.manifest)), out=tmp_path / "scores"
+    )
+    assert len(json_rows(result.handle.file("rows"))) == 3

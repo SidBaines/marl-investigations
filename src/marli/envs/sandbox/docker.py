@@ -2,11 +2,12 @@
 
 The workspace is a writable tmpfs (charged to the container's memory limit),
 retained between commands and removed with the container. Images must provide
-bash, GNU timeout, find, and sleep. Docker's init reaps orphaned children;
+bash, GNU timeout, realpath, cat, find, and sleep. Docker's init reaps orphaned children;
 GNU timeout kills the command's process group, and cleanup after each call
 kills all remaining processes except init and the initial sleep keeper.
 File operations hold the command lock after this cleanup, so no model process
-can replace a checked path with a symlink while Docker copies it.
+can replace a checked path with a symlink during exec-based file I/O. Exec
+writes as the container user into tmpfs even with a read-only root filesystem.
 """
 
 from __future__ import annotations
@@ -18,9 +19,7 @@ import math
 import os
 import re
 import signal
-import stat
 import subprocess
-import tempfile
 import time
 import uuid
 import warnings
@@ -125,8 +124,11 @@ class DockerSandboxConfig:
         for name in ("allow_network", "read_only_root"):
             if type(getattr(self, name)) is not bool:
                 raise ConfigError(f"{name} must be a boolean")
-        if self.network == "host" or self.network.startswith("container:"):
-            raise ConfigError("host and shared-container networking are forbidden")
+        user = self.user.partition(":")[0]
+        if user == "root" or (user.isdecimal() and int(user) == 0):
+            raise ConfigError("sandbox user must not be root")
+        if self.network == "host" or self.network.startswith(("container:", "ns:")):
+            raise ConfigError("host and shared-namespace networking are forbidden")
         if self.network != "none" and not self.allow_network:
             raise ConfigError("network requires allow_network=True")
         path = PurePosixPath(self.workdir)
@@ -162,6 +164,7 @@ async def _capture(
     cap: int,
     stdin: str | None = None,
     overflow_limit: bool = False,
+    strict_stdout: bool = False,
 ) -> ExecResult:
     """Bound memory while draining both pipes, including when the client hangs."""
     started = time.monotonic()
@@ -239,7 +242,9 @@ async def _capture(
         else (process.returncode or 1)
         if overflow.is_set()
         else process.returncode,
-        stdout.text(),
+        (stdout.head + stdout.tail).decode(
+            errors="strict" if strict_stdout and stdout.total <= cap else "replace"
+        ),
         stderr_text,
         timed_out,
         time.monotonic() - started,
@@ -342,6 +347,7 @@ class DockerSandbox:
                     "--norc",
                     "-c",
                     "command -v timeout >/dev/null && command -v find >/dev/null && "
+                    "command -v realpath >/dev/null && command -v cat >/dev/null && "
                     'read -r keeper _ < /proc/1/task/1/children; printf "%s" "$keeper"',
                     "marli-start",
                 )
@@ -434,10 +440,12 @@ class DockerSandbox:
         path = PurePosixPath(rel)
         if path.is_absolute() or ".." in path.parts or not path.parts or "\0" in rel:
             raise ValueError("expected a relative file path within the sandbox")
-        # No model processes survive exec, and callers hold _lock across check + cp.
+        # No model processes survive exec; hold _lock across check + file I/O.
         script = """
 root=$1; create=$2; shift 2
 [ ! -L "$root" ] || exit 42
+resolved_root=$(realpath -e -- "$root") || exit 42
+[ "$resolved_root" = "$root" ] || exit 42
 cd -- "$root" || exit 42
 while [ "$#" -gt 1 ]; do
     [ ! -L "$1" ] || exit 42
@@ -447,6 +455,9 @@ while [ "$#" -gt 1 ]; do
 done
 [ ! -L "$1" ] || exit 42
 if [ -e "$1" ]; then [ -f "$1" ] || exit 42; else [ "$create" = yes ] || exit 44; fi
+resolved=$(realpath -m -- "$1" && printf /) || exit 42
+resolved=${resolved%$'\n/'}
+case "$resolved" in "$root"/*) printf '%s' "$resolved" ;; *) exit 42 ;; esac
 """
         result = await _capture(
             [
@@ -472,45 +483,48 @@ if [ -e "$1" ]; then [ -f "$1" ] || exit 42; else [ "$create" = yes ] || exit 44
             raise FileNotFoundError(rel)
         if result.timed_out or result.exit_code != 0:
             raise BackendError(f"Docker file path check failed: {result.stderr}")
-        return str(PurePosixPath(self.config.workdir) / path)
+        resolved = result.stdout
+        if result.truncated or not resolved.startswith(self.config.workdir + "/"):
+            raise ValueError("sandbox file path escapes the workspace")
+        return resolved
 
     async def read_file(self, rel: str) -> str:
         async with self._lock:
             path = await self._file_path(rel)
-            with tempfile.TemporaryDirectory(prefix="marli-docker-") as temp:
-                target = Path(temp) / "file"
-                await self._cli("cp", f"{self.container_id}:{path}", str(target))
-                if not stat.S_ISREG(target.lstat().st_mode):
-                    raise ValueError("sandbox file must be a regular file")
-                return target.read_text(encoding="utf-8")
+            result = await _capture(
+                [self.config.docker, "exec", self._require_started(), "cat", "--", path],
+                timeout_s=_CONTROL_TIMEOUT,
+                cap=self.config.max_output_bytes,
+                overflow_limit=True,
+                strict_stdout=True,
+            )
+            if result.truncated:
+                raise ValueError("sandbox file exceeds max_output_bytes")
+            if result.timed_out or result.exit_code != 0:
+                raise BackendError(f"Docker file read failed: {result.stderr}")
+            return result.stdout
 
     async def write_file(self, rel: str, content: str) -> None:
         async with self._lock:
             path = await self._file_path(rel, create=True)
-            with tempfile.TemporaryDirectory(prefix="marli-docker-") as temp:
-                source = Path(temp) / "file"
-                source.write_text(content, encoding="utf-8")
-                # cp uploads are root-owned. Stage in a directory owned by the
-                # sandbox user, then write as that user so chmod/delete work too.
-                source.chmod(0o644)
-                staging = f"/tmp/marli-copy-{uuid.uuid4().hex}"
-                await self._cli("exec", self.container_id, "mkdir", "-m", "700", staging)
-                try:
-                    await self._cli("cp", str(source), f"{self.container_id}:{staging}/file")
-                    await self._cli(
-                        "exec",
-                        self.container_id,
-                        "bash",
-                        "--noprofile",
-                        "--norc",
-                        "-c",
-                        'umask 077; cat -- "$1/file" > "$2"',
-                        "marli-write",
-                        staging,
-                        path,
-                    )
-                finally:
-                    await self._cli("exec", self.container_id, "rm", "-rf", "--", staging)
+            result = await _capture(
+                [
+                    self.config.docker,
+                    "exec",
+                    "-i",
+                    self._require_started(),
+                    "sh",
+                    "-c",
+                    'umask 077; cat > "$1"',
+                    "sh",
+                    path,
+                ],
+                timeout_s=_CONTROL_TIMEOUT,
+                cap=65536,
+                stdin=content,
+            )
+            if result.timed_out or result.exit_code != 0:
+                raise BackendError(f"Docker file write failed: {result.stderr}")
 
     async def reset(self) -> None:
         self._require_started()

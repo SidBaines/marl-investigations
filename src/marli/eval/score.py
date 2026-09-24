@@ -70,7 +70,7 @@ async def score(cfg: ScoreConfig, run: RunDir) -> Scores:
         # Answer equivalence (maj@k) is undefined for envs without votes (code).
         groupable = getattr(env, "supports_vote", True)
         representatives: list[str] = []
-        needs_env = cfg.regrade or len(episodes) > 1
+        needs_env = cfg.regrade or (groupable and len(episodes) > 1)
         try:
             if needs_env:
                 await env.setup()
