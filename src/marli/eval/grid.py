@@ -174,8 +174,7 @@ def should_resume(handle: Report, cfg: GridConfig) -> bool:
     cost = sum(handle.meta.get("retired_cost_usd", {}).values())
     for cell in cfg.cells:
         if cell.scores is not None:
-            cost += float(Scores.load(state[cell.label]["scores"]).meta.get("cost_usd", 0))
-            continue
+            continue  # referenced Scores were paid for by another run, not this grid
         path = Path(state[cell.label]["directory"]) / "rollout"
         if not (path / "episodes.json").exists():
             return True
@@ -227,7 +226,9 @@ async def grid(cfg: GridConfig, run: RunDir) -> Report:
     for cell in cfg.cells:
         if cell.scores is not None:
             sources[cell.label] = Scores.load(input_manifest(cell.scores, "scores"))
-            costs[cell.label] = float(sources[cell.label].meta.get("cost_usd", 0.0))
+            # Referenced Scores were paid for by another run: they don't draw on
+            # this grid's max_usd (their cost still appears in the report rows).
+            costs[cell.label] = 0.0
         else:
             configs[cell.label] = rollout_config(cfg.common, cell)
             if configs[cell.label].tasks is None:
