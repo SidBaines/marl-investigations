@@ -438,3 +438,12 @@ async def test_cancelled_start_cleans_up(tmp_path: Path) -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert not process_alive(child.pid)
+
+
+def test_server_path_puts_the_vllm_venv_bin_first():
+    from marli.serve.vllm import venv_path
+
+    assert venv_path("/opt/vllm/bin/python", "/usr/bin:/opt/vllm/bin:/bin") == (
+        "/opt/vllm/bin:/usr/bin:/bin"
+    )
+    assert venv_path("/opt/vllm/bin/python", "") == "/opt/vllm/bin"

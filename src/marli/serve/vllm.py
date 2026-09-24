@@ -7,6 +7,7 @@ produce separate observation handles, preserving that record and its log.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -140,8 +141,20 @@ class Server(Handle):
         return {"base_url": self.base_url, "models": self.models, "pid": self.pid}
 
 
+def venv_path(python: str, path: str | None = None) -> str:
+    """PATH for the server with the vLLM venv's ``bin`` first, as activation would.
+
+    vLLM JIT-builds kernels at startup (flashinfer's sampler runs ``ninja``) and
+    finds the build tools on PATH; they live beside the venv's interpreter.
+    """
+    path = os.environ.get("PATH", "") if path is None else path
+    bin_dir = os.path.dirname(os.path.abspath(python))
+    return os.pathsep.join([bin_dir, *(p for p in path.split(os.pathsep) if p and p != bin_dir)])
+
+
 async def vllm(cfg: VLLMServeConfig, run: RunDir) -> Server:
     model, argv, env = launch_args(cfg)
+    env = {**env, "PATH": venv_path(cfg.python)}
     host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(cfg.host, cfg.host)
     base_url = f"http://{'[' + host + ']' if ':' in host else host}:{cfg.port}"
     supervisor = Supervisor(
