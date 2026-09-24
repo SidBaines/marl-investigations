@@ -198,10 +198,13 @@ class HarmonyRenderer:
                         arguments = None
                         # Native code tools emit an unquoted body, under either
                         # `code` or `<|constrain|>code` headers. Only an unambiguous
-                        # single string parameter can receive that body verbatim.
+                        # single string parameter can receive that body verbatim, and
+                        # only from a completed call that did not declare JSON: a
+                        # broken or truncated JSON body stays malformed.
                         spec = specs.get(name)
                         properties = spec.parameters.get("properties", {}) if spec else {}
-                        if len(properties) == 1:
+                        declared_json = "json" in (message.content_type or "").lower()
+                        if len(properties) == 1 and termination == "stop" and not declared_json:
                             parameter, schema = next(iter(properties.items()))
                             if schema.get("type") == "string":
                                 arguments = {parameter: raw}

@@ -25,6 +25,7 @@ from pathlib import Path
 from statistics import fmean
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 import marli
 from marli import runlog
@@ -385,6 +386,9 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
     backends: dict[str, TrainBackend] = {}
     learners: dict[str, Learner] = {}
     run_name = cfg.run_name or run.config_hash[:12]
+    # Sampler names must never be reused, but a resume re-runs the steps after its
+    # last checkpoint: suffix this attempt so re-run snapshots get fresh names.
+    attempt = uuid4().hex[:6]
     inputs = (InputRef.of(taskset),)
     safe_to_save = True
 
@@ -541,7 +545,10 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                 if isinstance(result, BaseException):
                     raise result
             snapshots = await asyncio.gather(
-                *(learners[name].sync_sampler(f"{run_name}-{name}-s{step}") for name in stepped),
+                *(
+                    learners[name].sync_sampler(f"{run_name}-{name}-s{step}-{attempt}")
+                    for name in stepped
+                ),
                 return_exceptions=True,
             )
             for snapshot in snapshots:

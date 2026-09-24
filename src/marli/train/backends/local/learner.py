@@ -544,7 +544,14 @@ class LocalLearner:
         model = self.pool.peft_model
         assert model is not None
         model.set_adapter(self.name)
-        set_peft_model_state_dict(model, weights, adapter_name=self.name)
+        result = set_peft_model_state_dict(model, weights, adapter_name=self.name)
+        unexpected = list(getattr(result, "unexpected_keys", None) or [])
+        if unexpected:
+            # A wrong reverse key map would otherwise resume from the initial weights.
+            raise ValueError(
+                f"local checkpoint has {len(unexpected)} keys the adapter does not use, "
+                f"e.g. {unexpected[:3]}"
+            )
         if state is not None:
             self.optimizer.load_state_dict(state["optimizer"])
             self.step = state["step"]

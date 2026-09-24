@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import socket
+import subprocess
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -385,6 +388,8 @@ async def test_close_preserves_adapters_owned_by_another_run(local: tuple) -> No
                 "learner": "x",
                 "owner": "other-run",
                 "path": "/foreign",
+                "owner_pid": os.getpid(),  # a live process on this host
+                "owner_host": socket.gethostname(),
             }
         ],
     ).save()
@@ -396,8 +401,37 @@ async def test_close_preserves_adapters_owned_by_another_run(local: tuple) -> No
     assert all(json.loads(call.content).get("lora_name") != "foreign" for call in calls)
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_adapters_of_a_dead_run_are_evicted_before_publishing(
+    local: tuple, legacy: bool
+) -> None:
+    # A killed run never calls close(): its adapters would hold every slot and
+    # the resumed run could not publish (max_loras=3 leaves 2 snapshot slots).
+    backend, calls, _ = local
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    owner = {} if legacy else {"owner_pid": dead.pid, "owner_host": socket.gethostname()}
+    stale = [
+        {"name": f"old-{i}", "learner": "x", "owner": "killed-run", "path": "/old", **owner}
+        for i in range(2)
+    ]
+    server = Server.load(backend.server_json)
+    replace(server, models=[*server.models, "old-0", "old-1"], adapters=stale).save()
+    learner = await new_learner(backend)
+    await learner.sync_sampler("run-x-s5")
+    server = Server.load(backend.server_json)
+    assert [a["name"] for a in server.adapters] == ["run-x-s5"]
+    assert server.models == ["qwen3_5_4b", "run-x-s5"]
+    unloaded = [
+        json.loads(call.content)["lora_name"]
+        for call in calls
+        if call.url.path.endswith("unload_lora_adapter")
+    ]
+    assert unloaded == ["old-0", "old-1"]
+
+
 @pytest.mark.parametrize(
-    "score,error", [(-1.0, "ignored adapter"), (-0.9, None), (-0.7, "probe drift")]
+    "score,error", [(-1.0, "ignored adapter"), (-0.9, None), (-0.7, "effect drift")]
 )
 async def test_hot_load_checks_effect_and_parity(
     local: tuple, score: float, error: str | None
@@ -543,7 +577,7 @@ async def test_bad_effect_check_preserves_publication_version(
         return (-0.7,) * (len(tokens) - 1), (-1.0,) * (len(tokens) - 1)
 
     monkeypatch.setattr(learner, "probe_logprobs", changed_probe)
-    with pytest.raises(BackendError, match="probe drift"):
+    with pytest.raises(BackendError, match="effect drift"):
         await learner.sync_sampler("rejected")
     assert learner.version == 1
     if inplace:

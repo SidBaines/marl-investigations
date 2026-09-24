@@ -131,8 +131,11 @@ base) and in vLLM (adapted and base). The vLLM 0.30 request uses
 `/v1/completions`, `echo=true`, `prompt_logprobs=0`, `max_tokens=1`; scores
 come from `choices[0].prompt_logprobs`, excluding the null first position.
 Publication raises `BackendError` if vLLM returns base-identical scores while
-the learner adapter changes them, or mean absolute learner/vLLM drift exceeds
-`adapter_check_tol` (default **0.05 nats**, typical spike drift **0.005**).
+the learner adapter changes them, or if the adapter's *effect* disagrees: the
+mean over probe positions of |(vLLM adapted − vLLM base) − (learner adapted −
+learner base)| exceeds `adapter_check_tol` (default **0.05 nats**). Comparing
+effects cancels the ~0.03-nat HF/vLLM kernel mismatch that even the base model
+shows on a short context-free probe; both drifts are logged at INFO.
 The initial version-zero base policy needs no check; restoring weights at
 version zero does hot-load an adapter and is checked.
 
@@ -211,3 +214,13 @@ Keep raw benchmark outputs private; never commit gated prompts or transcripts.
 4. Run `serve stop`, then a fresh `serve status`; verify `running=false`.
 5. Stop/delete the pod through the approved pod lifecycle workflow only after
    verifying checkpoint persistence. Record final billed spend. Pods are not storage.
+
+## Kill and resume
+
+A killed run never calls `close()`, so its adapters stay loaded in vLLM and
+listed in `server.json`. The next `LocalBackend` unloads adapters whose owner
+process is gone (same host, dead pid; records without a pid count as stale)
+before counting free `max_loras` slots. Adapters of live runs are untouched.
+A resume re-runs the steps after its last checkpoint; sampler names carry a
+per-attempt suffix (`<run>-<learner>-s<step>-<attempt>`) so re-run snapshots
+never reuse a served name. Learner state is written under `<out>/states/`.

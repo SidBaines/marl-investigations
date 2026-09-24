@@ -161,7 +161,7 @@ def test_parse_final(renderer: HarmonyRenderer, encoding: HarmonyEncoding) -> No
     assert turn.tool_calls == ()
 
 
-@pytest.mark.parametrize("raw", ["[]", '"4"', "null"])
+@pytest.mark.parametrize("raw", ["not json", "[]", '"4"', "null", '{"answer":'])
 def test_bad_tool_arguments_are_retained(
     renderer: HarmonyRenderer, encoding: HarmonyEncoding, raw: str
 ) -> None:
@@ -198,8 +198,7 @@ def test_length_truncated_tool(renderer: HarmonyRenderer, encoding: HarmonyEncod
     )
     turn = renderer.parse(ids)
     assert turn.termination == "length"
-    assert turn.tool_calls[0].ok
-    assert turn.tool_calls[0].arguments == {"answer": '{"answer": "'}
+    assert not turn.tool_calls[0].ok
     assert turn.tool_calls[0].raw == '{"answer": "'
 
 

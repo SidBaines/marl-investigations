@@ -9,7 +9,11 @@ are an opt-in trade-off. Exported directories survive unloading and shutdown.
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import re
+import socket
+from contextlib import suppress
 from dataclasses import replace
 from math import isfinite
 from pathlib import Path
@@ -27,6 +31,8 @@ from marli.serve.vllm import Server
 from marli.train.backends.base import SamplerSnapshot
 from marli.train.checkpoint import Checkpoint
 from marli.train.types import LearnerSpec
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from marli.train.backends.local.learner import LocalLearner, LocalLearnerPool
@@ -64,6 +70,34 @@ class _SamplerMixin:
     async def close(self) -> None:
         await self._backend._close_learner(self.name)
         await super().close()
+
+
+# A fixed probe (math prose + code) scored in both engines after every hot-load.
+_PROBE_TEXT = (
+    "The sum of two and three is five. To check it in Python: print(2 + 3)\n"
+    "Let x be a positive integer with x^2 - 5x + 6 = 0. Factoring gives (x - 2)(x - 3) = 0, "
+    "so x = 2 or x = 3, and the sum of all solutions is 5. Therefore the answer is \\boxed{5}.\n"
+)
+
+
+def _owner_alive(adapter: dict[str, object]) -> bool:
+    """Whether the process that published ``adapter`` may still be using it.
+
+    Records from before owner pids were stored, and records from a dead process
+    on this host (a killed or crashed run), are stale. Other hosts are assumed live.
+    """
+    pid, host = adapter.get("owner_pid"), adapter.get("owner_host")
+    if not isinstance(pid, int):
+        return False
+    if host != socket.gethostname():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class LocalBackend:
@@ -199,7 +233,7 @@ class LocalBackend:
 
     async def _check_adapter(self, learner: LocalLearner, name: str) -> None:
         renderer = get_renderer(learner.model.renderer, hf_id=learner.model.hf_id)
-        tokens = renderer.encode_text("The sum of two and three is five. Python: print(2 + 3)\n")
+        tokens = renderer.encode_text(_PROBE_TEXT)
         adapted, base = await learner.probe_logprobs(tokens)
         served = await self._prompt_logprobs(name, tokens)
         served_base = await self._prompt_logprobs(self.base_name, tokens)
@@ -215,11 +249,23 @@ class LocalBackend:
             raise BackendError(
                 f"vLLM ignored adapter {name!r}: probe equals base but learner differs"
             )
-        drift = sum(abs(a - b) for a, b in zip(served, adapted, strict=True)) / len(served)
+        # Compare the adapter's *effect* (adapted - base) in both engines: vLLM and
+        # HF kernels disagree by ~0.03 nats on short context-free prompts even
+        # for the base model, and that shared mismatch cancels here.
+        n = len(served)
+        drift = sum(
+            abs((s - sb) - (a - b))
+            for s, sb, a, b in zip(served, served_base, adapted, base, strict=True)
+        ) / n
+        base_drift = sum(abs(sb - b) for sb, b in zip(served_base, base, strict=True)) / n
+        log.info(
+            "adapter %s probe: effect drift %.4f, base drift %.4f nats (n=%d)",
+            name, drift, base_drift, n,
+        )
         if drift > self.adapter_check_tol:
             raise BackendError(
-                f"vLLM adapter {name!r} probe drift {drift:.6f} nats exceeds "
-                f"adapter_check_tol={self.adapter_check_tol}"
+                f"vLLM adapter {name!r} probe effect drift {drift:.6f} nats exceeds "
+                f"adapter_check_tol={self.adapter_check_tol} (base drift {base_drift:.6f})"
             )
 
     async def _publish(
@@ -237,6 +283,7 @@ class LocalBackend:
             inplace = self.adapter_names == "inplace" and learner._current_adapter is not None
             served_name = learner._current_adapter if inplace else name
             assert served_name is not None
+            server = await self._evict_stale(server)
             candidates = [
                 adapter
                 for adapter in server.adapters
@@ -267,6 +314,8 @@ class LocalBackend:
                 "path": str(path),
                 "learner": learner.name,
                 "owner": self._owner,
+                "owner_pid": os.getpid(),
+                "owner_host": socket.gethostname(),
             }
             server = replace(
                 server,
@@ -293,6 +342,32 @@ class LocalBackend:
             return SamplerSnapshot(
                 learner.name, version, str(path), f"vllm:@{self.server_json}#{served_name}"
             )
+
+    async def _evict_stale(self, server: Server) -> Server:
+        """Unload adapters left by a dead run (e.g. killed before ``close()``).
+
+        Their slots would otherwise count against ``max_loras`` forever, so a
+        resumed run could not publish. Adapters of live owners are untouched.
+        """
+        stale = [
+            adapter
+            for adapter in server.adapters
+            if adapter.get("owner") != self._owner and not _owner_alive(adapter)
+        ]
+        for adapter in stale:
+            log.warning("unloading stale adapter %s (owner process gone)", adapter["name"])
+            with suppress(ConfigError):  # vLLM no longer has it (e.g. it restarted)
+                await self._request("/unload_lora_adapter", {"lora_name": adapter["name"]})
+        if not stale:
+            return server
+        names = {adapter["name"] for adapter in stale}
+        server = replace(
+            server,
+            models=[model for model in server.models if model not in names],
+            adapters=[adapter for adapter in server.adapters if adapter["name"] not in names],
+        )
+        server.save()
+        return server
 
     async def _unload(self, name: str) -> None:
         await self._request("/unload_lora_adapter", {"lora_name": name})
