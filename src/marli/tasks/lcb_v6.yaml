@@ -12,3 +12,5 @@ filters: {contest_date_min: "2025-02-01", contest_date_max: "2025-05-01"}
 notes: >-
   Inclusive contest-date window. Public examples are included in the full test
   bundle; private tests are decoded with a restricted unpickler.
+  Evaluation set: exclude these normalized problem texts from DeepCoder training
+  with data build source=deepcoder exclude=<lcb_v6 TaskSet manifest>.

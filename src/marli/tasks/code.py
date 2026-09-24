@@ -254,12 +254,13 @@ def load_code_tasks(
 
     Counts describe the full pool before the caller shuffles or truncates.
     Dedupe keeps the first valid row, without merging different hidden suites.
+    Per-subset splits override the source default; an explicit split overrides both.
     """
-    selected_split = source.split if split is None else split
     counts = dict(n_raw=0, n_duplicates=0, n_no_tests=0, n_unparseable=0, n_filtered=0)
     tasks: list[Task] = []
     seen: set[str] = set()
     for subset in source.subsets or [source.config]:
+        selected_split = source.subset_splits.get(subset, source.split) if split is None else split
         for row_index, row in enumerate(_source_rows(source, subset, selected_split, loader)):
             counts["n_raw"] += 1
             try:

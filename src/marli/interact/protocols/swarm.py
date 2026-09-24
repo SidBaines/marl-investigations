@@ -179,6 +179,8 @@ class SwarmProtocol(Protocol):
         return [results[handle.agent_id] for handle in handles]
 
     async def run(self, io: SystemIO) -> Outcome:
+        if self.config.aggregation == "vote" and not io.env.supports_vote:
+            raise ConfigError(f"vote aggregation is undefined for {io.env.name}")
         handles = [
             await io.start_agent(
                 "peer",

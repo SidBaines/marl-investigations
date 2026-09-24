@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,12 +17,21 @@ from marli.envs.registry import make_env
 from marli.envs.sandbox.base import ExecResult
 from marli.envs.sandbox.subprocess import SubprocessSandbox
 from marli.errors import ConfigError
+from marli.eval.policies import PolicySpec
+from marli.eval.rollout import RolloutConfig
+from marli.eval.score import ScoreConfig
+from marli.eval.store import read_episodes
 from marli.interact.limits import Limits
 from marli.interact.protocols.single import SingleConfig, SingleProtocol
+from marli.interact.protocols.swarm import SwarmConfig, SwarmProtocol
 from marli.interact.run import EpisodeSpec, run_episode
+from marli.interact.system import SystemIO
 from marli.interact.tools import ToolCtx, run_tool
+from marli.interact.types import Outcome
 from marli.policy.scripted import ScriptedPolicy, Turn, turns_by_agent
 from marli.render.fake import FakeRenderer
+from marli.tasks.taskset import TaskSet, write_tasks
+from marli.verbs import run_verb
 
 
 def context(sandbox: Any = None) -> ToolCtx:
@@ -31,6 +41,7 @@ def context(sandbox: Any = None) -> ToolCtx:
 def test_registry_config_and_votes() -> None:
     env = make_env("code_fn", {}, code_task())
     assert isinstance(env, CodeFnEnv)
+    assert not env.supports_vote
     assert env.config == CodeFnEnvConfig()
     assert env.canonical("done") is None
     assert env.task_message("solver") == env.task_message("worker")
@@ -108,7 +119,7 @@ def test_subsampling_is_deterministic_and_logged(caplog: pytest.LogCaptureFixtur
 
 
 async def test_bash_tool_schema_timeout_and_errors() -> None:
-    (tool,) = CodeFnEnv({"bash_timeout_s": 1.25}, code_task()).tools("worker")
+    tool = CodeFnEnv({"bash_timeout_s": 1.25}, code_task()).tools("worker")[0]
     assert tool.spec.name == "bash" and tool.shared and not tool.control
 
     class RecordingSandbox:
@@ -145,7 +156,7 @@ async def test_setup_only_public_files_and_teardown() -> None:
         assert await sandbox.read_file("examples/00.in") == "2 3\n"
         assert await sandbox.read_file("examples/00.out") == "5"
         assert sorted(p.name for p in (path / "examples").iterdir()) == ["00.in", "00.out"]
-        (tool,) = env.tools("worker")
+        tool = env.tools("worker")[0]
         result = await run_tool(tool, context(sandbox), {"command": "pwd; cat examples/00.in"})
         assert json.loads(result.content)["stdout"] == f"{path}\n2 3\n"
     finally:
@@ -192,7 +203,7 @@ async def test_scripted_policy_full_loop_writes_tests_and_submits() -> None:
     )
     episode, buffers = await run_episode(spec)
     assert episode.ok and not episode.errors
-    assert episode.outcome.final_answer == "Implemented and tested."
+    assert episode.outcome.final_answer == SUM_SOLUTION
     expected = {
         "pass_all": 1.0,
         "pass_frac": 1.0,
@@ -226,7 +237,7 @@ async def test_grading_components(
     try:
         assert env.sandbox is not None
         await env.sandbox.write_file("solution.py", solution)
-        grade = await env.grade(SUM_SOLUTION)
+        grade = await env.grade(solution)
         assert grade == {
             "pass_all": float(fraction == 1),
             "correct": float(fraction == 1),
@@ -240,26 +251,32 @@ async def test_grading_components(
 
 
 @pytest.mark.usefixtures("sandbox_host")
-async def test_grade_ignores_note_and_uses_root_side_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    env = CodeFnEnv({"max_tests": 1}, code_task())
+async def test_submit_snapshots_source_and_grade_never_reads_agent_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env = CodeFnEnv({}, code_task())
     await env.setup()
     try:
         assert env.sandbox is not None
-        await env.sandbox.write_file("solution.py", SUM_SOLUTION)
-        real_read = env.sandbox.read_file
-        reads = []
+        source = SUM_SOLUTION + "# α comment\n" * 2000
+        await env.sandbox.write_file("solution.py", source)
+        tool = env.tools("solver")[1]
+        assert tool.spec.name == "submit" and tool.shared and tool.control
+        for arguments in ({}, {"answer": "This note is not source."}):
+            result = await run_tool(tool, context(env.sandbox), arguments)
+            assert result.control == {"submit": source}
+        await env.sandbox.write_file("solution.py", "raise RuntimeError('changed')")
 
-        async def read(rel: str) -> str:
-            reads.append(rel)
-            return await real_read(rel)
+        async def forbidden_read(rel: str) -> str:
+            pytest.fail("grading read the agent workspace")
 
-        monkeypatch.setattr(env.sandbox, "read_file", read)
-        for note in (None, "", "wrong answer", "pass_all=0"):
-            grade = await env.grade(note)
-            assert grade["pass_all"] == 1 and grade["n_tests"] == 1
-        assert reads == ["solution.py"] * 4
+        monkeypatch.setattr(env.sandbox, "read_file", forbidden_read)
+        assert (await env.grade(source))["pass_all"] == 1
+        assert (await env.grade(None))["compiled"] == 0
     finally:
         await env.teardown()
+    # Regrading works even after teardown, without ever setting up an agent sandbox.
+    assert (await CodeFnEnv({}, code_task()).grade(source))["pass_all"] == 1
 
 
 @pytest.mark.usefixtures("sandbox_host")
@@ -276,7 +293,7 @@ async def test_functional_and_leetcode_method(solution: str) -> None:
     try:
         assert env.sandbox is not None
         await env.sandbox.write_file("solution.py", solution)
-        assert (await env.grade("done"))["pass_all"] == 1
+        assert (await env.grade(solution))["pass_all"] == 1
     finally:
         await env.teardown()
 
@@ -299,8 +316,8 @@ async def test_stdout_whitespace_normalization(output: str, passed: int) -> None
     await env.setup()
     try:
         assert env.sandbox is not None
-        await env.sandbox.write_file("solution.py", f"print({output!r}, end='')")
-        assert (await env.grade("done"))["pass_all"] == passed
+        solution = f"print({output!r}, end='')"
+        assert (await env.grade(solution))["pass_all"] == passed
     finally:
         await env.teardown()
 
@@ -338,7 +355,7 @@ for path in ('hidden_tests.json', 'tests.json', 'examples/00.out',
     try:
         await agent.write_file("private", "workspace state must not enter the grader")
         await agent.write_file("solution.py", solution)
-        assert (await env.grade("done"))["pass_all"] == 1
+        assert (await env.grade(solution))["pass_all"] == 1
         assert len(records) == 1 and not records[0][1].exists()
         assert await agent.read_file("private") == "workspace state must not enter the grader"
     finally:
@@ -351,30 +368,28 @@ async def test_reset_prevents_cross_test_tampering() -> None:
     await env.setup()
     try:
         assert env.sandbox is not None
-        await env.sandbox.write_file(
-            "solution.py",
-            (
-                "from pathlib import Path\n"
-                "assert not Path('previous-test').exists()\n"
-                "Path('previous-test').write_text('state')\n"
-                "Path('solution.py').write_text('raise RuntimeError()')\n" + SUM_SOLUTION
-            ),
+        solution = (
+            "from pathlib import Path\n"
+            "assert not Path('previous-test').exists()\n"
+            "Path('previous-test').write_text('state')\n"
+            "Path('solution.py').write_text('raise RuntimeError()')\n" + SUM_SOLUTION
         )
-        assert (await env.grade("done"))["pass_all"] == 1
+        assert (await env.grade(solution))["pass_all"] == 1
     finally:
         await env.teardown()
 
 
 @pytest.mark.usefixtures("sandbox_host")
-async def test_missing_and_symlink_solution_fail_closed() -> None:
+async def test_submit_missing_and_symlink_solution_fail_closed() -> None:
     env = CodeFnEnv({}, code_task())
     await env.setup()
     try:
         assert env.sandbox is not None
+        tool = env.tools("solver")[1]
         await env.sandbox.exec("rm solution.py", timeout_s=3)
-        assert (await env.grade("done"))["compiled"] == 0
+        assert (await run_tool(tool, context(env.sandbox), {})).error
         await env.sandbox.exec("ln -s /etc/rp_environment solution.py", timeout_s=3)
-        assert (await env.grade("done"))["compiled"] == 0
+        assert (await run_tool(tool, context(env.sandbox), {})).error
     finally:
         await env.teardown()
 
@@ -386,7 +401,7 @@ async def test_cancel_grade_closes_grader() -> None:
     try:
         assert env.sandbox is not None
         await env.sandbox.write_file("solution.py", "while True: pass")
-        running = asyncio.create_task(env.grade("done"))
+        running = asyncio.create_task(env.grade("while True: pass"))
         for _ in range(200):
             if env._graders and all(hasattr(g, "workdir") for g in env._graders):
                 break
@@ -404,3 +419,175 @@ async def test_cancel_grade_closes_grader() -> None:
 def test_memory_limit_applies_to_both_rlimit_and_rss() -> None:
     sandbox = CodeFnEnv({"memory_mb": 128}, code_task())._new_sandbox()
     assert sandbox.limits.address_space_bytes == sandbox.max_memory_bytes == 128 * 1024**2
+
+
+async def test_submit_requires_sandbox_and_never_exposes_read_errors() -> None:
+    tool = CodeFnEnv({}, code_task()).tools("solver")[1]
+    assert (await run_tool(tool, context(), {})).error
+
+    class UnreadableSandbox:
+        async def read_file(self, rel: str) -> str:
+            raise UnicodeError("private content")
+
+    result = await run_tool(tool, context(UnreadableSandbox()), {})
+    assert result.error and not result.control
+    assert "private content" not in result.content
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_agent_with_solution_but_no_submit_gets_zero() -> None:
+    task = replace(code_task(), meta={"starter_code": SUM_SOLUTION})
+    renderer = FakeRenderer()
+    policy = ScriptedPolicy(
+        "script",
+        renderer,
+        turns_by_agent(
+            renderer,
+            {
+                "solver0": [Turn("Finished without submitting.")],
+            },
+        ),
+    )
+    spec = EpisodeSpec(
+        SingleProtocol(),
+        CodeFnEnv({}, task),
+        task,
+        {"solver": "script"},
+        {"script": policy},
+        {"script": FakeRenderer},
+        Limits(on_no_tool_call="end_agent"),
+    )
+    episode, _ = await run_episode(spec)
+    assert episode.outcome.final_answer is None
+    for grade in episode.grades.values():
+        assert grade["compiled"] == grade["correct"] == grade["pass_all"] == grade["pass_frac"] == 0
+        assert grade["n_tests"] == 3
+
+
+@pytest.mark.usefixtures("sandbox_host")
+@pytest.mark.parametrize(
+    "submissions",
+    [
+        {},
+        {"a": None},
+        {"a": SUM_SOLUTION},
+        {
+            "a": SUM_SOLUTION,
+            "b": SUM_SOLUTION,
+        },
+    ],
+)
+async def test_episode_system_rejects_every_code_vote(
+    submissions: dict[str, str | None],
+) -> None:
+    class VoteProtocol(SingleProtocol):
+        async def run(self, io: SystemIO) -> Outcome:
+            await io.vote(submissions)
+            pytest.fail("code vote was accepted")
+
+    renderer = FakeRenderer()
+    policy = ScriptedPolicy("script", renderer, turns_by_agent(renderer, {}))
+    task = code_task()
+    spec = EpisodeSpec(
+        VoteProtocol(),
+        CodeFnEnv({}, task),
+        task,
+        {"solver": "script"},
+        {"script": policy},
+        {"script": FakeRenderer},
+        Limits(),
+    )
+    with pytest.raises(ConfigError, match="vote.*code_fn"):
+        await run_episode(spec)
+    assert not policy.calls
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_code_swarm_finalizer_can_submit() -> None:
+    renderer = FakeRenderer()
+    task = replace(code_task(), meta={"starter_code": SUM_SOLUTION})
+    policy = ScriptedPolicy(
+        "script",
+        renderer,
+        turns_by_agent(
+            renderer,
+            {
+                "peer0": [Turn(tool_calls=(("submit", {}),))],
+                "finalizer0": [Turn(tool_calls=(("submit", {}),))],
+            },
+        ),
+    )
+    spec = EpisodeSpec(
+        SwarmProtocol(SwarmConfig(n_agents=1, aggregation="finalizer")),
+        CodeFnEnv({}, task),
+        task,
+        {"peer": "script", "finalizer": "script"},
+        {"script": policy},
+        {"script": FakeRenderer},
+        Limits(),
+    )
+    episode, _ = await run_episode(spec)
+    assert episode.ok and episode.outcome.final_answer == SUM_SOLUTION
+    assert episode.outcome.aggregation == "finalizer"
+    assert episode.grades["_system"]["pass_all"] == 1
+
+
+def sum_policy() -> ScriptedPolicy:
+    renderer = FakeRenderer()
+    return ScriptedPolicy(
+        "script",
+        renderer,
+        turns_by_agent(
+            renderer,
+            {
+                "solver0": [
+                    Turn(
+                        tool_calls=(
+                            ("bash", {"command": f"cat > solution.py <<'PY'\n{SUM_SOLUTION}PY\n"}),
+                            ("submit", {}),
+                        )
+                    )
+                ],
+            },
+        ),
+    )
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_saved_code_episode_regrades_from_source(tmp_path: Path) -> None:
+    root = tmp_path / "tasks"
+    write_tasks(root, [code_task()])
+    taskset = TaskSet(
+        root=root,
+        tasks="tasks.jsonl",
+        source="synthetic",
+        split="test",
+        kind="code",
+        n=1,
+        answer_format="tests",
+        commit_text=False,
+    )
+    taskset.save()
+    rollout = await run_verb(
+        "eval rollout",
+        RolloutConfig(
+            tasks=str(taskset.manifest_path),
+            env="code_fn",
+            protocol_config={"env_tools": ["bash"]},
+            policies={
+                "script": PolicySpec("scripted:test_envs_code_fn:sum_policy", renderer="fake")
+            },
+            seating={"solver": "script"},
+        ),
+        out=tmp_path / "episodes",
+    )
+    (episode,) = list(read_episodes(rollout.handle.root))
+    assert episode.outcome.final_answer == SUM_SOLUTION
+    assert episode.outcome.submissions == {"solver0": SUM_SOLUTION}
+    before = rollout.handle.file("episodes").read_bytes()
+    result = await run_verb(
+        "eval score", ScoreConfig(str(rollout.manifest), regrade=True), out=tmp_path / "regrade"
+    )
+    row = json.loads(result.handle.file("rows").read_text())
+    assert row["correct"] == 1 and row["own_correct"] == {"solver0": 1}
+    assert rollout.handle.file("episodes").read_bytes() == before

@@ -29,6 +29,7 @@ class TaskSourceSpec:
     notes: str = ""
     test_format: str | None = None
     subsets: list[str] = field(default_factory=list)
+    subset_splits: dict[str, str] = field(default_factory=dict)
     data_files: str | None = None
 
     def __post_init__(self) -> None:
@@ -37,8 +38,15 @@ class TaskSourceSpec:
         if self.kind == "math":
             if self.answer_format not in ("integer", "latex"):
                 raise ValueError("answer_format must be 'integer' or 'latex'")
-            if self.test_format is not None or self.subsets or self.data_files is not None:
-                raise ValueError("test_format, subsets and data_files are code-only fields")
+            if (
+                self.test_format is not None
+                or self.subsets
+                or self.subset_splits
+                or self.data_files is not None
+            ):
+                raise ValueError(
+                    "test_format, subsets, subset_splits and data_files are code-only fields"
+                )
         else:
             if self.answer_format != "tests":
                 raise ValueError("code answer_format must be 'tests'")
@@ -52,6 +60,14 @@ class TaskSourceSpec:
                 raise ValueError("subsets must be a list of nonempty strings")
             if len(set(self.subsets)) != len(self.subsets):
                 raise ValueError("subsets must be unique")
+            if (
+                not isinstance(self.subset_splits, dict)
+                or self.subset_splits.keys() - set(self.subsets)
+                or any(
+                    not isinstance(value, str) or not value for value in self.subset_splits.values()
+                )
+            ):
+                raise ValueError("subset_splits must map declared subsets to nonempty split names")
             if self.data_files is not None and (
                 not isinstance(self.data_files, str) or not self.data_files
             ):

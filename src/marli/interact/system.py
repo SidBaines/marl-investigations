@@ -298,6 +298,8 @@ class EpisodeSystem(SystemIO):
         return self.env.canonical(answer)
 
     async def vote(self, submissions: dict[str, str | None]) -> tuple[str | None, dict[str, int]]:
+        if not self.env.supports_vote:
+            raise ConfigError(f"vote aggregation is undefined for {self.env.name}")
         clusters: list[list[str]] = []
         for answer in submissions.values():
             if answer is None:

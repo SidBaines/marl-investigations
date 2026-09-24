@@ -1,6 +1,7 @@
 name: deepcoder
 hf_id: agentica-org/DeepCoder-Preview-Dataset
 subsets: [primeintellect, taco, lcbv5, codeforces]
+subset_splits: {primeintellect: train, taco: train, lcbv5: train, codeforces: test}
 split: train
 kind: code
 fields: {prompt: problem}
@@ -12,4 +13,7 @@ dedupe: true
 notes: >-
   Keep the first parseable row per Unicode/whitespace-normalized problem.
   Record empty-test, malformed-test and duplicate row counts.
-  Upstream Codeforces exposes only test; requesting its train split fails loudly.
+  DeepCoder uses the Codeforces test split for training; the other subsets use train.
+  Keep lcb_v6 as the evaluation set. Decontaminate this training source against a
+  built lcb_v6 TaskSet by normalized problem text using data build source=deepcoder
+  exclude=<lcb_v6 TaskSet manifest>.
