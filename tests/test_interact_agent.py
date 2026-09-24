@@ -209,9 +209,58 @@ async def test_nudges_are_bounded_and_tool_attempts_reset_them() -> None:
     assert episode.outcome.final_answer == "5"
     assert episode.calls[1].tool_calls[0].result == "error: could not parse tool call"
     assert "error: could not parse tool call" in spec.policies["script"].calls[2].prompt_text
-    spec = spec_for({"solver0": [Turn("a"), Turn("b")]}, limits=Limits(max_nudges=1))
+    # Exhausting the nudges forces a final answer (on_exhaust=force_final).
+    spec = spec_for({"solver0": []}, limits=Limits(max_nudges=1))
+    renderer = FakeRenderer()
+
+    def script(ctx: ScriptCtx) -> Sequence[int]:
+        if ctx.meta.purpose == "final":
+            return forced_answer(renderer)
+        return renderer.encode_completion("still thinking")
+
+    spec.policies["script"] = ScriptedPolicy("script", renderer, script)
     episode, _ = await run_episode(spec)
-    assert len(episode.calls) == 2 and episode.limits_hit == {"solver0": ("max_nudges",)}
+    assert [call.purpose for call in episode.calls] == [Purpose.ACT, Purpose.ACT, Purpose.FINAL]
+    assert episode.outcome.final_answer == "5"
+    assert episode.limits_hit == {"solver0": ("max_nudges",)}
+
+
+async def test_max_nudges_without_force_final_just_ends() -> None:
+    cfg = Limits(max_nudges=1, on_exhaust="none")
+    spec = spec_for({"solver0": [Turn("a"), Turn("b")]}, limits=cfg)
+    episode, _ = await run_episode(spec)
+    assert len(episode.calls) == 2 and episode.outcome.final_answer is None
+    assert episode.limits_hit == {"solver0": ("max_nudges",)}
+
+
+async def test_length_truncated_turns_are_not_nudge_strikes() -> None:
+    # Thinking models are routinely cut off by their allocation; that is not
+    # declining the tools and must not end the agent before it can answer.
+    turns = [Turn("x", stop=False), Turn("y", stop=False), Turn("z", stop=False), submit()]
+    spec = spec_for({"solver0": turns}, limits=Limits(max_nudges=1))
+    episode, _ = await run_episode(spec)
+    assert [call.termination for call in episode.calls[:3]] == [Termination.LENGTH] * 3
+    assert episode.outcome.final_answer == "5" and "max_nudges" not in str(episode.limits_hit)
+
+
+async def test_nudge_budget_resets_with_each_session() -> None:
+    # Session 1 ends by budget after a no-tool turn (one nudge strike); session 2
+    # starts a fresh context and must get its own nudge budget.
+    protocol = RuntimeProtocol(tools=("submit",))
+    cfg = Limits(
+        session=SessionLimits(max_sessions=2, max_gen_tokens=300, carry_reserve=0),
+        call=CallLimits(max_tokens=400, min_call_tokens=16),
+        max_nudges=1,
+    )
+    spec = spec_for(
+        {"solver0": [Turn("x" * 295), Turn("session two thinking"), submit()]},
+        protocol,
+        limits=cfg,
+    )
+    episode, _ = await run_episode(spec)
+    assert [call.session_idx for call in episode.calls] == [0, 1, 1]
+    assert episode.outcome.final_answer == "5"
+    assert "max_nudges" not in str(episode.limits_hit)
 
 
 async def test_forced_final_prefix_is_observation_and_parsed_with_completion() -> None:
