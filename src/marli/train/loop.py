@@ -421,6 +421,7 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                     kwargs = {
                         "server_json": cfg.local_server_json,
                         "adapters_dir": cfg.local_adapters_dir or str(run.path("adapters")),
+                        "state_dir": str(run.path("states")),
                     }
                 backends[spec.backend] = make_backend(
                     spec.backend, spend=spend, base_url=cfg.base_url, **kwargs

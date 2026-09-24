@@ -78,6 +78,7 @@ class LocalBackend:
         spend: SpendGuard | None = None,
         adapter_check_tol: float = 0.05,
         adapter_names: str = "versioned",
+        state_dir: str | None = None,
     ) -> None:
         if not isfinite(adapter_check_tol) or adapter_check_tol <= 0:
             raise ConfigError("adapter_check_tol must be finite and positive")
@@ -92,6 +93,11 @@ class LocalBackend:
         self.base_url = server.base_url.rstrip("/")
         self.base_name = server.models[0]
         self.adapters_dir = Path(adapters_dir).resolve()
+        # Learner state (adapter + optimizer) for checkpoints. Bare names from the
+        # loop resolve here, never against the CWD (which is the git checkout).
+        self.state_dir = (
+            Path(state_dir).resolve() if state_dir else self.adapters_dir.parent / "states"
+        )
         self.device = device
         self.spend = spend
         self.pool: LocalLearnerPool | None = None
@@ -130,7 +136,11 @@ class LocalBackend:
         from marli.train.backends.local.learner import LocalLearner, LocalLearnerPool
 
         class ServingLearner(_SamplerMixin, LocalLearner):
-            pass
+            async def save_state(self, name: str) -> str:
+                path = Path(name)
+                if not path.is_absolute():
+                    path = self._backend.state_dir / path
+                return await LocalLearner.save_state(self, str(path))
 
         torch.manual_seed(seed)
         if self.pool is None:

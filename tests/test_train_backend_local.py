@@ -276,7 +276,10 @@ async def test_failed_unload_keeps_new_policy_and_manifest_truthful(local: tuple
 async def test_state_methods_delegate_and_invalid_names_do_not_export(local: tuple) -> None:
     backend, calls, _ = local
     learner = await new_learner(backend)
-    assert await learner.save_state("step") == "states/step"
+    # Bare names resolve under the backend's state_dir (never the CWD).
+    assert backend.state_dir == backend.adapters_dir.parent / "states"
+    assert await learner.save_state("step") == f"states/{backend.state_dir / 'step'}"
+    assert await learner.save_state("/abs/step") == "states//abs/step"
     await learner.load_state("state.json", with_optimizer=False)
     assert learner.loaded == [("state.json", False)]
     for name in ("../escape", "", ".", "..", "/absolute", "has#suffix"):
