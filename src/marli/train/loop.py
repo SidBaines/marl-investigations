@@ -5,8 +5,8 @@ Only a saved step is a recovery boundary. Intermediate manifests live under
 Resume discards rollouts and metrics after that boundary and repeats the work;
 interrupted/unsaved steps lose their compute, but their recorded spend remains
 charged. Backend state and published samplers are never interchanged.
-The prescribed task_id/step group identity requires distinct tasks within a
-batch; an epoch wrap that repeats a task fails instead of merging credit groups.
+Repeated tasks occupy distinct batch slots, with independent sampling seeds and
+credit groups even when an epoch wraps within a batch.
 """
 
 from __future__ import annotations
@@ -18,18 +18,21 @@ import os
 import random
 import warnings
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 from pathlib import Path
 from statistics import fmean
+from time import perf_counter
 from typing import Any
 
+import marli
 from marli import runlog
 from marli.budget import SpendGuard, tinker_cost
 from marli.config import to_dict
 from marli.envs.base import Task
-from marli.envs.registry import make_env
-from marli.errors import BudgetExceededError, ConfigError, HashMismatchError
+from marli.envs.registry import ENVS, make_env
+from marli.errors import BackendError, BudgetExceededError, ConfigError, HashMismatchError
 from marli.eval.policies import PolicySpec, build_policies, resolve_spec
 from marli.eval.policies import SamplingOverrides as FrozenSampling
 from marli.handles import InputRef, atomic_write_text
@@ -84,6 +87,9 @@ def _preflight(
     cfg: TrainRLConfig,
 ) -> tuple[CreditContext, dict[str, ModelSpec], dict[str, PolicySpec]]:
     cfg.__post_init__()
+    from marli.envs import math as _math  # noqa: F401
+
+    ENVS.get(cfg.env)
     name, _, protocol_config = resolve_protocol(cfg.protocol, cfg.protocol_config)
     roles = {role.role: role for role in build_protocol(cfg.protocol, cfg.protocol_config).roles()}
     if missing := roles.keys() - cfg.seating.keys():
@@ -102,10 +108,6 @@ def _preflight(
             seated.add(learner)
         else:
             ref = parse_ref(seat, resolve_paths=True)
-            if ref.kind == "ckpt":
-                from marli.train.checkpoint import resolve_checkpoint_ref
-
-                ref = parse_ref(resolve_checkpoint_ref(ref, None))
             frozen[role] = PolicySpec(
                 str(ref), sampling=cfg.frozen_sampling.get(role, FrozenSampling())
             )
@@ -130,6 +132,8 @@ def _preflight(
     models = {name: load_model(spec.base_model) for name, spec in cfg.learners.items()}
     for name, spec in cfg.learners.items():
         model = models[name]
+        if spec.init_from and not spec.init_from.startswith("tinker://"):
+            Checkpoint.load(spec.init_from).require_state(name)
         if spec.backend == "local":
             raise ConfigError("local training backend not implemented until M4")
         if spec.backend == "tinker" and (
@@ -210,6 +214,7 @@ async def _save_checkpoint(
         "rae_state": dict(rae_state),
         "sampler_paths": {name: snapshot.path for name, snapshot in samplers.items()},
         "spend": meta["spend"],
+        "provenance": meta["provenance"],
     }
     checkpoint = Checkpoint(
         root=run.out,
@@ -279,7 +284,7 @@ async def _rollouts(
                         renderers=renderers,
                         limits=cfg.limits,
                         schedule=cfg.schedule,
-                        run_seed=derive_seed(cfg.seed, step),
+                        run_seed=derive_seed(cfg.seed, step, slot),
                         episode_idx=idx,
                         group_id=f"{task.task_id}/s{step}/b{slot}",
                         config_hash=run.config_hash,
@@ -329,10 +334,21 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
     tasks = read_tasks(taskset)
     if not tasks or len({task.task_id for task in tasks}) != len(tasks):
         raise ConfigError("training TaskSet must be non-empty with unique task_id values")
-    runlog.require_clean_tree()
-    provenance = runlog.provenance()
+    repo_dir = Path(marli.__file__).resolve().parent
+    runlog.require_clean_tree(repo_dir)
+    provenance = runlog.provenance(repo_dir)
     latest = _latest_checkpoint(run)
     completed = latest.step if latest else -1
+    if latest:
+        previous_commit = latest.meta.get("provenance", {}).get("git_commit")
+        if previous_commit != provenance["git_commit"]:
+            warnings.warn(
+                f"training commit changed across resume: {previous_commit} -> "
+                f"{provenance['git_commit']}",
+                stacklevel=2,
+            )
+        if completed == cfg.steps - 1:
+            return latest
     cursor = DataCursor(**latest.data_cursor) if latest else DataCursor()
     rae_state = dict(latest.rae_state) if latest else {}
     samplers: dict[str, SamplerSnapshot] = {}
@@ -346,11 +362,13 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                     latest.policy_ref(name),
                 )
     metrics = run.read_rows("metrics.jsonl")
-    previous_spend = max((row["spend"]["spent_usd"] for row in metrics), default=0.0)
+    spend_records = [row["spend"] for row in metrics]
+    if latest:
+        spend_records.append(latest.meta["spend"])
     if run.path("progress.json").exists():
-        previous_spend = max(
-            previous_spend, json.loads(run.path("progress.json").read_text())["spend"]["spent_usd"]
-        )
+        spend_records.append(json.loads(run.path("progress.json").read_text())["spend"])
+    # These are cumulative snapshots, not per-step charges.
+    previous_spend = max(spend_records, key=lambda row: row["spent_usd"], default={"by_item": {}})
     atomic_write_text(
         run.path("metrics.jsonl"),
         "".join(json.dumps(row) + "\n" for row in metrics if row["step"] <= completed),
@@ -385,7 +403,11 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
         )
 
     try:
-        spend.charge(previous_spend, "previous attempts")
+        for item, usd in previous_spend["by_item"].items():
+            # Restore the full ledger even when the new limit is already exceeded.
+            with suppress(BudgetExceededError):
+                spend.charge(usd, item)
+        spend.check(0, "previous attempts")
         frozen, renderers = await build_policies(frozen_specs, spend=spend)
         for name, spec in cfg.learners.items():
             if spec.backend not in backends:
@@ -406,8 +428,10 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
             )
             learners[name] = learner
             if latest:
-                await learner.load_state(latest.require_state(name), with_optimizer=True)
-                learner.version = latest.learners[name]["version"]
+                assert learner.version == latest.learners[name]["version"], (
+                    f"learner {name!r} restored version {learner.version}, "
+                    f"expected {latest.learners[name]['version']}"
+                )
             elif spec.init_from and not spec.init_from.startswith("tinker://"):
                 warm = Checkpoint.load(spec.init_from)
                 if warm.learners[name]["sampler"]:
@@ -427,6 +451,7 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                 if name is not None:
                     policies[role] = learners[name].policy(policy_id=role)
                     assert policies[role].trainable
+            sample_start = perf_counter()
             sampled = await _rollouts(
                 cfg,
                 run,
@@ -437,15 +462,54 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                 learners=learners,
                 spend=spend,
             )
+            sample_seconds = perf_counter() - sample_start
             episodes = [episode for episode, _ in sampled]
             credits, stats, next_rae = assign_credit(
                 episodes, cfg.credit, replace(ctx, step=step), rae_state=rae_state
             )
+            if stats.dropped_not_ok:
+                warnings.warn(
+                    f"step {step}: {stats.dropped_not_ok}/{stats.n_episodes} episodes failed",
+                    stacklevel=2,
+                )
+                if stats.dropped_not_ok == stats.n_episodes:
+                    raise BackendError(f"step {step}: all {stats.n_episodes} episodes failed")
+                if stats.dropped_not_ok / stats.n_episodes > cfg.max_failed_frac:
+                    raise BackendError(
+                        f"step {step}: failed episode fraction exceeds "
+                        f"max_failed_frac={cfg.max_failed_frac}"
+                    )
+            episode_metrics = {
+                "accuracy": fmean(
+                    e.grades.get("_system", {}).get(cfg.credit.reward_key, 0.0) for e in episodes
+                ),
+                **{
+                    key: fmean(e.metrics.get(key, 0.0) for e in episodes)
+                    for key in (
+                        "total_gen",
+                        "calls",
+                        "n_workers",
+                        "cross_reads",
+                        "n_agents",
+                        "cp_tokens",
+                        "peak_ctx",
+                    )
+                },
+                "agent_sessions": fmean(e.metrics.get("n_sessions", 0.0) for e in episodes),
+            }
             datums: dict[str, list[TrainDatum]] = {name: [] for name in learners}
+            datums_zero_adv = dict.fromkeys(learners, 0)
             max_len = {name: model.max_ctx for name, model in models.items()}
             for episode, buffers in sampled:
                 for datum in build_datums(episode, buffers, credits, max_len=max_len):
-                    datums[datum.learner].append(datum)
+                    if any(
+                        advantage != 0.0
+                        for advantage, mask in zip(datum.advantages, datum.mask, strict=True)
+                        if mask > 0
+                    ):
+                        datums[datum.learner].append(datum)
+                    else:
+                        datums_zero_adv[datum.learner] += 1
             stepped = [name for name, data in datums.items() if data]
             # All Tinker reservations must fit before any optimizer is submitted.
             spend.check(
@@ -457,6 +521,7 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                 "all learners' training step",
             )
             safe_to_save = False
+            train_start = perf_counter()
             results = await asyncio.gather(
                 *(learners[name].train_step(datums[name]) for name in stepped),
                 return_exceptions=True,
@@ -472,6 +537,7 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                 if isinstance(snapshot, BaseException):
                     raise snapshot
                 samplers[snapshot.learner] = snapshot
+            train_seconds = perf_counter() - train_start
             completed, cursor, rae_state = step, next_cursor, next_rae
             safe_to_save = True
             run.append_row(
@@ -479,15 +545,17 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                 {
                     "step": step,
                     "reward_mean": stats.reward_mean,
-                    "accuracy": fmean(e.grades["_system"]["correct"] for e in episodes),
-                    **{
-                        key: fmean(e.metrics.get(key, 0.0) for e in episodes)
-                        for key in ("total_gen", "calls", "n_workers", "cross_reads", "n_sessions")
+                    **episode_metrics,
+                    "sample_seconds": sample_seconds,
+                    "train_seconds": train_seconds,
+                    "learner_versions": {
+                        name: learner.version for name, learner in learners.items()
                     },
                     "learners": {result.learner: asdict(result) for result in results},
                     "idle_learners": [name for name in learners if name not in stepped],
                     "credit": asdict(stats),
                     "datums": datum_stats([d for data in datums.values() for d in data]),
+                    "datums_zero_adv": datums_zero_adv,
                     "spend": spend.summary(),
                 },
             )

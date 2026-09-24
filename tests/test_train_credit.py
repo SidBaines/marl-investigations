@@ -1064,3 +1064,12 @@ def test_unit_warning_is_per_recipient_agent(count: int | None, kind: str) -> No
     )
     warnings = validate_credit(CreditConfig(segment_credit="last"), ctx, group_size=2)
     assert len(warnings) == 1 and "U == 1" in warnings[0]
+
+
+def test_multi_session_tail_carry_does_not_warn_segment_credit_has_no_effect() -> None:
+    from marli.interact.protocols.multi_session import MultiSessionConfig, MultiSessionProtocol
+
+    [role] = MultiSessionProtocol(MultiSessionConfig(carry="tail")).roles()
+    assert "end_session" not in role.tools
+    ctx = CreditContext({role.role: role}, {role.role: "learner:shared"})
+    assert validate_credit(CreditConfig(segment_credit="last"), ctx, group_size=2) == []

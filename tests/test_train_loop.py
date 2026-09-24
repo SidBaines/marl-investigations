@@ -11,11 +11,12 @@ from typing import Any
 
 import pytest
 from _marli_test_envs import ArithEnv
+from test_train_backend_tinker import sdk as sdk
 
 from marli.budget import SpendGuard
 from marli.envs.base import Task
 from marli.envs.registry import ENVS
-from marli.errors import BudgetExceededError, ConfigError
+from marli.errors import BackendError, BudgetExceededError, ConfigError
 from marli.eval.policies import SamplingOverrides
 from marli.interact.records import read_episodes
 from marli.interact.run import EpisodeSpec
@@ -25,6 +26,7 @@ from marli.model import load_model
 from marli.policy.scripted import ScriptCtx, ScriptedPolicy, Turn, from_callable
 from marli.render.fake import FakeRenderer
 from marli.rundir import RunStatus
+from marli.seeds import derive_seed
 from marli.tasks.taskset import TaskSet, write_tasks
 from marli.train import loop
 from marli.train.backends.base import StepResult
@@ -189,7 +191,11 @@ async def test_routing_versions_metrics_and_checkpoint(
     assert [row["accuracy"] for row in metrics] == [0.5, 0.5]
     assert metrics[-1]["credit"]["n_groups"] == 1
     assert metrics[-1]["calls"] == 2
-    assert metrics[-1]["n_sessions"] == 2
+    assert metrics[-1]["agent_sessions"] == metrics[-1]["n_agents"] == 2
+    assert "n_sessions" not in metrics[-1]
+    assert metrics[-1]["cp_tokens"] > 0 and metrics[-1]["peak_ctx"] > 0
+    assert metrics[-1]["sample_seconds"] > 0 and metrics[-1]["train_seconds"] >= 0
+    assert metrics[-1]["learner_versions"] == {name: 2 for name in cfg.learners}
     for record in metrics[-1]["learners"].values():
         assert record["n_datums"] == (4 if shared else 2)
         assert record["n_action_tokens"] > 0
@@ -325,7 +331,7 @@ async def test_resume_restores_cursor_rae_optimizer_and_versions(
     resumed = fake_setup.backends[1].learners
     assert all(len(learner.steps) == 2 and learner.weights == 4 for learner in resumed.values())
     assert all({d.policy_version for d in learner.steps[0]} == {2} for learner in resumed.values())
-    assert loaded and all(with_optimizer for _, with_optimizer in loaded)
+    assert len(loaded) == 2 and all(with_optimizer for _, with_optimizer in loaded)
     assert (out / "rollouts/step_00000/episodes.jsonl").read_bytes() == first_rows
     assert [saved["step"] for saved in result.handle.history] == [0, 1, 2, 3]
     expected_rae = 0.5
@@ -447,6 +453,7 @@ async def test_stale_call_fails_before_training(
 @pytest.mark.parametrize(
     "bad",
     [
+        {"env": "missing_environment"},
         {"seating": {"a": "learner:a"}},
         {"seating": {"a": "learner:unknown", "b": "learner:b"}},
         {"frozen_sampling": {"a": SamplingOverrides(0.5)}},
@@ -530,9 +537,349 @@ async def test_aggregate_training_budget_prevents_partial_update(
 async def test_repeated_batch_tasks_get_distinct_groups(
     tmp_path: Path,
     fake_setup: FakeSetup,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    original = loop.run_episode
+    seeds: dict[str, int] = {}
+
+    async def record_seed(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]:
+        seeds[spec.group_id] = spec.run_seed
+        return await original(spec)
+
+    monkeypatch.setattr(loop, "run_episode", record_seed)
     cfg = config(make_taskset(tmp_path / "tasks", 1), batch_tasks=2, steps=1)
     await run_verb("train rl", cfg, out=tmp_path / "train")
     episodes = list(read_episodes(tmp_path / "train/rollouts/step_00000", with_tokens=False))
     groups = {episode.group_id for episode, _ in episodes}
     assert len(groups) == 2 and all(group.endswith(("/b0", "/b1")) for group in groups)
+    assert seeds == {f"t0/s0/b{slot}": derive_seed(cfg.seed, 0, slot) for slot in range(2)}
+    assert len(set(seeds.values())) == 2
+
+
+@pytest.mark.parametrize(
+    ("failed", "max_failed_frac", "fails"),
+    [(4, 1.0, True), (3, 0.5, True), (2, 0.5, False), (1, 0.0, True)],
+)
+async def test_failed_episodes_warn_and_enforce_step_threshold(
+    tmp_path: Path,
+    fake_setup: FakeSetup,
+    monkeypatch: pytest.MonkeyPatch,
+    failed: int,
+    max_failed_frac: float,
+    fails: bool,
+) -> None:
+    cfg = config(
+        make_taskset(tmp_path / "tasks"),
+        steps=1,
+        group_size=4,
+        max_failed_frac=max_failed_frac,
+    )
+    out = tmp_path / "train"
+    original = loop.run_episode
+
+    async def fail(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]:
+        episode, buffers = await original(spec)
+        if spec.episode_idx < failed:
+            episode = replace(episode, ok=False, grades={})
+        return episode, buffers
+
+    with monkeypatch.context() as patch:
+        patch.setattr(loop, "run_episode", fail)
+        with pytest.warns(UserWarning, match=f"{failed}/4 episodes failed"):
+            if fails:
+                with pytest.raises(BackendError) as error:
+                    await run_verb("train rl", cfg, out=out)
+                assert error.value.exit_code == 5
+            else:
+                await run_verb("train rl", cfg, out=out)
+    learners = fake_setup.backends[0].learners.values()
+    if fails:
+        assert all(not learner.steps and learner.version == 0 for learner in learners)
+        assert rows(out / "metrics.jsonl") == []
+        assert not list(out.glob("**/checkpoint.json"))
+        assert json.loads((out / "progress.json").read_text())["step"] == -1
+        resumed = await run_verb("train rl", cfg, out=out)
+        assert resumed.status is RunStatus.RESUME
+        assert resumed.handle.data_cursor == {"epoch": 0, "index": 1}
+        assert [row["step"] for row in rows(out / "metrics.jsonl")] == [0]
+    else:
+        assert all(len(learner.steps) == 1 for learner in learners)
+        assert rows(out / "metrics.jsonl")[0]["accuracy"] == 0.25
+
+
+@pytest.mark.parametrize("shared", [False, True])
+async def test_zero_advantage_datums_are_not_trained(
+    tmp_path: Path,
+    fake_setup: FakeSetup,
+    monkeypatch: pytest.MonkeyPatch,
+    shared: bool,
+) -> None:
+    cfg = config(
+        make_taskset(tmp_path / "tasks"),
+        steps=1,
+        max_usd=1,
+        credit=CreditConfig(default_target="individual", drop_zero_variance=False),
+    )
+    for spec in cfg.learners.values():
+        spec.backend = "tinker"
+    reservations: list[int] = []
+
+    def cost(model: Any, *, train: int) -> float:
+        reservations.append(train)
+        return 0.75
+
+    monkeypatch.setattr(loop, "tinker_cost", cost)
+    if shared:
+        cfg.learners.pop("b")
+        cfg.seating["b"] = "learner:a"
+    original = loop.run_episode
+
+    async def constant_worker(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]:
+        episode, buffers = await original(spec)
+        return replace(episode, grades={**episode.grades, "b0": {"correct": 0.0}}), buffers
+
+    monkeypatch.setattr(loop, "run_episode", constant_worker)
+    result = await run_verb("train rl", cfg, out=tmp_path / "train")
+    learners = fake_setup.backends[0].learners
+    [batch] = learners["a"].steps
+    assert len(batch) == 2 and {d.role for d in batch} == {"a"}
+    assert reservations == [sum(len(d.tokens) - 1 for d in batch)]
+    if not shared:
+        assert learners["b"].steps == [] and learners["b"].version == 0
+    metric = rows(result.handle.root / "metrics.jsonl")[0]
+    assert metric["datums_zero_adv"] == ({"a": 2} if shared else {"a": 0, "b": 2})
+    assert metric["learners"]["a"]["n_tokens"] == sum(len(d.tokens) - 1 for d in batch)
+    assert metric["datums"]["a/n"] == 2
+
+
+async def test_zero_advantage_checks_only_masked_positions(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = loop.build_datums
+
+    def observation_only(*args: Any, **kwargs: Any) -> list[TrainDatum]:
+        return [
+            replace(d, advantages=tuple(0.0 if mask else 7.0 for mask in d.mask))
+            for d in original(*args, **kwargs)
+        ]
+
+    monkeypatch.setattr(loop, "build_datums", observation_only)
+    result = await run_verb(
+        "train rl", config(make_taskset(tmp_path / "tasks"), steps=1), out=tmp_path / "train"
+    )
+    assert all(
+        not learner.steps and learner.version == 0
+        for learner in fake_setup.backends[0].learners.values()
+    )
+    metric = rows(result.handle.root / "metrics.jsonl")[0]
+    assert metric["datums_zero_adv"] == {"a": 2, "b": 2}
+    assert metric["learners"] == metric["datums"] == {}
+
+
+async def test_custom_reward_metrics_are_captured_before_training(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(
+        make_taskset(tmp_path / "tasks"), steps=1, credit=CreditConfig(reward_key="quality")
+    )
+    original_episode, original_train = loop.run_episode, FakeLearner.train_step
+    sampled: list[Episode] = []
+
+    async def quality(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]:
+        episode, buffers = await original_episode(spec)
+        episode = replace(
+            episode,
+            grades={name: {"quality": g["correct"]} for name, g in episode.grades.items()},
+        )
+        sampled.append(episode)
+        return episode, buffers
+
+    async def train(
+        learner: FakeLearner, datums: Sequence[TrainDatum], **kwargs: Any
+    ) -> StepResult:
+        for episode in sampled:
+            episode.grades.clear()
+            episode.metrics.clear()
+        return await original_train(learner, datums, **kwargs)
+
+    monkeypatch.setattr(loop, "run_episode", quality)
+    monkeypatch.setattr(FakeLearner, "train_step", train)
+    result = await run_verb("train rl", cfg, out=tmp_path / "train")
+    metric = rows(result.handle.root / "metrics.jsonl")[0]
+    assert metric["accuracy"] == 0.5
+    assert metric["calls"] == metric["agent_sessions"] == metric["n_agents"] == 2
+
+
+async def test_tinker_resume_restores_once_without_exporting_sampler(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch, sdk: Any
+) -> None:
+    from marli.train.backends.registry import make_backend
+
+    cfg = config(make_taskset(tmp_path / "tasks"), max_usd=1)
+    for spec in cfg.learners.values():
+        spec.backend = "tinker"
+    out = tmp_path / "train"
+    original_save = Checkpoint.save
+
+    def crash(checkpoint: Checkpoint) -> Path:
+        original_save(checkpoint)
+        raise RuntimeError("interrupt after checkpoint")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Checkpoint, "save", crash)
+        with pytest.raises(RuntimeError, match="interrupt"):
+            await run_verb("train rl", cfg, out=out)
+    saved = Checkpoint.load(out / "checkpoints/step_00000")
+    replace(
+        saved,
+        learners={
+            name: {
+                **record,
+                "state": f"tinker://old/weights/{name}",
+                "sampler": f"tinker://old/sampler_weights/{name}",
+            }
+            for name, record in saved.learners.items()
+        },
+    ).save()
+
+    async def stop_before_sampling(*args: Any, **kwargs: Any) -> Any:
+        assert {name: learner.version for name, learner in kwargs["learners"].items()} == {
+            "a": 1,
+            "b": 1,
+        }
+        raise RuntimeError("restored")
+
+    monkeypatch.setattr(loop, "make_backend", make_backend)
+    monkeypatch.setattr(loop, "_rollouts", stop_before_sampling)
+    with pytest.raises(RuntimeError, match="restored"):
+        await run_verb("train rl", cfg, out=out)
+    service = sdk.ServiceClient.return_value
+    assert [
+        call.kwargs["path"]
+        for call in service.create_training_client_from_state_with_optimizer_async.await_args_list
+    ] == ["tinker://old/weights/a", "tinker://old/weights/b"]
+    service.create_training_client_from_state_async.assert_not_awaited()
+    service.create_lora_training_client_async.assert_not_awaited()
+    assert [call.kwargs for call in service.create_sampling_client_async.await_args_list] == [
+        {"model_path": "tinker://old/sampler_weights/a"},
+        {"model_path": "tinker://old/sampler_weights/b"},
+    ]
+    assert len(sdk.clients) == 2 and all(not client.saves for client in sdk.clients)
+    service.close.assert_awaited_once()
+
+
+async def test_final_checkpoint_resume_needs_no_backend(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(make_taskset(tmp_path / "tasks"), steps=1)
+    out = tmp_path / "train"
+    original = Checkpoint.save
+
+    def crash(checkpoint: Checkpoint) -> Path:
+        original(checkpoint)
+        raise RuntimeError("before finalize")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Checkpoint, "save", crash)
+        with pytest.raises(RuntimeError, match="before finalize"):
+            await run_verb("train rl", cfg, out=out)
+    before = (out / "metrics.jsonl").read_bytes()
+    result = await run_verb("train rl", cfg, out=out)
+    assert result.status is RunStatus.RESUME and result.handle.step == 0
+    assert len(fake_setup.backends) == 1
+    assert (out / "metrics.jsonl").read_bytes() == before
+    assert (out / "checkpoint.json").is_file()
+
+
+async def test_resume_preserves_itemized_spend_even_over_budget(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(make_taskset(tmp_path / "tasks"), max_usd=10)
+    out = tmp_path / "train"
+    original = loop.run_episode
+
+    async def billed(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]:
+        guard = fake_setup.guards[-1]
+        guard.charge(0.25, "sampling")
+        guard.charge(0.5, "other")
+        if "/s1/" in spec.group_id:
+            raise BackendError("interrupted sampling")
+        return await original(spec)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(loop, "run_episode", billed)
+        with pytest.raises(BackendError, match="interrupted sampling"):
+            await run_verb("train rl", cfg, out=out)
+    previous = json.loads((out / "progress.json").read_text())["spend"]
+    for _ in range(2):
+        with pytest.raises(BudgetExceededError):
+            await run_verb("train rl", replace(cfg, max_usd=0.1), out=out)
+        ledger = json.loads((out / "progress.json").read_text())["spend"]
+        assert ledger["by_item"] == previous["by_item"]
+        assert ledger["spent_usd"] == previous["spent_usd"]
+    assert len(fake_setup.backends) == 1
+
+    async def bill_again(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]:
+        fake_setup.guards[-1].charge(0.25, "sampling")
+        return await original(spec)
+
+    monkeypatch.setattr(loop, "run_episode", bill_again)
+    result = await run_verb("train rl", cfg, out=out)
+    assert result.handle.meta["spend"]["by_item"] == {
+        **previous["by_item"],
+        "sampling": previous["by_item"]["sampling"] + 0.5,
+    }
+    assert result.handle.meta["spend"]["spent_usd"] == previous["spent_usd"] + 0.5
+
+
+async def test_checkpoint_provenance_retains_each_attempt_and_warns_on_commit_change(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(make_taskset(tmp_path / "tasks"))
+    out = tmp_path / "train"
+    original = Checkpoint.save
+    first = {"git_commit": "first", "git_dirty": False, "host": "one"}
+    second = {"git_commit": "second", "git_dirty": False, "host": "two"}
+
+    def crash(checkpoint: Checkpoint) -> Path:
+        original(checkpoint)
+        raise RuntimeError("interrupt")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(loop.runlog, "provenance", lambda repo_dir=None: first)
+        patch.setattr(Checkpoint, "save", crash)
+        with pytest.raises(RuntimeError, match="interrupt"):
+            await run_verb("train rl", cfg, out=out)
+    monkeypatch.setattr(loop.runlog, "provenance", lambda repo_dir=None: second)
+    with pytest.warns(UserWarning, match="commit changed across resume: first -> second"):
+        result = await run_verb("train rl", cfg, out=out)
+    assert result.handle.meta["history_state"]["0"]["provenance"] == first
+    assert result.handle.meta["history_state"]["1"]["provenance"] == second
+    assert result.handle.meta["provenance"] == second
+
+
+async def test_wrong_restored_version_fails_before_sampling(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = config(make_taskset(tmp_path / "tasks"))
+    out = tmp_path / "train"
+    original_save, original_create = Checkpoint.save, FakeBackend.create_learner
+
+    def crash(checkpoint: Checkpoint) -> Path:
+        original_save(checkpoint)
+        raise RuntimeError("interrupt")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Checkpoint, "save", crash)
+        with pytest.raises(RuntimeError, match="interrupt"):
+            await run_verb("train rl", cfg, out=out)
+
+    async def wrong_version(*args: Any, **kwargs: Any) -> FakeLearner:
+        learner = await original_create(*args, **kwargs)
+        learner.version = 999
+        return learner
+
+    monkeypatch.setattr(FakeBackend, "create_learner", wrong_version)
+    with pytest.raises(AssertionError, match="restored version 999, expected 1"):
+        await run_verb("train rl", cfg, out=out)
+    assert not (out / "rollouts/step_00001").exists()

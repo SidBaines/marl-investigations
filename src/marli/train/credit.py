@@ -102,7 +102,10 @@ def validate_credit(
         cfg.segment_credit != "all"
         and recipient_roles
         and all(
-            role.context.kind not in {"compaction", "both"} and "end_session" not in role.tools
+            role.context.kind not in {"compaction", "both"}
+            # Tail carry can cross session budgets without an end_session tool.
+            and not (role.context.kind == "tail" and role.context.tail_tokens > 0)
+            and "end_session" not in role.tools
             for role in recipient_roles
         )
     ):
