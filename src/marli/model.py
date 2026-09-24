@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import date
 from math import isfinite
 from pathlib import Path
+from typing import Any
 
 from marli.errors import ConfigError
 from marli.registry import Registry
@@ -72,8 +74,28 @@ class ModelSpec:
     # Local learner support: yes = supported, no = unsupported, unverified = untested.
     local: str = "unverified"
     notes: str = ""  # capability caveats and provenance for this catalog entry
+    lora: dict[str, Any] = dataclass_field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.lora, dict):
+            raise ValueError("lora must be a mapping")
+        unknown = self.lora.keys() - {"target_modules", "export_key_map"}
+        if unknown:
+            raise ValueError(f"unknown lora keys: {sorted(unknown)}")
+        targets = self.lora.get("target_modules", [])
+        if not isinstance(targets, list) or any(not isinstance(x, str) or not x for x in targets):
+            raise ValueError("lora.target_modules must be a list of nonempty strings")
+        prefixes = self.lora.get("export_key_map", {})
+        if not isinstance(prefixes, dict) or any(
+            not isinstance(x, str) or not x for pair in prefixes.items() for x in pair
+        ):
+            raise ValueError("lora.export_key_map must map nonempty string prefixes")
+        # Both directions must have one unambiguous match for checkpoint restore.
+        for side in (list(prefixes), list(prefixes.values())):
+            if any(
+                a.startswith(b) for i, a in enumerate(side) for j, b in enumerate(side) if i != j
+            ):
+                raise ValueError("lora.export_key_map prefixes must not overlap")
         for field, choices in (
             ("family", ("qwen3", "qwen3_5", "gpt_oss")),
             ("renderer", _renderer_names()),

@@ -1,18 +1,15 @@
 """One frozen text model hosts isolated optimizers without retaining T-by-V logits.
 
-LoRA targets every text-model ``nn.Linear``, including ``lm_head``: SDK 0.30.1
-``tinker/types/lora_config.py`` defaults train_attn/train_mlp/train_unembed
-to True. PEFT's ``all-linear`` shorthand excludes the head, so targets are
-enumerated explicitly. Nonlinear hybrid attention components (convolutions,
-norms) stay frozen. Fused expert parameters are unsupported rather than silently
-omitting their MLP adapters. Dropout is zero and alpha defaults to rank;
-LearnerSpec has no alpha field, so an explicit constructor kwarg supplies it.
+Registry targets cover hybrid attention projections; absent targets fall back
+to every text-model ``nn.Linear``, including ``lm_head``. Nonlinear components
+stay frozen. gpt-oss expert parameters require an explicit parity override.
+Dropout is zero and alpha defaults to rank.
 
 Qwen3.5's multimodal architecture is loaded through Qwen3_5ForCausalLM.
 Transformers 5.5.4's qwen3_5_text conversion mapping strips
-``model.language_model`` prefixes and ignores visual weights. Training and
-export therefore use text-only PEFT paths; M4-2 must serve the matching text
-model. Sampling and init_from orchestration belong to that backend.
+``model.language_model`` prefixes and ignores visual weights. Training uses
+text-only PEFT paths. Export maps them to the serving architecture and
+records the inverse needed for state restore. Sampling belongs to the backend.
 """
 
 from __future__ import annotations
@@ -20,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
@@ -39,6 +36,21 @@ if TYPE_CHECKING:
     from marli.policy.base import TokenPolicy
 
 _T = TypeVar("_T")
+
+
+def _map_adapter_keys(
+    weights: Mapping[str, Tensor], prefixes: Mapping[str, str]
+) -> dict[str, Tensor]:
+    """Rewrite leading paths once, refusing a lossy export or reverse mapping."""
+    mapped = {}
+    for key, value in weights.items():
+        dest = next(
+            (new + key[len(old) :] for old, new in prefixes.items() if key.startswith(old)), key
+        )
+        if dest in mapped:
+            raise ValueError(f"adapter export key collision: {dest}")
+        mapped[dest] = value
+    return mapped
 
 
 def chunked_logprobs(
@@ -93,7 +105,7 @@ class LocalLearnerPool:
         device: str,
         dtype: str = "bfloat16",
         gradient_checkpointing: bool = True,
-        attn_implementation: str = "sdpa",
+        attn_implementation: str | None = None,
     ) -> None:
         import torch
         import transformers
@@ -112,7 +124,10 @@ class LocalLearnerPool:
             else (transformers.AutoModelForCausalLM)
         )
         base = loader.from_pretrained(
-            model.hf_id, dtype=getattr(torch, dtype), attn_implementation=attn_implementation
+            model.hf_id,
+            dtype=getattr(torch, dtype),
+            attn_implementation=attn_implementation
+            or ("flex_attention" if model.family == "gpt_oss" else "sdpa"),
         )
         self._initialize(base, model, resolved, gradient_checkpointing, tokenizer_sha=None)
 
@@ -159,7 +174,7 @@ class LocalLearnerPool:
     ) -> None:
         import torch
 
-        if any(
+        if spec.family != "gpt_oss" and any(
             parameter.ndim > 2 for name, parameter in base.named_parameters() if "experts" in name
         ):
             raise ValueError("fused expert MLP adapters are unsupported by this local learner")
@@ -176,7 +191,7 @@ class LocalLearnerPool:
             self.base_model.gradient_checkpointing_enable(
                 gradient_checkpointing_kwargs={"use_reentrant": False}
             )
-        self.target_modules = tuple(
+        self.target_modules = tuple(spec.lora.get("target_modules", [])) or tuple(
             name for name, module in base.named_modules() if isinstance(module, torch.nn.Linear)
         )
         if not self.target_modules:
@@ -227,6 +242,8 @@ class LocalLearner:
         alpha: int | None = None,
         max_tokens_per_microbatch: int = 16384,
         logprob_chunk_size: int = 1024,
+        target_parameters: Sequence[str] = (),
+        allow_unverified_expert_lora: bool = False,
     ) -> None:
         if spec.backend != "local":
             raise ValueError("LocalLearner requires spec.backend == 'local'")
@@ -238,6 +255,12 @@ class LocalLearner:
             raise ValueError("LoRA alpha must be positive")
         if pool.lock.locked():
             raise RuntimeError("create learners before starting concurrent pool operations")
+        if target_parameters and pool.model.family != "gpt_oss":
+            raise ValueError("expert LoRA target_parameters are only supported for gpt-oss")
+        if target_parameters and not allow_unverified_expert_lora:
+            raise ValueError("gpt-oss expert LoRA requires allow_unverified_expert_lora=True")
+        if set(target_parameters) - {"mlp.experts.gate_up_proj", "mlp.experts.down_proj"}:
+            raise ValueError("unsupported gpt-oss expert LoRA target_parameters")
 
         import torch
         from peft import LoraConfig, get_peft_model
@@ -249,11 +272,13 @@ class LocalLearner:
         self.alpha = spec.rank if alpha is None else alpha
         self.max_tokens_per_microbatch = max_tokens_per_microbatch
         self.logprob_chunk_size = logprob_chunk_size
+        self.target_parameters = tuple(target_parameters)
         config = LoraConfig(
             r=spec.rank,
             lora_alpha=self.alpha,
             lora_dropout=0.0,
             target_modules=list(pool.target_modules),
+            target_parameters=list(self.target_parameters) or None,
             bias="none",
             task_type="CAUSAL_LM",
         )
@@ -368,6 +393,46 @@ class LocalLearner:
             metrics=metrics_out,
         )
 
+    async def probe_logprobs(
+        self, tokens: Sequence[int]
+    ) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        """Score identical ids with this adapter and the frozen base under one lock."""
+        if len(tokens) < 2 or len(tokens) > self.model.max_ctx:
+            raise ValueError("probe must contain 2..max_ctx tokens")
+        return await self.pool._run_locked(lambda: self._probe_logprobs(tuple(tokens)))
+
+    def _probe_logprobs(
+        self, tokens: tuple[int, ...]
+    ) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        import torch
+
+        model = self.pool.peft_model
+        assert model is not None
+        model.set_adapter(self.name)
+        model.eval()
+        ids = torch.tensor([tokens], device=self.pool.device)
+
+        def score() -> tuple[float, ...]:
+            hidden = self.pool.base_model.get_decoder()(
+                input_ids=ids[:, :-1], use_cache=False, return_dict=True
+            ).last_hidden_state
+            return tuple(
+                chunked_logprobs(
+                    hidden,
+                    self.pool.base_model.get_output_embeddings(),
+                    ids[:, 1:],
+                    chunk_size=self.logprob_chunk_size,
+                )
+                .flatten()
+                .tolist()
+            )
+
+        with torch.no_grad():
+            adapted = score()
+            with model.disable_adapter():
+                base = score()
+        return adapted, base
+
     async def save_adapter(self, directory: str | Path) -> str:
         """Export a standalone PEFT directory, including a LoRA unembedding head."""
         return await self.pool._run_locked(lambda: self._save_adapter(Path(directory)))
@@ -384,6 +449,8 @@ class LocalLearner:
         weights = get_peft_model_state_dict(
             model, adapter_name=self.name, save_embedding_layers=False
         )
+        prefixes = self.model.lora.get("export_key_map", {})
+        weights = _map_adapter_keys(weights, prefixes)
         save_file(
             {key: value.detach().cpu().contiguous().clone() for key, value in weights.items()},
             directory / "adapter_model.safetensors",
@@ -393,6 +460,16 @@ class LocalLearner:
         config.base_model_name_or_path = self.model.hf_id
         config.inference_mode = True
         config.save_pretrained(directory)
+        manifest = {
+            "schema_version": 1,
+            "base_model": self.model.hf_id,
+            "export_key_map": prefixes,
+            "weights": "adapter_model.safetensors",
+            "config": "adapter_config.json",
+        }
+        temporary = directory / "manifest.json.tmp"
+        temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(directory / "manifest.json")
         return str(directory.resolve())
 
     async def save_state(self, name: str) -> str:
@@ -415,6 +492,7 @@ class LocalLearner:
             "rank": self.spec.rank,
             "alpha": self.alpha,
             "target_modules": list(self.pool.target_modules),
+            "target_parameters": list(self.target_parameters),
             "tokenizer_sha": self.pool.tokenizer_sha,
             "step": self.step,
             "adapter": "adapter",
@@ -447,7 +525,15 @@ class LocalLearner:
         for key, value in expected.items():
             if manifest.get(key) != value:
                 raise ValueError(f"local checkpoint {key} mismatch")
-        weights = load_file(directory / manifest["adapter"] / "adapter_model.safetensors")
+        if manifest.get("target_parameters", []) != list(self.target_parameters):
+            raise ValueError("local checkpoint target_parameters mismatch")
+        adapter_dir = directory / manifest["adapter"]
+        weights = load_file(adapter_dir / "adapter_model.safetensors")
+        # Older checkpoints have text-model keys and no standalone adapter manifest.
+        adapter_manifest = adapter_dir / "manifest.json"
+        if adapter_manifest.exists():
+            prefixes = json.loads(adapter_manifest.read_text(encoding="utf-8"))["export_key_map"]
+            weights = _map_adapter_keys(weights, {new: old for old, new in prefixes.items()})
         state = (
             torch.load(
                 directory / manifest["optimizer"], map_location=self.pool.device, weights_only=True

@@ -15,3 +15,6 @@ tinker_prices:
   train: 0.40
   as_of: "2026-09-23"
 local: unverified
+lora:
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  export_key_map: {}

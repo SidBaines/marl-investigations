@@ -1,8 +1,9 @@
-"""Publish immutable adapters so vLLM never reuses a cache key for new weights.
+"""Verify exported adapters before exposing their serving policies.
 
 One backend owns one shared training base. Publication is serialized across its
 learners: load the new snapshot, switch the current policy, then evict an old
-snapshot. Exported directories and used names survive unloading and shutdown.
+snapshot. Versioned names protect the prefix cache by default; inplace names
+are an opt-in trade-off. Exported directories survive unloading and shutdown.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import replace
+from math import isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -20,6 +22,7 @@ from marli.budget import SpendGuard
 from marli.errors import BackendError, ConfigError
 from marli.model import ModelSpec
 from marli.policy.vllm import VLLMPolicy
+from marli.render.registry import get_renderer
 from marli.serve.vllm import Server
 from marli.train.backends.base import SamplerSnapshot
 from marli.train.checkpoint import Checkpoint
@@ -38,11 +41,16 @@ class _SamplerMixin:
     version: int
     _backend: LocalBackend
     _current_adapter: str | None = None
+    _sampler_error: bool = False
 
     async def sync_sampler(self, name: str) -> SamplerSnapshot:
         return await self._backend._publish(self, name)
 
     def policy(self, *, policy_id: str | None = None) -> VLLMPolicy:
+        if self._sampler_error:
+            raise BackendError(
+                "inplace adapter update failed; sync_sampler must succeed before sampling"
+            )
         return VLLMPolicy(
             self.name if policy_id is None else policy_id,
             self._backend.base_url,
@@ -68,7 +76,15 @@ class LocalBackend:
         adapters_dir: str,
         device: str = "cuda",
         spend: SpendGuard | None = None,
+        adapter_check_tol: float = 0.05,
+        adapter_names: str = "versioned",
     ) -> None:
+        if not isfinite(adapter_check_tol) or adapter_check_tol <= 0:
+            raise ConfigError("adapter_check_tol must be finite and positive")
+        if adapter_names not in {"versioned", "inplace"}:
+            raise ConfigError("adapter_names must be 'versioned' or 'inplace'")
+        self.adapter_check_tol = adapter_check_tol
+        self.adapter_names = adapter_names
         self.server_json = Path(server_json).resolve()
         server = Server.load(self.server_json)
         if not server.models or not server.enable_lora or server.max_loras < 2:
@@ -127,7 +143,7 @@ class LocalBackend:
             await self._publish(learner, f"{self._owner}-{name}-init", version=0)
         return learner
 
-    async def _request(self, endpoint: str, body: dict[str, str]) -> None:
+    async def _request(self, endpoint: str, body: dict[str, object]) -> httpx.Response:
         root = self.base_url if self.base_url.endswith("/v1") else self.base_url + "/v1"
         try:
             response = await self.client.post(root + endpoint, json=body)
@@ -140,6 +156,60 @@ class LocalBackend:
         if not response.is_success:
             raise BackendError(
                 f"vLLM {endpoint}: HTTP {response.status_code}: {response.text[:500]}"
+            )
+        return response
+
+    async def _prompt_logprobs(self, model: str, tokens: list[int]) -> tuple[float, ...]:
+        # vLLM 0.30 returns a separate prompt_logprobs field (first position is
+        # null); logprobs.token_logprobs describes generated tokens, not this probe.
+        response = await self._request(
+            "/completions",
+            {
+                "model": model,
+                "prompt": tokens,
+                "max_tokens": 1,
+                "echo": True,
+                "prompt_logprobs": 0,
+                "temperature": 1.0,
+            },
+        )
+        try:
+            entries = response.json()["choices"][0]["prompt_logprobs"]
+            if len(entries) != len(tokens):
+                raise ValueError("prompt length mismatch")
+            scores = tuple(
+                float(entry[str(token)]["logprob"])
+                for token, entry in zip(tokens[1:], entries[1:], strict=True)
+            )
+            if not all(isfinite(score) for score in scores):
+                raise ValueError("nonfinite prompt logprobs")
+            return scores
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise BackendError(f"vLLM invalid prompt_logprobs for {model!r}: {exc}") from exc
+
+    async def _check_adapter(self, learner: LocalLearner, name: str) -> None:
+        renderer = get_renderer(learner.model.renderer, hf_id=learner.model.hf_id)
+        tokens = renderer.encode_text("The sum of two and three is five. Python: print(2 + 3)\n")
+        adapted, base = await learner.probe_logprobs(tokens)
+        served = await self._prompt_logprobs(name, tokens)
+        served_base = await self._prompt_logprobs(self.base_name, tokens)
+        if (
+            len(adapted) != len(served)
+            or len(base) != len(served)
+            or not all(isfinite(score) for score in (*adapted, *base))
+        ):
+            raise BackendError("learner returned invalid probe logprobs")
+        if all(abs(a - b) <= 1e-6 for a, b in zip(served, served_base, strict=True)) and any(
+            abs(a - b) > 1e-6 for a, b in zip(adapted, base, strict=True)
+        ):
+            raise BackendError(
+                f"vLLM ignored adapter {name!r}: probe equals base but learner differs"
+            )
+        drift = sum(abs(a - b) for a, b in zip(served, adapted, strict=True)) / len(served)
+        if drift > self.adapter_check_tol:
+            raise BackendError(
+                f"vLLM adapter {name!r} probe drift {drift:.6f} nats exceeds "
+                f"adapter_check_tol={self.adapter_check_tol}"
             )
 
     async def _publish(
@@ -154,12 +224,15 @@ class LocalBackend:
             directory = self.adapters_dir / name
             if name in used or name in server.models or directory.exists():
                 raise ConfigError(f"sampler name {name!r} already used; names must never be reused")
+            inplace = self.adapter_names == "inplace" and learner._current_adapter is not None
+            served_name = learner._current_adapter if inplace else name
+            assert served_name is not None
             candidates = [
                 adapter
                 for adapter in server.adapters
                 if self._owned.get(adapter["name"]) == learner.name
             ]
-            excess = len(server.adapters) + 1 - (server.max_loras - 1)
+            excess = len(server.adapters) + (not inplace) - (server.max_loras - 1)
             if excess > len(candidates):
                 raise ConfigError("max_loras has no free snapshot slot for this learner")
             # Persist the reservation before exporting or sending a load request:
@@ -167,32 +240,48 @@ class LocalBackend:
             server = replace(server, meta={**server.meta, "used_adapter_names": [*used, name]})
             server.save()
             path = Path(await learner.save_adapter(directory)).resolve()
-            self._owned[name] = learner.name
+            self._owned[served_name] = learner.name
+            body: dict[str, object] = {"lora_name": served_name, "lora_path": str(path)}
+            if inplace:
+                body["load_inplace"] = True
+                # Once replacement starts, even a timeout can mean weights changed.
+                learner._sampler_error = True
             try:
-                await self._request(
-                    "/load_lora_adapter", {"lora_name": name, "lora_path": str(path)}
-                )
+                await self._request("/load_lora_adapter", body)
             except ConfigError:
-                del self._owned[name]
+                if not inplace:
+                    del self._owned[served_name]
                 raise
             adapter = {
-                "name": name,
+                "name": served_name,
                 "path": str(path),
                 "learner": learner.name,
                 "owner": self._owner,
             }
             server = replace(
-                server, models=[*server.models, name], adapters=[*server.adapters, adapter]
+                server,
+                models=server.models if inplace else [*server.models, served_name],
+                adapters=[a for a in server.adapters if a["name"] != served_name] + [adapter],
             )
             server.save()
-            learner._current_adapter = name
+            try:
+                await self._check_adapter(learner, served_name)
+            except (BackendError, ConfigError) as exc:
+                if not inplace:
+                    try:
+                        await self._unload(served_name)
+                    except (BackendError, ConfigError) as cleanup:
+                        exc.add_note(f"failed to unload rejected adapter: {cleanup}")
+                raise
+            learner._current_adapter = served_name
+            learner._sampler_error = False
             learner.version = version
             # The previous current snapshot becomes eligible only after loading
             # and publishing its replacement. Never evict another learner's head.
-            for old in candidates[: max(0, excess)]:
+            for old in candidates[: max(0, excess)] if not inplace else []:
                 await self._unload(old["name"])
             return SamplerSnapshot(
-                learner.name, version, str(path), f"vllm:@{self.server_json}#{name}"
+                learner.name, version, str(path), f"vllm:@{self.server_json}#{served_name}"
             )
 
     async def _unload(self, name: str) -> None:

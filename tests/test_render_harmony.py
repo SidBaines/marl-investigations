@@ -161,7 +161,7 @@ def test_parse_final(renderer: HarmonyRenderer, encoding: HarmonyEncoding) -> No
     assert turn.tool_calls == ()
 
 
-@pytest.mark.parametrize("raw", ["not json", "[]", '"4"', "null", '{"answer":'])
+@pytest.mark.parametrize("raw", ["[]", '"4"', "null"])
 def test_bad_tool_arguments_are_retained(
     renderer: HarmonyRenderer, encoding: HarmonyEncoding, raw: str
 ) -> None:
@@ -198,7 +198,8 @@ def test_length_truncated_tool(renderer: HarmonyRenderer, encoding: HarmonyEncod
     )
     turn = renderer.parse(ids)
     assert turn.termination == "length"
-    assert not turn.tool_calls[0].ok
+    assert turn.tool_calls[0].ok
+    assert turn.tool_calls[0].arguments == {"answer": '{"answer": "'}
     assert turn.tool_calls[0].raw == '{"answer": "'
 
 
@@ -465,3 +466,82 @@ def test_fingerprint_includes_harmony_version(monkeypatch: pytest.MonkeyPatch) -
     changed = HarmonyRenderer().tokenizer_sha
     assert original != changed and len(original) == len(changed) == 16
     int(changed, 16)
+
+
+@pytest.mark.parametrize("marker", ["code", "<|constrain|>code", ""])
+@pytest.mark.parametrize("parameter", ["code", "source"])
+def test_raw_code_tool_body_is_bound_verbatim(
+    renderer: HarmonyRenderer,
+    encoding: HarmonyEncoding,
+    marker: str,
+    parameter: str,
+) -> None:
+    tool = ToolSpec(
+        "python",
+        "Run Python.",
+        {
+            "type": "object",
+            "properties": {parameter: {"type": "string"}},
+            "required": [parameter],
+        },
+    )
+    raw = "for n in range(3):\n    print(n)\n"
+    ids = encoding.encode(
+        f" to=functions.python {marker}<|message|>{raw}<|call|>",
+        allowed_special="all",
+    )
+    renderer.initial(None, [tool], [])
+    turn = renderer.parse(ids)
+    assert turn.termination == "stop"
+    assert turn.tool_calls[0].name == "python" and turn.tool_calls[0].ok
+    assert turn.tool_calls[0].arguments == {parameter: raw}
+    assert turn.tool_calls[0].raw == raw
+    assert turn == renderer.parse(ids, [tool])
+
+
+@pytest.mark.parametrize(
+    "properties",
+    [
+        {},
+        {"code": {"type": "integer"}},
+        {"code": {"type": "string"}, "language": {"type": "string"}},
+    ],
+)
+def test_raw_code_needs_exactly_one_string_parameter(
+    renderer: HarmonyRenderer,
+    encoding: HarmonyEncoding,
+    properties: dict,
+) -> None:
+    raw = "print(2 + 3)"
+    ids = encoding.encode(
+        f" to=functions.python code<|message|>{raw}<|call|>",
+        allowed_special="all",
+    )
+    tool = ToolSpec("python", "Run Python.", {"type": "object", "properties": properties})
+    call = renderer.parse(ids, [tool]).tool_calls[0]
+    assert not call.ok and call.arguments is None and call.raw == raw
+    unknown = renderer.parse(ids, TOOLS).tool_calls[0]
+    assert not unknown.ok and unknown.raw == raw
+
+
+@pytest.mark.parametrize("raw", ['{"code": "print(1)"}', '"print(1)"', "[]", "null", "42"])
+def test_code_marker_preserves_json_argument_rules(
+    renderer: HarmonyRenderer,
+    encoding: HarmonyEncoding,
+    raw: str,
+) -> None:
+    tool = ToolSpec(
+        "python",
+        "Run Python.",
+        {
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+        },
+    )
+    ids = encoding.encode(
+        f" to=functions.python <|constrain|>code<|message|>{raw}<|call|>",
+        allowed_special="all",
+    )
+    call = renderer.parse(ids, [tool]).tool_calls[0]
+    assert call.ok == raw.startswith("{")
+    assert call.arguments == ({"code": "print(1)"} if call.ok else None)

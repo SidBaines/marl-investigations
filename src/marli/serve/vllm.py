@@ -78,6 +78,7 @@ VLLM_FLAGS = {
     "max_loras": "--max-loras",
     "max_lora_rank": "--max-lora-rank",
     "tensor_parallel_size": "--tensor-parallel-size",
+    "seed": "--seed",
     "port": "--port",
     "host": "--host",
 }
@@ -100,6 +101,7 @@ def launch_args(cfg: VLLMServeConfig) -> tuple[ModelSpec, list[str], dict[str, s
         "max_loras": cfg.max_loras,
         "max_lora_rank": cfg.max_lora_rank,
         "tensor_parallel_size": cfg.tensor_parallel_size,
+        "seed": 0,
         "port": cfg.port,
         "host": cfg.host,
     }

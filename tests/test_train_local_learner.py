@@ -429,3 +429,138 @@ def test_package_import_does_not_import_heavy_dependencies() -> None:
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+async def test_mapped_adapter_round_trip_and_checkpoint_restore(tmp_path: Path) -> None:
+    from safetensors.torch import load_file, save_file
+
+    from marli.train.backends.local.learner import _map_adapter_keys
+
+    original = make_learner()
+    mapping = {"base_model.model.model.layers.": "base_model.model.model.language_model.layers."}
+    spec = replace(original.model, lora={"export_key_map": mapping})
+    pool = LocalLearnerPool.from_model(
+        tiny_model(), tokenizer_sha=FakeRenderer.tokenizer_sha, model_spec=spec
+    )
+    learner = make_learner(pool=pool)
+    d = datum(learner)
+    await learner.train_step([d])
+    expected = adapter_weights(learner)
+    state = Path(await learner.save_state(str(tmp_path / "state")))
+    exported = state / "adapter"
+    manifest = json.loads((exported / "manifest.json").read_text())
+    assert manifest["export_key_map"] == mapping
+    weights = load_file(exported / "adapter_model.safetensors")
+    assert any(".language_model.layers." in key for key in weights)
+    assert not any(key.startswith("base_model.model.model.layers.") for key in weights)
+    reversed_weights = _map_adapter_keys(weights, {new: old for old, new in mapping.items()})
+    assert reversed_weights.keys() == expected.keys()
+    for key, value in expected.items():
+        torch.testing.assert_close(reversed_weights[key], value, rtol=0, atol=0)
+    restored = make_learner(
+        "restored",
+        pool=LocalLearnerPool.from_model(
+            tiny_model(),
+            tokenizer_sha=FakeRenderer.tokenizer_sha,
+            model_spec=spec,
+        ),
+    )
+    await restored.load_state(str(state))
+    torch.testing.assert_close(
+        full_logprobs(restored, d.tokens), full_logprobs(learner, d.tokens), rtol=0, atol=0
+    )
+    assert restored.step == 1 and restored.optimizer.state
+    plain_dir = tmp_path / "plain"
+    plain_dir.mkdir()
+    (plain_dir / "adapter_config.json").write_bytes((exported / "adapter_config.json").read_bytes())
+    save_file(reversed_weights, plain_dir / "adapter_model.safetensors")
+    plain = PeftModel.from_pretrained(tiny_model(), plain_dir, local_files_only=True).eval()
+    ids = torch.tensor([d.tokens])
+    with torch.no_grad():
+        scores = plain(ids[:, :-1]).logits.float().log_softmax(-1)
+        scores = scores.gather(-1, ids[:, 1:, None]).flatten()
+    torch.testing.assert_close(scores, full_logprobs(learner, d.tokens), rtol=0, atol=0)
+
+
+async def test_training_only_projects_checkpointed_chunks() -> None:
+    learner = make_learner(logprob_chunk_size=3)
+    d = datum(learner)
+    shapes = []
+
+    def record(module: torch.nn.Module, inputs: tuple, output: torch.Tensor) -> None:
+        shapes.append(tuple(output.shape))
+
+    hook = learner.pool.base_model.get_output_embeddings().register_forward_hook(record)
+    try:
+        await learner.train_step([d])
+    finally:
+        hook.remove()
+    chunks = (len(d.tokens) - 2) // 3 + 1
+    # Each head projection runs once in forward and once in checkpoint recomputation.
+    assert len(shapes) == 2 * chunks
+    assert all(len(shape) == 2 and shape[0] <= 3 and shape[1] == 512 for shape in shapes)
+    assert learner.logprob_chunk_size == 3 and make_learner().logprob_chunk_size == 1024
+
+
+async def test_probe_scores_selected_adapter_and_frozen_base() -> None:
+    first = make_learner()
+    second = make_learner("second", pool=first.pool)
+    d = datum(first)
+    initial = full_logprobs(first, d.tokens)
+    await first.train_step([d])
+    adapted = full_logprobs(first, d.tokens)
+    assert not torch.equal(initial, adapted)
+    full_logprobs(second, d.tokens)  # Leave the other adapter selected before the probe.
+    actual, base = await first.probe_logprobs(d.tokens)
+    torch.testing.assert_close(torch.tensor(actual), adapted, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(torch.tensor(base), initial, rtol=1e-6, atol=1e-6)
+
+
+def test_registry_targets_override_all_linear_fallback() -> None:
+    original = make_learner().model
+    spec = replace(original, lora={"target_modules": ["q_proj", "v_proj"]})
+    pool = LocalLearnerPool.from_model(tiny_model(), tokenizer_sha="test", model_spec=spec)
+    learner = make_learner(pool=pool)
+    assert pool.target_modules == ("q_proj", "v_proj")
+    assert all(".q_proj." in key or ".v_proj." in key for key in adapter_weights(learner))
+
+
+def test_qwen_text_loader_and_gpt_oss_flex_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    import transformers
+
+    from marli.model import load_model
+
+    calls = []
+
+    def load(path: str, **kwargs: Any) -> Qwen3ForCausalLM:
+        calls.append((path, kwargs))
+        return tiny_model()
+
+    monkeypatch.setattr(transformers.Qwen3_5ForCausalLM, "from_pretrained", load)
+    monkeypatch.setattr(transformers.GptOssForCausalLM, "from_pretrained", load)
+    LocalLearnerPool(load_model("qwen3_5_4b"), device="cpu", dtype="float32")
+    LocalLearnerPool(load_model("gpt_oss_20b"), device="cpu", dtype="float32")
+    assert calls == [
+        ("Qwen/Qwen3.5-4B", {"dtype": torch.float32, "attn_implementation": "sdpa"}),
+        ("openai/gpt-oss-20b", {"dtype": torch.float32, "attn_implementation": "flex_attention"}),
+    ]
+
+
+def test_gpt_oss_expert_lora_requires_explicit_override() -> None:
+    from marli.model import load_model
+
+    model = tiny_model()
+    model.model.mlp = torch.nn.Module()
+    model.model.mlp.experts = torch.nn.Module()
+    model.model.mlp.experts.register_parameter(
+        "gate_up_proj", torch.nn.Parameter(torch.rand(2, 8, 8))
+    )
+    model.model.mlp.experts.register_parameter("down_proj", torch.nn.Parameter(torch.rand(2, 8, 8)))
+    pool = LocalLearnerPool.from_model(
+        model, tokenizer_sha="test", model_spec=load_model("gpt_oss_20b")
+    )
+    targets = ["mlp.experts.gate_up_proj", "mlp.experts.down_proj"]
+    with pytest.raises(ValueError, match="allow_unverified_expert_lora=True"):
+        make_learner(pool=pool, target_parameters=targets)
+    learner = make_learner(pool=pool, target_parameters=targets, allow_unverified_expert_lora=True)
+    assert learner.pool.peft_model.peft_config[learner.name].target_parameters == targets

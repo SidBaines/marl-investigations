@@ -34,6 +34,20 @@ class FakePool:
         self.device = device
 
 
+def prompt_response(tokens: list[int], score: float) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "choices": [
+                {
+                    "prompt_logprobs": [None]
+                    + [{str(token): {"logprob": score}} for token in tokens[1:]]
+                }
+            ]
+        },
+    )
+
+
 class FakeLearner:
     def __init__(self, name: str, spec: LearnerSpec, pool: FakePool) -> None:
         self.name, self.spec, self.pool = name, spec, pool
@@ -49,6 +63,12 @@ class FakeLearner:
         directory.mkdir(parents=True, exist_ok=False)
         (directory / "adapter_config.json").write_text("{}")
         return directory
+
+    async def probe_logprobs(
+        self, tokens: list[int]
+    ) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        self.probe_tokens = tuple(tokens)
+        return (-0.9,) * (len(tokens) - 1), (-1.0,) * (len(tokens) - 1)
 
     async def save_state(self, name: str) -> str:
         return f"states/{name}"
@@ -90,6 +110,10 @@ async def local(
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
+        body = json.loads(request.content)
+        if body.get("echo"):
+            score = -1.0 if body["model"] == backend.base_name else -0.9
+            return prompt_response(body["prompt"], score)
         response = replies.pop(0) if replies else httpx.Response(200, json={})
         if isinstance(response, Exception):
             raise response
@@ -133,7 +157,11 @@ async def test_publication_versions_policy_and_eviction(local: tuple) -> None:
         server = Server.load(backend.server_json)
         assert len(server.adapters) <= server.max_loras - 1
         assert read_server_json(backend.server_json)[1][name] == name
-    assert [(request.url.path, json.loads(request.content)["lora_name"]) for request in calls] == [
+    assert [
+        (request.url.path, json.loads(request.content)["lora_name"])
+        for request in calls
+        if not json.loads(request.content).get("echo")
+    ] == [
         ("/v1/load_lora_adapter", "run-x-s1"),
         ("/v1/load_lora_adapter", "run-x-s2"),
         ("/v1/load_lora_adapter", "run-x-s3"),
@@ -332,7 +360,9 @@ async def test_init_from_publishes_restored_weights_at_version_zero(local: tuple
     spec = LearnerSpec(
         base_model="qwen3_5_4b", backend="local", rank=16, init_from=str(checkpoint.manifest_path)
     )
-    learner = await backend.create_learner("x", spec, model=load_model(spec.base_model), seed=1)
+    learner = await backend.create_learner(
+        "x", spec, model=replace(load_model(spec.base_model), renderer="fake"), seed=1
+    )
     assert learner.loaded == [(str(checkpoint.root / "state"), True)]
     assert learner.version == 0
     assert learner.policy().model.endswith("-x-init")
@@ -360,4 +390,181 @@ async def test_close_preserves_adapters_owned_by_another_run(local: tuple) -> No
     await learner.sync_sampler("run-x-s2")
     await backend.close()
     assert Server.load(backend.server_json).models == ["qwen3_5_4b", "foreign"]
-    assert all(json.loads(call.content)["lora_name"] != "foreign" for call in calls)
+    assert all(json.loads(call.content).get("lora_name") != "foreign" for call in calls)
+
+
+@pytest.mark.parametrize(
+    "score,error", [(-1.0, "ignored adapter"), (-0.9, None), (-0.7, "probe drift")]
+)
+async def test_hot_load_checks_effect_and_parity(
+    local: tuple, score: float, error: str | None
+) -> None:
+    backend, _, _ = local
+    learner = await new_learner(backend)
+    assert learner.policy().policy_version == 0
+    assert not hasattr(learner, "probe_tokens")
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        requests.append((request.url.path, body))
+        if request.url.path.endswith("completions"):
+            assert body["echo"] is True and body["prompt_logprobs"] == 0
+            assert body["max_tokens"] == 1 and body["temperature"] == 1
+            return prompt_response(
+                body["prompt"], -1 if body["model"] == backend.base_name else score
+            )
+        return httpx.Response(200, json={})
+
+    await backend.client.aclose()
+    backend.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    if error:
+        with pytest.raises(BackendError, match=error):
+            await learner.sync_sampler("checked")
+        assert learner.version == 0 and learner.policy().model == backend.base_name
+        assert not Server.load(backend.server_json).adapters
+        assert requests[-1][0] == "/v1/unload_lora_adapter"
+    else:
+        await learner.sync_sampler("checked")
+        assert learner.version == 1 and learner.policy().model == "checked"
+    probes = [body for path, body in requests if path.endswith("completions")]
+    assert len(probes) == 2
+    assert probes[0]["prompt"] == probes[1]["prompt"] == list(learner.probe_tokens)
+
+
+@pytest.mark.parametrize("inplace", [False, True])
+async def test_adapter_names_option_keeps_immutable_exports(local: tuple, inplace: bool) -> None:
+    backend, calls, _ = local
+    assert backend.adapter_names == "versioned"
+    backend.adapter_names = "inplace" if inplace else "versioned"
+    learner = await new_learner(backend)
+    first = await learner.sync_sampler("first")
+    second = await learner.sync_sampler("second")
+    loads = [
+        json.loads(call.content) for call in calls if call.url.path.endswith("load_lora_adapter")
+    ]
+    assert loads[0] == {"lora_name": "first", "lora_path": first.path}
+    assert loads[1] == {
+        "lora_name": "first" if inplace else "second",
+        "lora_path": second.path,
+        **({"load_inplace": True} if inplace else {}),
+    }
+    assert first.path != second.path and all(path.exists() for path in learner.saved)
+    assert second.version == 2
+    assert second.policy_ref.endswith("#first" if inplace else "#second")
+    adapters = Server.load(backend.server_json).adapters
+    assert len(adapters) == (1 if inplace else 2) and adapters[-1]["path"] == second.path
+    assert sum(call.url.path.endswith("completions") for call in calls) == 4
+
+
+async def test_failed_inplace_load_blocks_sampling_until_verified(local: tuple) -> None:
+    backend, _, replies = local
+    backend.adapter_names = "inplace"
+    learner = await new_learner(backend)
+    await learner.sync_sampler("first")
+    replies.append(httpx.ConnectError("uncertain load"))
+    with pytest.raises(BackendError, match="uncertain load"):
+        await learner.sync_sampler("second")
+    assert learner.version == 1
+    with pytest.raises(BackendError, match="sync_sampler must succeed"):
+        learner.policy()
+    await learner.sync_sampler("third")
+    assert learner.version == 2 and learner.policy().model == "first"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"adapter_names": "wrong"},
+        {"adapter_check_tol": -1},
+        {"adapter_check_tol": float("nan")},
+    ],
+)
+def test_invalid_adapter_options_fail_before_server_access(options: dict[str, Any]) -> None:
+    with pytest.raises(ConfigError, match="adapter_"):
+        LocalBackend("missing.json", adapters_dir="unused", **options)
+
+
+async def test_prompt_logprobs_rejects_malformed_scores(local: tuple) -> None:
+    backend, _, _ = local
+    await backend.client.aclose()
+    for entries in ([None], [None, {"2": {"logprob": "nan"}}], [None, {"3": {"logprob": -1}}]):
+        backend.client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request, entries=entries: httpx.Response(
+                    200, json={"choices": [{"prompt_logprobs": entries}]}
+                )
+            )
+        )
+        with pytest.raises(BackendError, match="invalid prompt_logprobs"):
+            await backend._prompt_logprobs("adapter", [1, 2])
+        await backend.client.aclose()
+
+
+async def test_zero_initialized_adapter_allows_backend_roundoff(
+    local: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend, _, _ = local
+    learner = await new_learner(backend)
+
+    async def zero_probe(tokens: list[int]) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        return (-0.99,) * (len(tokens) - 1), (-0.99,) * (len(tokens) - 1)
+
+    monkeypatch.setattr(learner, "probe_logprobs", zero_probe)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("echo"):
+            return prompt_response(body["prompt"], -1.0)
+        return httpx.Response(200, json={})
+
+    await backend.client.aclose()
+    backend.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await learner.sync_sampler("zero-initialized")
+    assert learner.version == 1
+
+
+@pytest.mark.parametrize("inplace", [False, True])
+async def test_bad_effect_check_preserves_publication_version(
+    local: tuple,
+    monkeypatch: pytest.MonkeyPatch,
+    inplace: bool,
+) -> None:
+    backend, _, _ = local
+    backend.adapter_names = "inplace" if inplace else "versioned"
+    learner = await new_learner(backend)
+    await learner.sync_sampler("first")
+
+    async def changed_probe(tokens: list[int]) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        return (-0.7,) * (len(tokens) - 1), (-1.0,) * (len(tokens) - 1)
+
+    monkeypatch.setattr(learner, "probe_logprobs", changed_probe)
+    with pytest.raises(BackendError, match="probe drift"):
+        await learner.sync_sampler("rejected")
+    assert learner.version == 1
+    if inplace:
+        with pytest.raises(BackendError, match="sync_sampler must succeed"):
+            learner.policy()
+    else:
+        assert learner.policy().model == "first"
+        assert [a["name"] for a in Server.load(backend.server_json).adapters] == ["first"]
+
+
+async def test_effect_check_tolerance_is_configurable(local: tuple) -> None:
+    backend, _, _ = local
+    backend.adapter_check_tol = 0.2
+    learner = await new_learner(backend)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("echo"):
+            return prompt_response(
+                body["prompt"], -1 if body["model"] == backend.base_name else -0.8
+            )
+        return httpx.Response(200, json={})
+
+    await backend.client.aclose()
+    backend.client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await learner.sync_sampler("tolerated")
+    assert learner.version == 1
