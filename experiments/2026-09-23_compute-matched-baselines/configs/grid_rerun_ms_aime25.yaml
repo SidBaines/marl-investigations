@@ -1,0 +1,38 @@
+# Rerun of the multi-session cells on the fixed harness (76aa955); single reused
+# from the pilot's saved scores so paired lift uses the same baseline episodes.
+baseline: single
+common:
+  env: math
+  env_config:
+    python_tool: false
+  policies:
+    q:
+      ref: tinker:Qwen/Qwen3.5-4B
+      renderer: qwen3_5
+      model: qwen3_5_4b
+  schedule: lockstep
+  episodes_per_task: 1
+  concurrency: 16
+  limits:
+    call:
+      max_tokens: 16384
+    agent:
+      max_gen_tokens: 32768
+      final_reserve: 512
+    episode:
+      max_gen_tokens: 32768
+      max_ticks: 64
+      max_wall_s: 3600
+    ctx:
+      max_ctx: 32768
+cells:
+- label: single
+  scores: /workspace/marl-wt/m2/experiments/2026-09-23_compute-matched-baselines/out/pilot_aime25/cells/single/score/scores.json
+- label: ms3_notes
+  protocol: multi_session_s3_notes
+  seating:
+    solver: q
+- label: ms3_compaction
+  protocol: multi_session_s3_compaction
+  seating:
+    solver: q

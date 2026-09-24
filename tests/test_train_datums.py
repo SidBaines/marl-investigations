@@ -249,13 +249,22 @@ async def test_summary_trained_in_ending_segment_and_copied_as_observation(
     else:
         context = ContextSpec(kind="compaction")
         limits = Limits(session=SessionLimits(2, 500, 300, 300))
-        first = Turn(tool_calls=(("end_session", {}),))
+        first = Turn("x" * 200)
         start_reason = SegmentStart.SESSION
     spec = episode_spec(
         {"solver0": [first, Turn("Carry five."), Turn(tool_calls=(("submit", {"answer": "5"}),))]},
         context=context,
         limits=limits,
     )
+    if purpose == Purpose.CARRY:
+        from marli.interact.protocols.multi_session import MultiSessionConfig, MultiSessionProtocol
+
+        spec = replace(
+            spec,
+            protocol=MultiSessionProtocol(
+                MultiSessionConfig(sessions=2, session_tokens=500, carry="compaction")
+            ),
+        )
     episode, buffers = await run_episode(spec)
     assert episode.ok
     assert [call.purpose for call in episode.calls] == [Purpose.ACT, purpose, Purpose.ACT]

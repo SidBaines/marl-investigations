@@ -9,9 +9,11 @@ from pathlib import Path
 import pytest
 
 from marli.errors import ConfigError
+from marli.eval.policies import PolicySpec, resolve_spec
 from marli.handles import load_any
 from marli.model import load_model
 from marli.policy.refs import parse_ref
+from marli.policy.resolve import resolve_policy
 from marli.train.checkpoint import Checkpoint, LearnerCheckpoint, resolve_checkpoint_ref
 
 
@@ -137,3 +139,32 @@ def test_resolve_checkpoint_and_learner_selection(checkpoint: Checkpoint) -> Non
     replace(checkpoint, learners={}).save()
     with pytest.raises(ConfigError, match="exactly one learner"):
         resolve_checkpoint_ref(final, None)
+
+
+@pytest.mark.parametrize("directory", [False, True])
+async def test_missing_checkpoint_is_config_error_on_all_resolution_paths(
+    tmp_path: Path, directory: bool
+) -> None:
+    path = tmp_path / "missing"
+    if directory:
+        path.mkdir()
+    ref = parse_ref(f"ckpt:{path}")
+    with pytest.raises(ConfigError, match="no checkpoint"):
+        Checkpoint.load(path)
+    with pytest.raises(ConfigError, match="no checkpoint"):
+        resolve_checkpoint_ref(ref, None)
+    with pytest.raises(ConfigError, match="no checkpoint"):
+        resolve_spec(PolicySpec(str(ref)))
+    with pytest.raises(ConfigError, match="no checkpoint"):
+        await resolve_policy(ref, policy_id="eval", trainable=False, renderer_name="fake")
+
+
+def test_checkpoint_resolution_names_learners_and_honors_ref_selection(
+    checkpoint: Checkpoint,
+) -> None:
+    multi = replace(checkpoint, learners={"a": record(4), "b": record(4)})
+    multi.save()
+    with pytest.raises(ConfigError, match="learners: .*'a'.*'b'"):
+        resolve_spec(PolicySpec(f"ckpt:{multi.root}"))
+    ref = parse_ref(f"ckpt:{multi.root}#learner=b")
+    assert resolve_checkpoint_ref(ref, None) == multi.policy_ref("b")

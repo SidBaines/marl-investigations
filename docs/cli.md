@@ -322,6 +322,7 @@ Manifest produced: `checkpoint.json`.
 | checkpoint_every | int | 5 | false | false | false |  |
 | seed | int | 0 | false | false | false |  |
 | allow_idle | bool | false | false | false | false |  |
+| max_failed_frac | float | 0.5 | false | false | false |  |
 | run_name | str |  | false | false | false |  |
 | concurrency | int | 16 | false | true | false | concurrent episodes |
 | max_usd | float \| None | null | false | true | false | spend guard (sampling + training) |
