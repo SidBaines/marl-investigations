@@ -1,6 +1,6 @@
 # Tinker RL smoke: shared vs per-role LoRA; session credit all vs last
 
-Status: running.
+Status: done (2026-09-24).
 
 ## Question
 
@@ -45,7 +45,30 @@ python was used instead of `uv run`.
 
 ## Results summary
 
-_Pending._
+All 4 runs completed 3 steps, for **$0.42 total**. The stack works end to end
+on Tinker:
+- `kl_sample_train` stayed in 2e-4 to 1e-3 at every step, so sampler and
+  trainer agree on the exact token ids.
+- Sampler versions bumped on every stepped learner.
+- Each checkpoint manifest records Tinker state and sampler paths.
+- `coord_perrole` stepped both the `coord` and `work` learners at step 0.
+
+With B=2 × G=2, most groups had zero reward variance and were correctly
+skipped. `ms_all` never stepped and `ms_last` stepped once, only on
+last-session datums. So this smoke cannot compare credit schemes. A pilot
+needs B≥8 and G≥4 per step.
+
+The training-loop review found and fixed several issues (M3-5-fix):
+- zero-advantage datums were billed and still stepped learners (e.g.
+  `coord_perrole` step 0 `work`);
+- an all-failed step would pass silently.
+
+| Run | steps | spend |
+|---|---|---|
+| coord_shared | 3 | $0.134 |
+| coord_perrole | 3 | $0.106 |
+| ms_all | 3 | $0.082 |
+| ms_last | 3 | $0.095 |
 
 ## Spend
 
@@ -53,4 +76,4 @@ Sid approved the M3 Tinker smoke on 2026-09-23.
 
 | Item | Budget | Actual |
 |---|---|---|
-| 4 runs × 3 steps | $5 (4 × $1.25) | _pending_ |
+| 4 runs × 3 steps | $5 (4 × $1.25) | $0.42 |
