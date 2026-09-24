@@ -16,3 +16,8 @@ for run in smoke pilot; do
   uv run --no-sync marli train rl "$C/base.yaml" "$C/$run.yaml" tasks="$TASKS" max_usd=1 \
     local_server_json="$(dirname "$SERVER")/server.json" --out "$OUT/$run"
 done
+# Kill+resume checks: start the run, `kill -9` the training process once
+# metrics.jsonl has N rows, then re-run the identical command (it resumes).
+#   resume:    configs/resume.yaml, killed at 3 rows
+#   resume_g4: configs/resume.yaml run_name=marli-local-resume-g4 batch_tasks=4 group_size=4
+#              steps=4 checkpoint_every=1, killed at 2 rows
