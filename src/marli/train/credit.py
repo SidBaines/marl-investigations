@@ -63,8 +63,10 @@ def validate_credit(
             raise ConfigError(
                 f"baseline=episode requires team rewards; role {role!r} uses {target}"
             )
-        if target != "team" and "submit" not in spec.tools:
-            raise ConfigError(f"role {role!r} targets {target} but has no submission (submit tool)")
+        if target != "team" and "submit" not in spec.tools and not spec.graded:
+            raise ConfigError(
+                f"role {role!r} targets {target} but has no submission (submit tool or graded role)"
+            )
     for role in cfg.recipients:
         if role not in ctx.roles:
             raise ConfigError(f"recipient {role!r} is not a protocol role")
@@ -216,7 +218,9 @@ def _mask_overlong(
         episode, agent = row.episode, row.agent
         masked = False
         if cfg.overlong == "mask_no_answer":
-            if cfg.overlong_scope == "agent" and "submit" in ctx.roles[agent.role].tools:
+            if cfg.overlong_scope == "agent" and (
+                "submit" in ctx.roles[agent.role].tools or ctx.roles[agent.role].graded
+            ):
                 masked = episode.outcome.submissions.get(agent.agent_id) is None
             else:
                 masked = episode.outcome.final_answer is None

@@ -1073,3 +1073,38 @@ def test_multi_session_tail_carry_does_not_warn_segment_credit_has_no_effect() -
     assert "end_session" not in role.tools
     ctx = CreditContext({role.role: role}, {role.role: "learner:shared"})
     assert validate_credit(CreditConfig(segment_credit="last"), ctx, group_size=2) == []
+
+
+@pytest.mark.parametrize("target", ["individual", "team", "mix:0.5"])
+def test_relay_credit_and_graded_roles_without_submit_validate(target: str) -> None:
+    from marli.interact.protocols.relay import RelayProtocol
+
+    [role] = RelayProtocol().roles()
+    assert role.graded and role.count == 4
+    cfg = CreditConfig(reward_target={"contributor": target})
+    assert validate_credit(cfg, context(role), group_size=2) == []
+    slotted_role = replace(role, tools=("end_session", "ci_submit"))
+    assert validate_credit(cfg, context(slotted_role), group_size=2) == []
+    if target != "team":
+        with pytest.raises(ConfigError, match="contributor.*no submission"):
+            validate_credit(cfg, context(replace(slotted_role, graded=False)), group_size=2)
+
+
+@pytest.mark.parametrize("scope", ["agent", "episode"])
+def test_overlong_graded_role_without_submit_uses_own_submission(scope: str) -> None:
+    role = RoleSpec("contributor", ("end_session", "ci_submit"), "", count=2, graded=True)
+    ep = episode(
+        0, 1.5,
+        [
+            Seat("contrib0", "contributor", own=0, submission=None),
+            Seat("contrib1", "contributor", own=3),
+        ],
+    )
+    cfg = CreditConfig(
+        baseline="none", min_group=1, overlong="mask_no_answer", overlong_scope=scope,
+    )
+    credits, stats, _ = assign_credit([ep], cfg, context(role))
+    assert [credit.agent_id for credit in credits] == (
+        ["contrib1"] if scope == "agent" else ["contrib0", "contrib1"]
+    )
+    assert stats.masked_overlong == (1 if scope == "agent" else 0)

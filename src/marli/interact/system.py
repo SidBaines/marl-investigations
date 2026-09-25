@@ -72,6 +72,8 @@ class RoleSpec:
     permissions: Permissions | None = None
     # Publish visible ACT replies via the same staged workspace path as tools.
     publish_final_text: bool = False
+    # The env supplies a per-agent grade even without a built-in submit tool.
+    graded: bool = False
 
 
 @dataclass(frozen=True)
@@ -170,6 +172,7 @@ BUILTIN_PROTOCOL_MODULES: tuple[str, ...] = (
     "swarm",
     "presets",
     "coordinator",
+    "relay",
 )
 
 
