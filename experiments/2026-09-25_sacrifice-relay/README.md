@@ -74,10 +74,12 @@ Each contributor gets **one CI run**, in one of two modes:
 ## Pre-registered hypotheses and readouts
 
 **Primary metric:** the **first-mover probe rate**, i.e. the fraction of
-contributors whose `NOTES.md` held no rule at their CI time and who chose
-`ci_review`. It is logged every step (`grades/…/probed`, split by slot and by
-`notes_had_rule`). "Early" and "late" below mean the mean over steps 0–9 and
-steps 70–79.
+contributors who did not know the rule when they started and who chose
+`ci_review`. "Knew the rule" means the rule's ID appeared anywhere in the repo
+at the contributor's start (`rule_known_at_start`); the rule can be passed on
+in any file, not only `NOTES.md`. It is computed by `analyze.py` from saved
+rollouts, overall and by slot (the last slot can never help anyone). "Early"
+and "late" below mean the mean over steps 0–9 and steps 70–79.
 
 - **H-team:** in `relay_team`, the first-mover probe rate rises from early to
   late. Team return rises with it.
@@ -90,14 +92,14 @@ steps 70–79.
     `solo`'s late rate.
 - **Control:** in `solo`, the probe rate falls toward 0.
 - **Understanding vs habit:**
-  - redundant probing (probing when the rule is already in the notes) should
+  - redundant probing (probing when the rule is already known) should
     fall in `relay_team`;
-  - prober write-up fidelity (the rule appears in the next contributor's
-    `NOTES.md`) should rise.
+  - prober hand-off fidelity (the next contributor starts knowing the rule)
+    should rise.
 
 **Secondary metrics:**
 - base pass rate (competence drift);
-- how often followers get the bonus when the notes hold the rule;
+- how often followers who knew the rule score 3;
 - individual vs team return;
 - `kl_sample_train` and the IS ratio for each run.
 
@@ -110,8 +112,9 @@ not a significance test. Promising runs get seeds and ablations next:
 - m and N sweeps;
 - swarm.
 
-**Gate before training:** run a base-rate eval of the untrained model on held-out
-repos.
+**Gate before training:** run a base-rate eval of the untrained model on the
+training repos. This signs-of-life study has no held-out set; the gate is a
+pre-training measurement on the same distribution.
 - If the first-mover probe rate is below 3%, RL has no probes to reinforce.
   We then stop and discuss. The fix would change prompt salience, not rewards.
 - If the base pass rate falls outside [0.25, 0.75], re-filter the problem pool.
