@@ -5,6 +5,10 @@ to every text-model ``nn.Linear``, including ``lm_head``. Nonlinear components
 stay frozen. gpt-oss expert parameters require an explicit parity override.
 Dropout is zero and alpha defaults to rank.
 
+A pool may be data-parallel (``LocalLearnerPool.data_parallel``): identical
+replicas on several devices train on token-balanced shards and all-reduce their
+LoRA gradients, so the update equals the single-device one (see ``parallel``).
+
 Qwen3.5's multimodal architecture is loaded through Qwen3_5ForCausalLM.
 Transformers 5.5.4's qwen3_5_text conversion mapping strips
 ``model.language_model`` prefixes and ignores visual weights. Training uses
@@ -18,6 +22,7 @@ import asyncio
 import copy
 import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeVar
 from uuid import uuid4
@@ -34,6 +39,7 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel
 
     from marli.policy.base import TokenPolicy
+    from marli.train.backends.local.parallel import PoolRecipe, Replicas
 
 _T = TypeVar("_T")
 
@@ -164,6 +170,36 @@ class LocalLearnerPool:
         pool._initialize(model, model_spec, _device(device), gradient_checkpointing, tokenizer_sha)
         return pool
 
+    @classmethod
+    def data_parallel(
+        cls,
+        recipe: PoolRecipe,
+        devices: Sequence[str],
+        *,
+        timeout_s: float = 1800.0,
+        log_dir: str | Path | None = None,
+    ) -> LocalLearnerPool:
+        """Rank 0 here on ``devices[0]``; one spawned worker per further device.
+
+        Every rank builds its base from ``recipe`` and the ranks check that the
+        weights agree before any learner exists. ``close()`` stops the workers.
+        """
+        from marli.train.backends.local.parallel import Replicas
+
+        replicas = Replicas(recipe, devices, timeout_s=timeout_s, log_dir=log_dir)
+        try:
+            pool = recipe.build(replicas.devices[0])
+        except BaseException:
+            replicas.close()
+            raise
+        replicas.after_build(pool)
+        pool.replicas = replicas
+        return pool
+
+    def close(self) -> None:
+        if self.replicas is not None:
+            self.replicas.close()
+
     def _initialize(
         self,
         base: PreTrainedModel,
@@ -197,9 +233,12 @@ class LocalLearnerPool:
         if not self.target_modules:
             raise ValueError("local learner requires linear LoRA targets")
         self.peft_model: PeftModel | None = None
+        self.replicas: Replicas | None = None
 
     async def _run_locked(self, operation: Callable[[], _T]) -> _T:
         async with self.lock:
+            if self.replicas is not None:
+                return await self.replicas.run_watched(operation)
             task = asyncio.create_task(asyncio.to_thread(operation))
             cancellation = None
             while True:
@@ -218,10 +257,15 @@ class LocalLearnerPool:
 
 
 def _microbatches(datums: Sequence[TrainDatum], budget: int) -> Iterator[list[TrainDatum]]:
-    """Bound padded input tokens; a single over-budget context stays intact."""
+    """Bound padded input tokens; a single over-budget context stays intact.
+
+    Longest first, so each microbatch holds similar lengths and padding stays
+    small. The loss is sum-reduced, so order changes only float rounding.
+    """
     batch: list[TrainDatum] = []
     longest = 0
-    for datum in datums:
+    order = sorted(range(len(datums)), key=lambda i: (-len(datums[i].tokens), i))
+    for datum in (datums[i] for i in order):
         length = len(datum.tokens) - 1
         if batch and max(longest, length) * (len(batch) + 1) > budget:
             yield batch
@@ -296,6 +340,26 @@ class LocalLearner:
             eps=spec.eps,
             weight_decay=spec.weight_decay,
         )
+        if pool.replicas is not None:
+            from marli.train.backends.local.parallel import broadcast_parameters
+
+            # Every rank builds the same adapter; rank 0's initialization wins.
+            pool.replicas.send(
+                "create",
+                (
+                    name,
+                    spec,
+                    {
+                        "alpha": alpha,
+                        "max_tokens_per_microbatch": max_tokens_per_microbatch,
+                        "logprob_chunk_size": logprob_chunk_size,
+                        "target_parameters": tuple(target_parameters),
+                        "allow_unverified_expert_lora": allow_unverified_expert_lora,
+                    },
+                ),
+            )
+            broadcast_parameters(self.parameters)
+            pool.replicas.collect()
 
     async def train_step(
         self, datums: Sequence[TrainDatum], *, learning_rate: float | None = None
@@ -314,11 +378,7 @@ class LocalLearner:
             raise ValueError("learning_rate must be non-negative")
         return await self.pool._run_locked(lambda: self._train_step(datums, learning_rate))
 
-    def _train_step(self, datums: Sequence[TrainDatum], learning_rate: float | None) -> StepResult:
-        import torch
-
-        from marli.train.backends.local import losses
-
+    def _begin_step(self, learning_rate: float | None) -> None:
         model = self.pool.peft_model
         assert model is not None
         model.set_adapter(self.name)
@@ -326,72 +386,146 @@ class LocalLearner:
         for group in self.optimizer.param_groups:
             group["lr"] = self.spec.learning_rate if learning_rate is None else learning_rate
         self.optimizer.zero_grad(set_to_none=True)
+
+    def _local_pass(self, datums: Sequence[TrainDatum]) -> dict[str, object]:
+        """Accumulate this rank's gradients; return its loss and metric sums."""
+        import torch
+
+        from marli.train.backends.local import losses
+
         loss_sum = 0.0
         metric_sums: dict[str, float] = {}
         ratio_max = 0.0
-        n_actions = sum(d.n_action_tokens for d in datums)
         objective = getattr(losses, self.spec.loss)
+        for batch in _microbatches(datums, self.max_tokens_per_microbatch):
+            width = max(len(d.tokens) - 1 for d in batch)
+            shape = (len(batch), width)
+            inputs = torch.zeros(shape, dtype=torch.long, device=self.pool.device)
+            targets = torch.zeros_like(inputs)
+            attention = torch.zeros_like(inputs)
+            sample, advantages, mask = (
+                torch.zeros(shape, dtype=torch.float32, device=self.pool.device)
+                for _ in range(3)
+            )
+            for row, datum in enumerate(batch):
+                length = len(datum.tokens) - 1
+                tokens = torch.tensor(datum.tokens, device=self.pool.device)
+                inputs[row, :length], targets[row, :length] = tokens[:-1], tokens[1:]
+                attention[row, :length] = 1
+                for dest, values in (
+                    (sample, datum.logprobs),
+                    (advantages, datum.advantages),
+                    (mask, datum.mask),
+                ):
+                    dest[row, :length] = torch.tensor(values, device=self.pool.device)
+            hidden = self.pool.base_model.get_decoder()(
+                input_ids=inputs, attention_mask=attention, use_cache=False, return_dict=True
+            ).last_hidden_state
+            lp = chunked_logprobs(
+                hidden,
+                self.pool.base_model.get_output_embeddings(),
+                targets,
+                chunk_size=self.logprob_chunk_size,
+            )
+            loss, metrics = objective(
+                lp.flatten(), sample.flatten(), advantages.flatten(), mask.flatten()
+            )
+            loss.backward()
+            loss_sum += loss.detach().item()
+            count = sum(d.n_action_tokens for d in batch)
+            ratio_max = max(ratio_max, metrics.pop("ratio_max").item())
+            for key, value in metrics.items():
+                metric_sums[key] = metric_sums.get(key, 0.0) + value.item() * count
+        return {"loss_sum": loss_sum, "metric_sums": metric_sums, "ratio_max": ratio_max}
+
+    def _apply_gradients(self) -> float:
+        import torch
+
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            self.parameters,
+            self.spec.grad_clip if self.spec.grad_clip > 0 else float("inf"),
+            error_if_nonfinite=True,
+        ).item()
+        self.optimizer.step()
+        self.step += 1
+        return grad_norm
+
+    def _train_step(self, datums: Sequence[TrainDatum], learning_rate: float | None) -> StepResult:
+        import torch
+
+        self._begin_step(learning_rate)
+        n_actions = sum(d.n_action_tokens for d in datums)
+        replicas = self.pool.replicas
         try:
-            for batch in _microbatches(datums, self.max_tokens_per_microbatch):
-                width = max(len(d.tokens) - 1 for d in batch)
-                shape = (len(batch), width)
-                inputs = torch.zeros(shape, dtype=torch.long, device=self.pool.device)
-                targets = torch.zeros_like(inputs)
-                attention = torch.zeros_like(inputs)
-                sample, advantages, mask = (
-                    torch.zeros(shape, dtype=torch.float32, device=self.pool.device)
-                    for _ in range(3)
-                )
-                for row, datum in enumerate(batch):
-                    length = len(datum.tokens) - 1
-                    tokens = torch.tensor(datum.tokens, device=self.pool.device)
-                    inputs[row, :length], targets[row, :length] = tokens[:-1], tokens[1:]
-                    attention[row, :length] = 1
-                    for dest, values in (
-                        (sample, datum.logprobs),
-                        (advantages, datum.advantages),
-                        (mask, datum.mask),
-                    ):
-                        dest[row, :length] = torch.tensor(values, device=self.pool.device)
-                hidden = self.pool.base_model.get_decoder()(
-                    input_ids=inputs, attention_mask=attention, use_cache=False, return_dict=True
-                ).last_hidden_state
-                lp = chunked_logprobs(
-                    hidden,
-                    self.pool.base_model.get_output_embeddings(),
-                    targets,
-                    chunk_size=self.logprob_chunk_size,
-                )
-                loss, metrics = objective(
-                    lp.flatten(), sample.flatten(), advantages.flatten(), mask.flatten()
-                )
-                loss.backward()
-                loss_sum += loss.detach().item()
-                count = sum(d.n_action_tokens for d in batch)
-                ratio_max = max(ratio_max, metrics.pop("ratio_max").item())
-                for key, value in metrics.items():
-                    metric_sums[key] = metric_sums.get(key, 0.0) + value.item() * count
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.parameters,
-                self.spec.grad_clip if self.spec.grad_clip > 0 else float("inf"),
-                error_if_nonfinite=True,
-            ).item()
-            self.optimizer.step()
-            self.step += 1
+            if replicas is None:
+                partial = self._local_pass(datums)
+                partial["grad_norm"] = self._apply_gradients()
+                partials = [partial]
+            else:
+                partials = self._parallel_pass(replicas, datums, learning_rate)
         finally:
             self.optimizer.zero_grad(set_to_none=True)
+            if self.pool.device.type == "cuda":
+                # Return cached activations: a sleeping vLLM re-maps this memory on wake.
+                torch.cuda.empty_cache()
+        loss_sum = sum(float(p["loss_sum"]) for p in partials)
+        metric_sums: dict[str, float] = {}
+        for p in partials:
+            for key, value in p["metric_sums"].items():
+                metric_sums[key] = metric_sums.get(key, 0.0) + value
         metrics_out = {key: value / max(n_actions, 1) for key, value in metric_sums.items()}
-        metrics_out.update({"loss:sum": loss_sum, "ratio_max": ratio_max})
+        metrics_out.update(
+            {"loss:sum": loss_sum, "ratio_max": max(float(p["ratio_max"]) for p in partials)}
+        )
         return StepResult(
             learner=self.name,
             n_datums=len(datums),
             n_tokens=sum(len(d.tokens) - 1 for d in datums),
             n_action_tokens=n_actions,
             loss=loss_sum,
-            grad_norm=grad_norm,
+            grad_norm=float(partials[0]["grad_norm"]),
             kl_sample_train=metrics_out["kl_sample_train"],
             metrics=metrics_out,
         )
+
+    def _parallel_pass(
+        self, replicas: Replicas, datums: Sequence[TrainDatum], learning_rate: float | None
+    ) -> list[dict[str, object]]:
+        """Shard by tokens, sum gradients across ranks, then step identically everywhere."""
+        from marli.train.backends.local.parallel import (
+            all_ok,
+            all_reduce_gradients,
+            shard_by_tokens,
+        )
+
+        shards = shard_by_tokens([len(d.tokens) for d in datums], replicas.world)
+        replicas.send(
+            "train",
+            [(self.name, [datums[i] for i in shard], learning_rate) for shard in shards[1:]],
+        )
+        error: Exception | None = None
+        partial: dict[str, object] | None = None
+        try:
+            partial = self._local_pass([datums[i] for i in shards[0]])
+        except Exception as exc:
+            error = exc
+        if all_ok(error is None, self.pool.device):
+            all_reduce_gradients(self.parameters)
+            try:
+                assert partial is not None
+                partial["grad_norm"] = self._apply_gradients()
+            except Exception as exc:  # e.g. nonfinite: every rank raises the same way
+                error = exc
+        try:
+            replies = replicas.collect()
+        except Exception as worker_error:
+            if error is not None:
+                raise error from worker_error
+            raise
+        if error is not None:
+            raise error
+        assert partial is not None
+        return [partial, *replies]
 
     async def probe_logprobs(
         self, tokens: Sequence[int]
@@ -509,6 +643,20 @@ class LocalLearner:
         await self.pool._run_locked(lambda: self._load_state(Path(path), with_optimizer))
 
     def _load_state(self, directory: Path, with_optimizer: bool) -> None:
+        replicas = self.pool.replicas
+        if replicas is None:
+            self._load_state_here(directory, with_optimizer)
+            return
+        replicas.send("load_state", (self.name, str(directory), with_optimizer))
+        try:
+            self._load_state_here(directory, with_optimizer)
+        except BaseException:
+            with suppress(Exception):  # keep the pipe in step; report rank 0's error
+                replicas.collect()
+            raise
+        replicas.collect()
+
+    def _load_state_here(self, directory: Path, with_optimizer: bool) -> None:
         import torch
         from peft import set_peft_model_state_dict
         from safetensors.torch import load_file

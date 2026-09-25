@@ -244,6 +244,17 @@ def test_vllm_argv_env_and_runtime_hash() -> None:
     )
     assert "--enable-lora" not in argv and "--max-loras" not in argv
     assert "CUDA_VISIBLE_DEVICES" not in env
+    assert "--enable-sleep-mode" not in argv and "VLLM_SERVER_DEV_MODE" not in env
+    _, argv, env = launch_args(
+        replace(cfg, tensor_parallel_size=2, enable_sleep_mode=True, cuda_visible_devices="0,1")
+    )
+    tail = argv[argv.index("--tensor-parallel-size") :]
+    assert tail[:5] == ["--tensor-parallel-size", "2", "--enable-sleep-mode", "--seed", "0"]
+    assert env == {
+        "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True",
+        "VLLM_SERVER_DEV_MODE": "1",
+        "CUDA_VISIBLE_DEVICES": "0,1",
+    }
     from marli.config import config_hash
 
     assert config_hash(cfg) == config_hash(replace(cfg, detach=True, ready_timeout_s=30))
@@ -258,6 +269,7 @@ def test_vllm_argv_env_and_runtime_hash() -> None:
         ({"learner_ranks": [16, 16], "max_loras": 2}, "snapshot"),
         ({"port": 0}, "port"),
         ({"gpu_memory_utilization": 1.1}, "utilization"),
+        ({"enable_sleep_mode": 1}, "enable_sleep_mode"),
     ],
 )
 def test_validation_before_launch(overrides: dict, match: str) -> None:
@@ -294,6 +306,7 @@ async def test_server_roundtrip_and_serve_detach(
         assert read_server_json(result.manifest) == (server.base_url, {"qwen3_5_4b": "qwen3_5_4b"})
         assert server.adapters == [] and server.log == "server.log"
         assert server.max_loras == 4 and server.max_lora_rank == 32
+        assert server.tensor_parallel_size == 1 and server.enable_sleep_mode is False
         assert process_alive(server.pid)
         assert server.config_hash == result.config_hash
     finally:

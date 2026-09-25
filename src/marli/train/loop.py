@@ -169,6 +169,20 @@ def _preflight(
     return ctx, models, frozen
 
 
+def local_backend_kwargs(cfg: TrainRLConfig, run: RunDir) -> dict[str, Any]:
+    """Keyword arguments for the local backend; placement options only when set."""
+    kwargs: dict[str, Any] = {
+        "server_json": cfg.local_server_json,
+        "adapters_dir": cfg.local_adapters_dir or str(run.path("adapters")),
+        "state_dir": str(run.path("states")),
+    }
+    if cfg.local_devices is not None:
+        kwargs["devices"] = list(cfg.local_devices)
+    if cfg.local_sleep_sampler:
+        kwargs["sleep_sampler"] = True
+    return kwargs
+
+
 def _rebase(checkpoint: Checkpoint, root: Path) -> Checkpoint:
     def records_at(records: dict[str, LearnerCheckpoint]) -> dict[str, LearnerCheckpoint]:
         result = {}
@@ -442,11 +456,7 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                 if spec.backend == "fake":
                     kwargs = {"state_dir": run.path("states")}
                 elif spec.backend == "local":
-                    kwargs = {
-                        "server_json": cfg.local_server_json,
-                        "adapters_dir": cfg.local_adapters_dir or str(run.path("adapters")),
-                        "state_dir": str(run.path("states")),
-                    }
+                    kwargs = local_backend_kwargs(cfg, run)
                 backends[spec.backend] = make_backend(
                     spec.backend, spend=spend, base_url=cfg.base_url, **kwargs
                 )
@@ -577,6 +587,12 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                     raise snapshot
                 samplers[snapshot.learner] = snapshot
             train_seconds = perf_counter() - train_start
+            # e.g. the local backend's vLLM sleep/wake seconds when it time-shares GPUs
+            backend_metrics = {
+                name: metrics
+                for name, backend in backends.items()
+                if (pop := getattr(backend, "pop_step_metrics", None)) and (metrics := pop())
+            }
             completed, cursor, rae_state = step, next_cursor, next_rae
             safe_to_save = True
             run.append_row(
@@ -587,6 +603,7 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                     **episode_metrics,
                     "sample_seconds": sample_seconds,
                     "train_seconds": train_seconds,
+                    **({"backend_metrics": backend_metrics} if backend_metrics else {}),
                     "learner_versions": {
                         name: learner.version for name, learner in learners.items()
                     },

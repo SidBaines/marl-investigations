@@ -104,6 +104,62 @@ with HTTP 200 but silently ignored it. The adapter's `manifest.json` records
 the map; learner state restore reverses it. Mapping metadata does not enable
 local training for entries still marked `local: no`.
 
+### Option 2: both GPUs in both phases
+
+The split above leaves each GPU idle for half of every synchronous step:
+vLLM samples on GPU 0 while GPU 1 waits, then the learner trains on GPU 1
+while GPU 0 waits. Time sharing keeps both busy in both phases:
+
+- **Sampling:** one vLLM server, tensor-parallel over both GPUs, capped at
+  45% of each GPU's memory. The learner's model copies stay resident beside it.
+- **Training:** vLLM sleeps (weights to CPU, KV cache freed). The learner runs
+  data-parallel, with one full base copy per GPU, on token-balanced shards of
+  the batch. The shards' LoRA gradients are summed with NCCL, so the update is
+  the one-GPU update up to float rounding.
+- **Hand-off:** each rank empties its CUDA cache. vLLM wakes, and the new
+  adapter is loaded and probe-checked as usual.
+
+Serve with sleep mode (`experiments/2026-09-25_sacrifice-relay/bench/serve/tp2_mtp2_sleep.yaml`):
+
+```yaml
+model: qwen3_8_27b
+python: /opt/vllm/bin/python
+cuda_visible_devices: "0,1"
+tensor_parallel_size: 2
+gpu_memory_utilization: 0.45
+enable_sleep_mode: true        # adds --enable-sleep-mode and VLLM_SERVER_DEV_MODE=1
+max_model_len: 32768
+max_lora_rank: 32
+max_loras: 4
+learner_ranks: [32]
+extra_args: ["--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}']
+```
+
+```bash
+uv run --no-sync marli serve vllm tp2_mtp2_sleep.yaml detach=true --out runs/serve/tp2
+```
+
+Train **without** `CUDA_VISIBLE_DEVICES`: both processes see both GPUs.
+
+```bash
+uv run --no-sync marli train rl base.yaml arm.yaml tasks=... max_usd=1 \
+  local_server_json=runs/serve/tp2/server.json \
+  'local_devices=[cuda:0,cuda:1]' local_sleep_sampler=true --out runs/train/arm
+```
+
+Rank 0 runs inside the trainer on `cuda:0`. Rank 1 is a spawned worker on
+`cuda:1`; its log is `<run>/learner-ranks/rank1.log`, and its tail appears in
+any `BackendError` it causes. Both options are
+runtime-only, so they do not change a run's identity: a run may resume with or
+without them. `metrics.jsonl` gains `backend_metrics.local.{sleep_s,wake_s}`
+per step. A failed train step and `close()` both wake the server, so it is
+never left asleep.
+
+Measured on 2×H200 with Qwen3.8-27B (see the sacrifice-relay `bench/README.md`):
+- sleep: 0.7 s after the first (14 s);
+- wake: under 1 s;
+- memory: about 115 GiB used on GPU 0 with the server awake beside the learner.
+
 ## Connect training
 
 The backend factory accepts these exact kwargs:
