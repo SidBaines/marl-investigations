@@ -68,16 +68,25 @@ class ScriptedPolicy:
         meta: CallMeta | None = None,
     ) -> Sample:
         prompt = tuple(prompt_ids)
-        ctx = ScriptCtx(prompt, self._renderer.decode(prompt), spec, seed, meta or CallMeta())
+        meta = meta or CallMeta()
+        # A continuation carries the call's first k completion ids at the end of the
+        # prompt: the script sees the original prompt and its output resumes at k.
+        k = meta.continued_tokens
+        original = prompt[: len(prompt) - k] if k else prompt
+        ctx = ScriptCtx(original, self._renderer.decode(original), spec, seed, meta)
         self.calls.append(ctx)
         scripted_ids = tuple(self._script(ctx))
+        if k:
+            if scripted_ids[:k] != prompt[len(prompt) - k :]:
+                raise ValueError("continued prefix does not match this script's completion")
+            scripted_ids = scripted_ids[k:]
         ids = scripted_ids[: spec.max_tokens]
         stops = spec.stop_token_ids or self._renderer.stop_token_ids
         termination = Termination.LENGTH
         if len(scripted_ids) <= spec.max_tokens and ids and ids[-1] in stops:
             termination = Termination.STOP
         logprobs = tuple(
-            -3.0 + 3.0 * random.Random(derive_seed(seed, i)).random() for i in range(len(ids))
+            -3.0 + 3.0 * random.Random(derive_seed(seed, k + i)).random() for i in range(len(ids))
         )
         latency = self._latency_s(ctx) if callable(self._latency_s) else self._latency_s
         if latency < 0:

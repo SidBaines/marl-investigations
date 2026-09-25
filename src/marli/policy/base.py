@@ -76,6 +76,9 @@ class CallMeta:
     role: str = ""
     call_index: int = 0  # 0-based index of this call among the agent's calls
     purpose: str = "act"  # interact.types.Purpose value
+    # Completion ids of this same call already at the end of prompt_ids: an episode
+    # continuation extends a recorded, budget-cut completion (eval continue).
+    continued_tokens: int = 0
 
 
 @runtime_checkable
