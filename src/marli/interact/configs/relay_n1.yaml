@@ -1,0 +1,6 @@
+protocol: relay
+config:
+  n_agents: 1
+  env_tools: [bash, ci_submit, ci_review]
+notes: >-
+  Solo control for code_rules; see experiments/2026-09-25_sacrifice-relay/README.md.

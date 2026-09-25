@@ -883,3 +883,121 @@ async def test_wrong_restored_version_fails_before_sampling(
     with pytest.raises(AssertionError, match="restored version 999, expected 1"):
         await run_verb("train rl", cfg, out=out)
     assert not (out / "rollouts/step_00001").exists()
+
+
+@ENVS.register("rl_relay_slots")
+def relay_env_factory(config: dict[str, Any], task: Task) -> Any:
+    from test_interact_relay import SlottedEnv
+
+    return SlottedEnv()
+
+
+def relay_policy() -> ScriptedPolicy:
+    renderer = FakeRenderer()
+
+    def turn(ctx: ScriptCtx) -> Turn:
+        slot = int(ctx.meta.agent_id.removeprefix("contrib"))
+        index = ctx.meta.call_index
+        episode_idx = int(ctx.meta.episode_id.rsplit("/e", 1)[1])
+        if slot == 0:
+            if index == 0:
+                return Turn(tool_calls=(("ci_review", {}),))
+            if index == 1:
+                return Turn(tool_calls=(("bash", {"content": "shared rule"}),))
+        else:
+            if index == 0:
+                assert "shared rule" not in ctx.prompt_text
+                return Turn(tool_calls=(("bash", {}),))
+            if index == 1:
+                assert "shared rule" in ctx.prompt_text
+                return Turn(tool_calls=(("ci_submit", {"score": 3 if episode_idx == 0 else 1}),))
+        assert index == 2
+        return Turn(tool_calls=(("end_session", {}),))
+
+    return ScriptedPolicy("relay", renderer, from_callable(turn, renderer))
+
+
+@pytest.mark.parametrize("target", ["individual", "team"])
+async def test_relay_two_training_steps_rewards_and_grade_metrics(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    from marli.train.types import CreditStats, SegmentCredit
+
+    fake_setup.factory = "test_train_loop:relay_policy"
+    cfg = config(
+        make_taskset(tmp_path / "tasks"),
+        protocol="relay_n4",
+        env="rl_relay_slots",
+        learners={"shared": LearnerSpec(base_model="qwen3_8b", backend="fake")},
+        seating={"contributor": "learner:shared"},
+        credit=CreditConfig(reward_key="score", reward_target={"contributor": target}),
+    )
+    captured: list[list[SegmentCredit]] = []
+    original = loop.assign_credit
+
+    def credit(
+        episodes: Sequence[Episode], cfg: CreditConfig, ctx: loop.CreditContext,
+        *, rae_state: dict[str, float],
+    ) -> tuple[list[SegmentCredit], CreditStats, dict[str, float]]:
+        result = original(episodes, cfg, ctx, rae_state=rae_state)
+        captured.append(result[0])
+        return result
+
+    monkeypatch.setattr(loop, "assign_credit", credit)
+    out = tmp_path / "train"
+    result = await run_verb("train rl", cfg, out=out)
+    assert result.handle.step == 1
+    learner = fake_setup.backends[0].learners["shared"]
+    assert learner.version == learner.weights == len(learner.steps) == 2
+    assert len(captured) == 2
+    for step, (credits, datums) in enumerate(zip(captured, learner.steps, strict=True)):
+        assert len(credits) == len(datums) == 8
+        by_agent = {(credit.episode_id, credit.agent_id): credit for credit in credits}
+        for credit in credits:
+            first_episode = credit.episode_id.endswith("/e0")
+            own = 0 if credit.agent_id == "contrib0" else (3 if first_episode else 1)
+            team = 2.25 if first_episode else 0.75
+            assert credit.reward == (team if target == "team" else own)
+            assert credit.advantage == credit.reward - (0.75 if first_episode else 2.25)
+        for datum in datums:
+            assert datum.policy_version == step and datum.session_idx == 0
+            expected = by_agent[datum.episode_id, datum.agent_id].advantage
+            assert all(
+                advantage == (expected if mask else 0)
+                for advantage, mask in zip(datum.advantages, datum.mask, strict=True)
+            )
+        saved = list(read_episodes(out / f"rollouts/step_{step:05d}", with_tokens=True))
+        assert len(saved) == 2 and all(episode.ok for episode, _ in saved)
+        assert all(len(episode.segments) == 4 for episode, _ in saved)
+    metrics = rows(out / "metrics.jsonl")
+    assert len(metrics) == 2
+    for metric in metrics:
+        assert metric["grades"] == {
+            "contrib0": {"score": 0, "probed": 1, "notes_had_rule": 0, "n": 2},
+            **{
+                f"contrib{k}": {"score": 2, "probed": 0, "notes_had_rule": 1, "n": 2}
+                for k in range(1, 4)
+            },
+            "_system": {"score": 1.5, "probed": 0.25, "notes_had_rule": 0.75, "n": 2},
+        }
+        assert metric["accuracy"] == 1.5 and metric["n_agents"] == 4
+        assert metric["reward_mean"] == {"contributor": 1.5}
+        assert metric["calls"] == 12 and metric["datums"]["shared/n"] == 8
+
+
+def test_grade_metrics_use_successful_episodes_and_observed_components() -> None:
+    from test_train_credit import Seat, episode
+
+    first = episode(0, 1, [Seat("a", own=1), Seat("b", own=0)])
+    second = episode(1, 0, [Seat("a", own=0), Seat("ungraded")])
+    failed = episode(2, 99, [Seat("a", own=99), Seat("failed_only", own=99)], ok=False)
+    first.grades["a"].update({"probed": 1, "diagnostic": "text"})
+    second.grades["a"]["probed"] = 0
+    first.grades["_system"]["sparse"] = 6
+    assert loop._grade_metrics([first, second, failed]) == {
+        "a": {"correct": 0.5, "probed": 0.5, "n": 2},
+        "b": {"correct": 0, "n": 1},
+        "ungraded": {"n": 1},
+        "_system": {"correct": 0.5, "sparse": 6, "n": 2},
+    }
+    assert loop._grade_metrics([failed]) == {}

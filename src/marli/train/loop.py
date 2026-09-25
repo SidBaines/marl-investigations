@@ -65,6 +65,27 @@ class DataCursor:
     index: int = 0
 
 
+def _grade_metrics(episodes: Sequence[Episode]) -> dict[str, dict[str, float | int]]:
+    """Average observed numeric components; n counts successful episodes per agent."""
+    grades: dict[str, list[dict[str, float]]] = {}
+    for episode in episodes:
+        if episode.ok:
+            for key in [*(agent.agent_id for agent in episode.agents), "_system"]:
+                grades.setdefault(key, []).append(episode.grades.get(key, {}))
+    result: dict[str, dict[str, float | int]] = {}
+    for key, rows in grades.items():
+        components: dict[str, list[float]] = {}
+        for row in rows:
+            for component, value in row.items():
+                if isinstance(value, (int, float)):
+                    components.setdefault(component, []).append(value)
+        result[key] = {
+            **{component: fmean(values) for component, values in components.items()},
+            "n": len(rows),
+        }
+    return result
+
+
 def take_tasks(
     tasks: Sequence[Task], cursor: DataCursor, count: int, *, seed: int
 ) -> tuple[list[Task], DataCursor]:
@@ -495,6 +516,7 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                         f"max_failed_frac={cfg.max_failed_frac}"
                     )
             episode_metrics = {
+                "grades": _grade_metrics(episodes),
                 "accuracy": fmean(
                     e.grades.get("_system", {}).get(cfg.credit.reward_key, 0.0) for e in episodes
                 ),
