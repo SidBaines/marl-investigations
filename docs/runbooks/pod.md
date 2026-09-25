@@ -212,6 +212,46 @@ safe to publish as a claude.ai Artifact. Episode files are folded
 incrementally: `cache.json` in the out dir keeps each file's offset. SIGINT or
 SIGTERM stops `watch_s` and records the manifest.
 
+## Continue truncated episodes
+
+`eval continue` extends agents that ran out of budget in a saved `eval rollout`
+run, without re-sampling what already happened. It replays each selected
+episode's recorded calls exactly: tool calls run again for real to rebuild the
+sandbox, but the agent sees the recorded results. The agent that hit a limit
+then keeps generating under the new limits, and every agent after it runs
+live. The result is distributed as if the source had used the new limits from
+the start, because prompts never state the budget.
+
+Only lockstep `single`, `relay` and `multi_session` runs are supported. The
+output is a complete EpisodeSet with the same episode ids; untruncated and
+not-ok episodes are copied verbatim. `continuations.jsonl` records each
+episode's cut, replayed calls, tool-result mismatches and any divergence.
+
+The study's filter run, with the budget raised to 20,480 tokens (run from the
+checkout root, with the filter's vLLM server up):
+
+```bash
+S=experiments/2026-09-25_sacrifice-relay
+uv run --no-sync marli eval continue episodes=$S/out/filter_rollout \
+  limits.agent.max_gen_tokens=20480 limits.episode.max_gen_tokens=20480 \
+  'policies.q.ref=vllm:@'"$PWD/$S"'/out/serve/server.json#qwen3_8_27b' \
+  policies.q.renderer=qwen3_8_medium policies.q.model=qwen3_8_27b \
+  concurrency=160 max_usd=1 --out $S/out/filter_rollout_20k
+```
+
+The source must be complete (not paused). `policies` defaults to the source's,
+so the `policies.q.*` lines are needed only when the server path changed; the
+model and renderer must match the source's.
+
+For relay runs, raise `limits.episode.max_gen_tokens` to at least
+`n_agents × agent`. Relay adjusts limits and rejects a smaller episode budget.
+
+A change that would alter a replayed call is refused or detected: limits
+quoted in a system prompt, the session count, or a larger `call.max_tokens`
+where an earlier completion was cut at the cap. `on_divergence=fail` (the
+default) marks such an episode not-ok and does not retry it; `live` switches
+it to live sampling and flags it.
+
 ## Checkpoints off-pod and teardown
 
 For now, rsync results back to the **orchestration box's `/workspace`** before

@@ -29,7 +29,7 @@ A verb's `SystemExit` is an unexpected failure (exit 1); `KeyboardInterrupt` exi
 | 2 | `ConfigError`: Invalid configuration or usage.; `DirtyTreeError`: Training provenance cannot be tied to a clean commit. |
 | 3 | `HashMismatchError`: An existing run directory belongs to a different configuration. |
 | 4 | `BudgetExceededError`: A configured spending limit was exceeded. |
-| 5 | `BackendError`: A backend failed or cannot support the requested operation. |
+| 5 | `BackendError`: A backend failed or cannot support the requested operation.; `ReplayDivergence`: The continuation no longer reproduces the recorded prefix. |
 | 130 | Interrupted (`KeyboardInterrupt`) |
 
 ## Verbs
@@ -122,6 +122,26 @@ Manifest produced: `sft.json`.
 | require_conformant | bool | true | false | false | false |  |
 | student_model | str |  | false | false | false |  |
 | max_len | int \| None | null | false | false | false |  |
+
+### eval continue
+
+Extend agents that ran out of budget in saved episodes under larger limits.
+
+Manifest produced: `episodes.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| episodes | str \| None | null | false | false | true | source EpisodeSet (an eval rollout run) |
+| limits | dict[str, Any] | {} | false | false | false |  |
+| policies | dict[str, PolicySpec] | {} | false | false | false |  |
+| select | str | truncated | false | false | false |  |
+| episode_ids | list[str] | [] | false | false | false |  |
+| on_divergence | str | fail | false | false | false |  |
+| seed | int | 0 | false | false | false |  |
+| record_tokens | bool | false | false | false | false |  |
+| retry_failed | bool | true | false | true | false | retry backend-failed continuations on resume |
+| concurrency | int | 8 | false | true | false | concurrent episodes |
+| max_usd | float \| None | null | false | true | false | spend guard for this run |
 
 ### eval grid
 
