@@ -57,6 +57,12 @@ async def filter(cfg: FilterConfig, run: RunDir) -> TaskSet:
     task_refs = [ref for ref in recorded.get("inputs", []) if ref["kind"] == "taskset"]
     if len(task_refs) != 1 or task_refs[0]["sha256"] != taskset.sha256():
         raise ConfigError("EpisodeSet recorded TaskSet digest does not match tasks")
+    meta = recorded.get("meta", {})
+    if meta.get("paused"):
+        raise ConfigError(
+            f"EpisodeSet is a paused rollout ({meta['n_tasks_sampled']} of {meta['n_tasks']} "
+            "tasks sampled); rerun eval rollout without stop_after_tasks to finish it first"
+        )
     grades: dict[str, list[float]] = defaultdict(list)
     ignored_non_ok = 0
     for episode in read_episodes(manifest.parent):

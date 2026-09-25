@@ -355,3 +355,16 @@ async def test_wall_clock_failures_count_as_zero_and_last_attempt_wins(
     (task,) = read_tasks(result.handle)
     assert task.task_id == "mixed" and task.meta["pass_rate"] == 0.5
     assert result.handle.meta["filter"]["ignored_non_ok_episodes"] == 0
+
+
+async def test_paused_rollout_is_rejected(tmp_path: Path, taskset: TaskSet, rollouts: Path) -> None:
+    manifest = rollouts / "episodes.json"
+    recorded = json.loads(manifest.read_text())
+    recorded["meta"] = {"paused": True, "n_tasks_sampled": 2, "n_tasks": 6}
+    manifest.write_text(json.dumps(recorded) + "\n")
+    with pytest.raises(ConfigError, match="paused rollout \\(2 of 6 tasks"):
+        await run_verb(
+            "data filter",
+            FilterConfig(tasks=str(taskset.root), episodes=str(rollouts)),
+            out=tmp_path / "out",
+        )

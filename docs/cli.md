@@ -149,6 +149,7 @@ Manifest produced: `report.json`.
 | common.run_seed | int | 0 | false | true | false |  |
 | common.max_tasks | int \| None | null | false | true | false |  |
 | common.record_tokens | bool | false | false | true | false |  |
+| common.stop_after_tasks | int \| None | null | false | true | false | pause after the first K tasks; rerun without it (same --out) to resume the rest |
 | common.retry_failed | bool | true | false | true | false | rerun non-ok episodes on resume |
 | common.concurrency | int | 8 | false | true | false | concurrent episodes |
 | common.max_usd | float \| None | null | false | true | false | spend guard for this run |
@@ -214,6 +215,7 @@ Manifest produced: `episodes.json`.
 | run_seed | int | 0 | false | false | false |  |
 | max_tasks | int \| None | null | false | false | false |  |
 | record_tokens | bool | false | false | false | false |  |
+| stop_after_tasks | int \| None | null | false | true | false | pause after the first K tasks; rerun without it (same --out) to resume the rest |
 | retry_failed | bool | true | false | true | false | rerun non-ok episodes on resume |
 | concurrency | int | 8 | false | true | false | concurrent episodes |
 | max_usd | float \| None | null | false | true | false | spend guard for this run |
