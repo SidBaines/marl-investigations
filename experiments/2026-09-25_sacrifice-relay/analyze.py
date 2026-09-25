@@ -10,6 +10,8 @@ not only NOTES.md). Per step (or per pooled block of steps):
 - redundant probe rate:   P(ci_review | ran CI, knew the rule)
 - note fidelity:          P(the next contributor starts knowing the rule | a non-last prober)
 - follower bonus rate:    P(score == bonus | ci_submit, knew the rule)
+- pre-edited rate:        P(a later contributor's solution.py was already changed when it started),
+                          i.e. an earlier contributor worked on someone else's task
 - CI rate, base pass rate, mean own score, mean team score (the `_system` grade)
 
 Usage: python analyze.py <run_dir> [--every K] [--bonus 3]
@@ -40,6 +42,7 @@ def rate(pair: list[int]) -> float:
 
 def step_metrics(episodes: list[dict], bonus: float) -> dict[str, float | int]:
     fm, red, fid, got_bonus, ci = [0, 0], [0, 0], [0, 0], [0, 0], [0, 0]
+    pre = [0, 0]
     fm_slot: dict[int, list[int]] = defaultdict(lambda: [0, 0])
     base, own, team = [], [], []
     for ep in episodes:
@@ -53,6 +56,9 @@ def step_metrics(episodes: list[dict], bonus: float) -> dict[str, float | int]:
             if g is None:
                 continue
             own.append(g["score"])
+            if k > 0:
+                pre[0] += int(bool(g.get("solution_edited_at_start", 0)))
+                pre[1] += 1
             ci[1] += 1
             if not ran_ci(g):
                 continue
@@ -79,6 +85,7 @@ def step_metrics(episodes: list[dict], bonus: float) -> dict[str, float | int]:
         "redundant_probe": rate(red),
         "note_fidelity": rate(fid),
         "follower_bonus": rate(got_bonus),
+        "pre_edited": rate(pre),
         "ci_rate": rate(ci),
         "base_pass": st.fmean(base) if base else float("nan"),
         "own_score": st.fmean(own) if own else float("nan"),
