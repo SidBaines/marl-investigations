@@ -896,3 +896,35 @@ async def test_prelude_matches_lcb_star_imports() -> None:
 
 def test_training_tolerance_rejects_decimal_arithmetic_overflow() -> None:
     assert not _stdio_matches("1e999999999", "0", 0.01)
+
+
+@pytest.mark.parametrize("functional", [False, True])
+@pytest.mark.parametrize("public", [False, True])
+@pytest.mark.parametrize("instruction", [None, "Finish."])
+def test_factored_presentation_preserves_code_fn_prompt(
+    functional: bool, public: bool, instruction: str | None,
+) -> None:
+    task = code_task(functional=functional)
+    if not public:
+        task = replace(task, answer={**task.answer, "public": []})
+    env = CodeFnEnv({} if instruction is None else {"instruction": instruction}, task)
+    interface = (
+        "Functional task: define add as a function or Solution method."
+        if functional else "Stdin task: read standard input and print the answer."
+    )
+    examples = (
+        "\n\nUse bash to test with the public examples in examples/NN.in and examples/NN.out."
+        if public else ""
+    )
+    default = (
+        "The shared workspace contains problem.md and solution.py. "
+        "Write your Python solution in solution.py: read stdin and "
+        "print stdout for stdin tasks, or define the named function (or Solution method) "
+        "for functional tasks. The grader provides standard-library imports; "
+        "numpy is not available. "
+        "When done, call submit() to save solution.py as your final submission. "
+        "Only that saved source is graded; an optional answer note is ignored."
+    )
+    suffix = default if instruction is None else instruction
+    expected = f"{task.prompt}\n\n{interface}{examples}\n\n{suffix}"
+    assert env.task_message("solver") == expected
