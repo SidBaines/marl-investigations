@@ -32,7 +32,7 @@ from marli import runlog
 from marli.budget import SpendGuard, tinker_cost
 from marli.config import to_dict
 from marli.envs.base import Task
-from marli.envs.registry import ENVS, make_env
+from marli.envs.registry import ENVS, load_builtin_envs, make_env
 from marli.errors import BackendError, BudgetExceededError, ConfigError, HashMismatchError
 from marli.eval.policies import PolicySpec, build_policies, resolve_spec
 from marli.eval.policies import SamplingOverrides as FrozenSampling
@@ -109,8 +109,7 @@ def _preflight(
     cfg: TrainRLConfig,
 ) -> tuple[CreditContext, dict[str, ModelSpec], dict[str, PolicySpec]]:
     cfg.__post_init__()
-    from marli.envs import math as _math  # noqa: F401
-
+    load_builtin_envs()
     ENVS.get(cfg.env)
     name, _, protocol_config = resolve_protocol(cfg.protocol, cfg.protocol_config)
     roles = {role.role: role for role in build_protocol(cfg.protocol, cfg.protocol_config).roles()}

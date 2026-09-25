@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
 from collections.abc import AsyncIterator
 from dataclasses import asdict, replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,9 +17,17 @@ from _marli_code_fixtures import SUM_SOLUTION, code_task
 from test_envs_sandbox import sandbox_host  # noqa: F401
 
 from marli.envs.base import Task
+from marli.envs.code_fn import problem_statement
 from marli.envs.code_rules import CodeRulesEnv, CodeRulesEnvConfig, _Rule
 from marli.envs.registry import make_env
+from marli.errors import ConfigError
+from marli.interact.configs import build_protocol
+from marli.interact.limits import Limits
+from marli.interact.run import EpisodeSpec, run_episode
 from marli.interact.tools import Tool, ToolCtx, ToolError
+from marli.interact.types import EventKind
+from marli.policy.scripted import ScriptedPolicy, Turn, turns_by_agent
+from marli.render.fake import FakeRenderer
 
 
 def repo_task(n: int = 4, *, family: str | None = None, has_rule: bool = True) -> Task:
@@ -139,7 +149,11 @@ def test_rule_checks_exact_forms_and_near_misses(family: str) -> None:
     elif family == "constant":
         assert not rule.met("def f():\n    " + source)
         assert not rule.met("if True:\n    " + source)
-        assert not rule.met(source.replace(" = ", ": str = "))
+        assert rule.met(source.replace(" = ", ": str = "))
+        assert not rule.met("def f():\n    " + source.replace(" = ", ": str = "))
+        assert not rule.met(f'{rule.key}: str = b"{rule.id}"')
+        assert not rule.met(f'{rule.key}: str')
+        assert not rule.met(f'other.{rule.key}: str = "{rule.id}"')
         assert not rule.met(f'{rule.key} = str("{rule.id}")')
         assert not rule.met(f'other.{rule.key} = "{rule.id}"')
         assert not rule.met("invalid python!")
@@ -171,7 +185,7 @@ async def test_workspace_layout_and_no_hidden_bytes(env: CodeRulesEnv) -> None:
     for slot in range(1, 5):
         prefix = f"tasks/task_{slot}"
         for name, value in (
-            ("problem.md", "Synthetic: add two integers."),
+            ("problem.md", problem_statement(code_task())),
             ("solution.py", "# Start here\n"),
             ("examples/00.in", "2 3\n"),
             ("examples/00.out", "5"),
@@ -238,8 +252,9 @@ time, including after your CI run. When you are done, call end_session."""  # no
     assert "The 3 contributor(s) before you have finished." in last
     assert "No one will work in this repository after you." in last
     solo = CodeRulesEnv({}, repo_task(1)).slot_message(0)
-    assert "contributor 1 of 1" in solo
-    assert "No one else will work in this repository." in solo
+    assert solo.split("\n\n")[0] == (
+        "You are the only contributor working in this repository. No one else will work in it."
+    )
 
 
 async def test_review_reveals_rule_without_grading_and_can_write_notes(
@@ -250,7 +265,7 @@ async def test_review_reveals_rule_without_grading_and_can_write_notes(
 
     monkeypatch.setattr(env._graders[0], "grade", forbidden)
     env.bind_agent("worker0", 0)
-    assert env.slot_submission("worker0") is None
+    assert json.loads(env.slot_submission("worker0"))["mode"] == "none"
     result = await tool(env, "ci_review")(context(env))
     assert env._rule is not None
     assert result.content == (
@@ -268,6 +283,8 @@ async def test_review_reveals_rule_without_grading_and_can_write_notes(
         "source": "# Start here\n",
         "rule": asdict(env._rule),
         "notes_had_rule": False,
+        "rule_known_at_start": False,
+        "rule_known_at_ci": False,
     }
     assert await env.grade(payload) == {
         "score": 0,
@@ -277,6 +294,9 @@ async def test_review_reveals_rule_without_grading_and_can_write_notes(
         "submitted": 0,
         "pass_frac": 0,
         "notes_had_rule": 0,
+        "rule_known_at_start": 0,
+        "rule_known_at_ci": 0,
+        "ran_ci": 1,
     }
     result = await tool(env, "bash")(
         context(env), command=f"printf '%s' '{env._rule.id}' > NOTES.md"
@@ -372,6 +392,9 @@ async def test_bonus_snapshot_memoisation_and_offline_grading(
             "submitted": 1,
             "pass_frac": 1,
             "notes_had_rule": 1,
+            "rule_known_at_start": 0,
+            "rule_known_at_ci": 1,
+            "ran_ci": 1,
         }
         assert await instance.grade(payload) == expected
     finally:
@@ -416,6 +439,9 @@ async def test_bundle_means_include_missing_slots_and_preserve_slot_order(
         "submitted": 0.5,
         "pass_frac": 0.5,
         "notes_had_rule": 0.5,
+        "rule_known_at_start": 0,
+        "rule_known_at_ci": 0.5,
+        "ran_ci": 0.75,
         "n_probed": 1,
         "n_rule_met": 1,
     }
@@ -475,7 +501,7 @@ async def test_source_size_limit_is_bytes_and_missing_source_is_empty(env: CodeR
     await env.sandbox.write_file("tasks/task_1/solution.py", "é" * ((1 << 19) + 1))
     with pytest.raises(ToolError, match="1 MiB"):
         await tool(env, "ci_review")(context(env))
-    assert env.slot_submission("worker0") is None
+    assert json.loads(env.slot_submission("worker0"))["mode"] == "none"
     (env.sandbox.workdir / "tasks/task_1/solution.py").unlink()
     result = await tool(env, "ci_submit")(context(env))
     assert "Score: 0." in result.content
@@ -524,3 +550,215 @@ async def test_grades_use_the_slots_own_problem_and_rule_cannot_rescue_failure()
         assert stdin["rule_met"] == 1
     finally:
         await instance.teardown()
+
+
+@pytest.mark.parametrize("functional", [False, True])
+@pytest.mark.parametrize("starter", ["", "def combine(a, b):\n    pass\n"])
+@pytest.mark.usefixtures("sandbox_host")
+async def test_problem_presents_interface_starter_and_grader_capabilities(
+    functional: bool, starter: str,
+) -> None:
+    problem = code_task(functional=functional)
+    problem = replace(
+        problem,
+        answer={**problem.answer, "fn_name": "combine" if functional else None, "public": []},
+        meta={**problem.meta, "starter_code": starter},
+    )
+    task = repo_task(1)
+    task.answer["problems"] = [asdict(problem)]
+    instance = CodeRulesEnv({}, task)
+    instance.begin_episode(1)
+    await instance.setup()
+    try:
+        assert instance.sandbox is not None
+        text = await instance.sandbox.read_file("tasks/task_1/problem.md")
+        assert problem.prompt in text
+        interface = (
+            "Functional task: define combine as a function or Solution method."
+            if functional else "Stdin task: read standard input and print the answer."
+        )
+        assert interface in text
+        assert "The grader provides standard-library imports; numpy is not available." in text
+        assert ("Starter code:" in text) == bool(starter)
+        assert starter in text
+        assert await instance.sandbox.read_file("tasks/task_1/solution.py") == starter
+        assert "submit()" not in text and "examples/" not in text
+        assert "public examples" not in instance.slot_message(0)
+        assert "problem.md. Use the bash tool" in instance.slot_message(0)
+    finally:
+        await instance.teardown()
+
+
+@pytest.mark.parametrize(
+    "path", ["NOTES.md", "tasks/task_1/solution.py", "tasks/task_2/solution.py", "misc/rule.txt"]
+)
+async def test_rule_knowledge_uses_whole_workspace_and_snapshots_start(
+    env: CodeRulesEnv, path: str,
+) -> None:
+    assert env.sandbox is not None and env._rule is not None
+    env.bind_agent("worker0", 0)
+    await tool(env, "ci_review")(context(env))
+    await env.sandbox.write_file(path, env._rule.id)
+    env.bind_agent("worker1", 1)
+    no_ci = json.loads(env.slot_submission("worker1"))
+    assert no_ci == {
+        "v": 1, "slot": 1, "mode": "none", "rule_known_at_start": True,
+        "rule_known_at_ci": False, "notes_had_rule": False,
+    }
+    scores = await env.grade(json.dumps(no_ci))
+    assert scores.pop("rule_known_at_start") == 1
+    assert all(value == 0 for value in scores.values())
+    # Erasing the evidence after binding cannot rewrite start knowledge.
+    await env.sandbox.write_file(path, "")
+    env.bind_agent("worker1", 1)
+    await tool(env, "ci_review")(context(env, "worker1"))
+    grades = await env.grade(env.slot_submission("worker1"))
+    assert grades["rule_known_at_start"] == 1 and grades["rule_known_at_ci"] == 0
+    await env.sandbox.write_file(path, env._rule.id)
+    env.bind_agent("worker2", 2)
+    await tool(env, "ci_review")(context(env, "worker2"))
+    grades = await env.grade(env.slot_submission("worker2"))
+    assert grades["rule_known_at_start"] == grades["rule_known_at_ci"] == grades["ran_ci"] == 1
+    assert grades["notes_had_rule"] == (path == "NOTES.md")
+    env.bind_agent("worker3", 3)
+    bundle = env.bundle({f"worker{i}": env.slot_submission(f"worker{i}") for i in range(4)})
+    assert all(item is not None for item in json.loads(bundle)["bundle"])
+    system = await env.grade(bundle)
+    assert system["rule_known_at_start"] == system["ran_ci"] == 0.75
+    assert system["rule_known_at_ci"] == 0.25
+    assert system["score"] == 0
+
+
+@pytest.mark.parametrize("mode", ["review", "submit"])
+@pytest.mark.parametrize("state", ["bad_bytes", "directory", "symlink", "missing", "fifo"])
+async def test_invalid_notes_never_block_ci(
+    env: CodeRulesEnv, tmp_path: Path, mode: str, state: str,
+) -> None:
+    assert env.sandbox is not None and env._rule is not None
+    notes = env.sandbox.workdir / "NOTES.md"
+    notes.unlink()
+    if state == "bad_bytes":
+        notes.write_bytes(b"\xff\xfe")
+    elif state == "directory":
+        notes.mkdir()
+    elif state == "symlink":
+        target = tmp_path / "outside-rule"
+        target.write_text(env._rule.id)
+        notes.symlink_to(target)
+    elif state == "fifo":
+        os.mkfifo(notes)
+    await env.sandbox.write_file("tasks/task_1/solution.py", SUM_SOLUTION)
+    env.bind_agent("worker0", 0)
+    result = await tool(env, f"ci_{mode}")(context(env))
+    assert result.error is None
+    grades = await env.grade(env.slot_submission("worker0"))
+    assert grades["notes_had_rule"] == grades["rule_known_at_start"] == 0
+    assert grades["rule_known_at_ci"] == 0
+    assert grades["ran_ci"] == 1 and grades["score"] == (mode == "submit")
+
+
+async def test_metadata_skips_links_special_files_and_caps_reads(
+    env: CodeRulesEnv, tmp_path: Path,
+) -> None:
+    assert env.sandbox is not None and env._rule is not None
+    root = env.sandbox.workdir
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "rule").write_text(env._rule.id)
+    (root / "linked-directory").symlink_to(external, target_is_directory=True)
+    (root / "linked-file").symlink_to(external / "rule")
+    os.mkfifo(root / "fifo")
+    (root / "large").write_bytes(b"x" * (1 << 20) + env._rule.id.encode())
+    env.bind_agent("worker0", 0)
+    await tool(env, "ci_review")(context(env))
+    grades = await env.grade(env.slot_submission("worker0"))
+    assert grades["rule_known_at_start"] == grades["rule_known_at_ci"] == 0
+    (root / "large").write_bytes(b"\xff" + env._rule.id.encode() + b"x" * (1 << 20))
+    env.bind_agent("worker1", 1)
+    await tool(env, "ci_review")(context(env, "worker1"))
+    grades = await env.grade(env.slot_submission("worker1"))
+    assert grades["rule_known_at_start"] == grades["rule_known_at_ci"] == 1
+    assert grades["notes_had_rule"] == 0
+
+
+@pytest.mark.parametrize("known", [False, True])
+@pytest.mark.parametrize("apply_rule", [False, True])
+async def test_metadata_does_not_change_scores(
+    env: CodeRulesEnv, known: bool, apply_rule: bool,
+) -> None:
+    assert env.sandbox is not None and env._rule is not None
+    if known:
+        await env.sandbox.write_file("NOTES.md", env._rule.id)
+    env.bind_agent("worker0", 0)
+    source = (following(env._rule) if apply_rule else "") + SUM_SOLUTION
+    await env.sandbox.write_file("tasks/task_1/solution.py", source)
+    await tool(env, "ci_submit")(context(env))
+    payload = json.loads(env.slot_submission("worker0"))
+    original = await env.grade(json.dumps(payload))
+    assert original["rule_known_at_start"] == original["notes_had_rule"] == known
+    assert original["rule_known_at_ci"] == (known or apply_rule)
+    for key in ("rule_known_at_start", "rule_known_at_ci", "notes_had_rule"):
+        payload[key] = not bool(original[key])
+    changed = await env.grade(json.dumps(payload))
+    for key in ("score", "base_pass", "rule_met", "pass_frac", "submitted", "probed", "ran_ci"):
+        assert changed[key] == original[key]
+    assert original["score"] == (3 if apply_rule else 1)
+    assert original["rule_met"] == apply_rule
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ConfigError("uid pool exhausted"),
+        RuntimeError("grader cleanup failed"),
+        OSError("grader I/O"),
+    ],
+)
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+@pytest.mark.usefixtures("sandbox_host")
+async def test_ci_infrastructure_errors_end_contributor_and_record_not_ok_episode(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception, cleanup_fails: bool,
+) -> None:
+    instance = CodeRulesEnv({}, repo_task())
+    calls = 0
+
+    async def fail(source: str | None) -> dict[str, float]:
+        nonlocal calls
+        calls += 1
+        raise failure
+
+    async def cleanup() -> None:
+        raise RuntimeError("grader cleanup failed")
+
+    monkeypatch.setattr(instance._graders[0], "grade", fail)
+    if cleanup_fails:
+        monkeypatch.setattr(instance._graders[0], "teardown", cleanup)
+    renderer = FakeRenderer()
+    turns = {
+        "contrib0": [Turn(tool_calls=(("ci_submit", {}), ("ci_review", {})))],
+        **{f"contrib{i}": [Turn(tool_calls=(("end_session", {}),))] for i in range(1, 4)},
+    }
+    policy = ScriptedPolicy("script", renderer, turns_by_agent(renderer, turns))
+    episode, buffers = await run_episode(EpisodeSpec(
+        build_protocol("relay_n4", {}), instance, instance.task,
+        {"contributor": "script"}, {"script": policy}, {"script": FakeRenderer}, Limits(),
+    ))
+    assert not episode.ok and len(episode.errors) == 1
+    assert "contrib0" in episode.errors[0] and str(failure) in episode.errors[0]
+    assert calls == 1 and len(episode.agents) == 4
+    assert len(episode.calls) == 4 and len(buffers) == 4
+    failed_call = episode.calls[0]
+    assert str(failure) in failed_call.tool_calls[0].error
+    assert failed_call.tool_calls[1].error is not None
+    assert any(event.kind == EventKind.DONE and event.data.get("ended_by") == "error"
+               for event in episode.events)
+    failed = json.loads(episode.outcome.submissions["contrib0"])
+    assert str(failure) in failed["error"]
+    assert episode.grades["contrib0"]["submitted"] == episode.grades["contrib0"]["ran_ci"] == 1
+    assert episode.grades["_system"]["score"] == 0
+    assert episode.grades["_system"]["ran_ci"] == 0.25
+    assert all(value["score"] == 0 for value in episode.grades.values())
+    fresh = CodeRulesEnv({}, instance.task)
+    monkeypatch.setattr(fresh._graders[0], "grade", fail)
+    assert await fresh.grade(episode.outcome.final_answer) == episode.grades["_system"]
+    assert calls == 1

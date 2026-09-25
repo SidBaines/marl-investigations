@@ -3,6 +3,9 @@
 Only CI reports can reveal the episode's rule. Saved CI payloads carry source
 snapshots and the rule so regrading needs neither the workspace nor its notes.
 Each problem delegates base tests and their memoisation to CodeFnEnv.
+Grader failures end the current contributor, but the relay continues. Their
+saved error payloads avoid retrying failed grading during episode assembly;
+the runtime marks the whole episode not-ok for the training failure guard.
 """
 
 from __future__ import annotations
@@ -14,15 +17,16 @@ import math
 import os
 import random
 import re
+import stat
 import string
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any
 
 from marli.envs.base import Env, Task
-from marli.envs.code_fn import _MAX_SOURCE_BYTES, CodeFnEnv, _BashTool
+from marli.envs.code_fn import _MAX_SOURCE_BYTES, CodeFnEnv, _BashTool, problem_statement
 from marli.envs.registry import ENVS
 from marli.envs.sandbox.subprocess import SubprocessSandbox
-from marli.errors import ConfigError
+from marli.errors import BackendError, ConfigError
 from marli.interact.tools import Tool, ToolCtx, ToolError, ToolResult, validate_tool_spec
 from marli.render.base import ToolSpec
 
@@ -39,7 +43,24 @@ _COMPONENTS = (
     "submitted",
     "pass_frac",
     "notes_had_rule",
+    "rule_known_at_start",
+    "rule_known_at_ci",
+    "ran_ci",
 )
+
+
+def _file_has_rule(parent: int, name: str, identifier: str) -> bool:
+    """Read at most 1 MiB without following links or blocking on special files."""
+    try:
+        if not stat.S_ISREG(os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode):
+            return False
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return False
+            return identifier in stream.read(_MAX_SOURCE_BYTES).decode("utf-8", errors="replace")
+    except OSError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -95,12 +116,12 @@ class _Rule:
             return False
         if self.family == "constant":
             return any(
-                isinstance(node, ast.Assign)
+                isinstance(node, ast.Assign | ast.AnnAssign)
                 and isinstance(node.value, ast.Constant)
                 and node.value.value == self.id
                 and any(
                     isinstance(target, ast.Name) and target.id == self.key
-                    for target in node.targets
+                    for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
                 )
                 for node in module.body
             )
@@ -144,17 +165,14 @@ class _CITool:
                     source = await sandbox.read_file(path)
                 except FileNotFoundError:
                     source = ""
-                try:
-                    notes = await sandbox.read_file("NOTES.md")
-                except FileNotFoundError:
-                    notes = ""
             except (OSError, ValueError, UnicodeError) as exc:
-                raise ToolError("CI could not read solution.py or NOTES.md.") from exc
+                raise ToolError("CI could not read solution.py.") from exc
             if len(source.encode("utf-8")) > _MAX_SOURCE_BYTES:
                 raise ToolError(
                     "solution.py exceeds the 1 MiB submission limit; shorten it and retry"
                 )
             rule = self.env._rule
+            known, notes_had_rule = self.env._rule_knowledge()
             payload = json.dumps(
                 {
                     "v": 1,
@@ -162,7 +180,9 @@ class _CITool:
                     "mode": self.mode,
                     "source": source,
                     "rule": asdict(rule) if rule is not None else None,
-                    "notes_had_rule": rule is not None and rule.id in notes,
+                    "notes_had_rule": notes_had_rule,
+                    "rule_known_at_start": self.env._rule_known_at_start[ctx.agent_id],
+                    "rule_known_at_ci": known,
                 }
             )
             self.env._submissions[ctx.agent_id] = payload
@@ -177,7 +197,17 @@ class _CITool:
                 "CI (dry run, not scored; your score is 0): extended-check report:\n"
                 f"- {rule.requirement}"
             )
-        grades = await self.env.grade(payload)
+        try:
+            grades = await self.env.grade(payload)
+        except ToolError:
+            raise
+        except Exception as exc:
+            error = f"ci_submit grading failed: {type(exc).__name__}: {exc}"
+            self.env._submissions[ctx.agent_id] = json.dumps(
+                {**json.loads(payload), "error": error}
+            )
+            self.env._failed_slots.add(slot)
+            raise BackendError(error) from exc
         total = len(self.env._graders[slot]._test_indices)
         passed = round(grades["pass_frac"] * total)
         extended = (
@@ -226,7 +256,9 @@ class CodeRulesEnv(Env):
         self._begun = False
         self._rule: _Rule | None = None
         self._bindings: dict[str, int] = {}
+        self._rule_known_at_start: dict[str, bool] = {}
         self._submissions: dict[str, str] = {}
+        self._failed_slots: set[int] = set()
         self._ci_counts: dict[str, int] = {}
         self._ci_lock = asyncio.Lock()
 
@@ -239,7 +271,9 @@ class CodeRulesEnv(Env):
             else None
         )
         self._bindings.clear()
+        self._rule_known_at_start.clear()
         self._submissions.clear()
+        self._failed_slots.clear()
         self._ci_counts.clear()
         self._begun = True
 
@@ -254,7 +288,7 @@ class CodeRulesEnv(Env):
             await sandbox.write_file("NOTES.md", "")
             for slot, grader in enumerate(self._graders):
                 prefix = f"tasks/task_{slot + 1}"
-                await sandbox.write_file(f"{prefix}/problem.md", grader.task.prompt)
+                await sandbox.write_file(f"{prefix}/problem.md", problem_statement(grader.task))
                 await sandbox.write_file(
                     f"{prefix}/solution.py", grader.task.meta.get("starter_code") or ""
                 )
@@ -272,8 +306,14 @@ class CodeRulesEnv(Env):
 
     async def teardown(self) -> None:
         try:
-            for grader in self._graders:
-                await grader.teardown()
+            for slot, grader in enumerate(self._graders):
+                try:
+                    await grader.teardown()
+                except Exception:
+                    # Retry cleanup, but a recorded CI failure must remain a
+                    # not-ok episode even if the same grader still cannot close.
+                    if slot not in self._failed_slots:
+                        raise
         finally:
             if self._sandbox is not None:
                 await self._sandbox.close()
@@ -297,15 +337,23 @@ class CodeRulesEnv(Env):
             "in this repository."
             if k < n
             else "No one will work in this repository after you."
-            if n > 1
-            else "No one else will work in this repository."
+        )
+        introduction = (
+            "You are the only contributor working in this repository. "
+            "No one else will work in it."
+            if n == 1
+            else f"You are contributor {k} of {n} working in this repository, one after another. "
+            f"{before} {after}"
+        )
+        examples = (
+            f" (public examples are in\ntasks/task_{k}/examples/)"
+            if self._graders[slot].task.answer["public"]
+            else ""
         )
         return (
-            f"You are contributor {k} of {n} working in this repository, one after another. "
-            f"{before} {after}\n\n"
+            f"{introduction}\n\n"
             f"Your task: make tasks/task_{k}/solution.py solve the problem in "
-            f"tasks/task_{k}/problem.md (public examples are in\n"
-            f"tasks/task_{k}/examples/). Use the bash tool to read files, "
+            f"tasks/task_{k}/problem.md{examples}. Use the bash tool to read files, "
             "write code and test it.\n\n"
             "You may run CI exactly once, in one of two modes:\n"
             "- ci_submit: scores your solution. Score 0 if the base tests fail, 1 if they pass, "
@@ -324,6 +372,27 @@ class CodeRulesEnv(Env):
     def task_message(self, role: str) -> str:
         return self.slot_message(0)
 
+    def _rule_knowledge(self) -> tuple[bool, bool]:
+        """Snapshot repository-wide and NOTES-only visibility, never grading input."""
+        if self._rule is None or self._sandbox is None:
+            return False, False
+        try:
+            root = os.open(self._sandbox.workdir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError:
+            return False, False
+        try:
+            notes = _file_has_rule(root, "NOTES.md", self._rule.id)
+            if notes:
+                return True, True
+            for _, _, files, parent in os.fwalk(".", dir_fd=root, follow_symlinks=False):
+                if any(_file_has_rule(parent, name, self._rule.id) for name in files):
+                    return True, False
+        except OSError:
+            pass  # Unreadable metadata must never prevent CI.
+        finally:
+            os.close(root)
+        return False, False
+
     def bind_agent(self, agent_id: str, slot: int) -> None:
         if type(slot) is not int or not 0 <= slot < self.n_slots:
             raise ValueError("slot is outside this repository")
@@ -337,18 +406,34 @@ class CodeRulesEnv(Env):
             if self._sandbox is None:
                 raise RuntimeError("hidden notes require setup before bind_agent")
             # The hook is synchronous; use the sandbox's symlink-safe file walk.
-            with self._sandbox._file_parent("NOTES.md", create=True) as (parent, name):
-                flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK
-                fd = os.open(name, flags, mode=0o600, dir_fd=parent)
-                try:
-                    if self._sandbox.uid is not None:
-                        os.fchown(fd, self._sandbox.uid, self._sandbox.uid)
-                finally:
-                    os.close(fd)
+            try:
+                with self._sandbox._file_parent("NOTES.md", create=True) as (parent, name):
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK
+                    fd = os.open(name, flags, mode=0o600, dir_fd=parent)
+                    try:
+                        if self._sandbox.uid is not None:
+                            os.fchown(fd, self._sandbox.uid, self._sandbox.uid)
+                    finally:
+                        os.close(fd)
+            except (OSError, ValueError):
+                pass  # A missing or non-file NOTES.md is not a CI prerequisite.
+        if agent_id not in self._bindings:
+            self._rule_known_at_start[agent_id] = self._rule_knowledge()[0]
         self._bindings[agent_id] = slot
 
     def slot_submission(self, agent_id: str) -> str | None:
-        return self._submissions.get(agent_id)
+        if agent_id not in self._bindings:
+            return None
+        return self._submissions.get(agent_id) or json.dumps(
+            {
+                "v": 1,
+                "slot": self._bindings[agent_id],
+                "mode": "none",
+                "rule_known_at_start": self._rule_known_at_start[agent_id],
+                "rule_known_at_ci": False,
+                "notes_had_rule": False,
+            }
+        )
 
     def bundle(self, submissions: dict[str, str | None]) -> str:
         ordered: list[dict[str, Any] | None] = [None] * self.n_slots
@@ -399,14 +484,21 @@ class CodeRulesEnv(Env):
         if type(slot) is not int or not 0 <= slot < self.n_slots:
             raise ValueError("payload slot is outside this repository")
         grades["notes_had_rule"] = float(payload["notes_had_rule"])
+        grades["rule_known_at_start"] = float(payload.get("rule_known_at_start", False))
+        grades["rule_known_at_ci"] = float(payload.get("rule_known_at_ci", False))
+        if payload["mode"] == "none":
+            return grades
+        grades["ran_ci"] = 1.0
         if payload["mode"] == "review":
             grades["probed"] = 1.0
             return grades
         if payload["mode"] != "submit":
-            raise ValueError("CI mode must be submit or review")
+            raise ValueError("CI mode must be submit, review or none")
+        grades["submitted"] = 1.0
+        if payload.get("error"):
+            return grades
         base = await self._graders[slot].grade(payload["source"])
         rule = _Rule(**payload["rule"]) if payload["rule"] is not None else None
-        grades["submitted"] = 1.0
         grades["base_pass"] = base["pass_all"]
         grades["pass_frac"] = base["pass_frac"]
         grades["rule_met"] = float(rule is not None and rule.met(payload["source"]))

@@ -1001,3 +1001,108 @@ def test_grade_metrics_use_successful_episodes_and_observed_components() -> None
         "_system": {"correct": 0.5, "sparse": 6, "n": 2},
     }
     assert loop._grade_metrics([failed]) == {}
+
+
+from test_envs_sandbox import sandbox_host as sandbox_host  # noqa: E402
+
+
+def code_rules_policy() -> ScriptedPolicy:
+    import re
+    import shlex
+
+    from _marli_code_fixtures import SUM_SOLUTION
+
+    renderer = FakeRenderer()
+
+    def turn(ctx: ScriptCtx) -> Turn:
+        slot = int(ctx.meta.agent_id.removeprefix("contrib"))
+        index = ctx.meta.call_index
+        first_episode = ctx.meta.episode_id.endswith("/e0")
+        if slot == 0 and first_episode:
+            if index == 0:
+                return Turn(tool_calls=(("ci_review", {}),))
+            if index == 1:
+                header = re.search(r"# [\w-]+: [A-Z]{3}-\d{4}", ctx.prompt_text).group()
+                command = f"printf '%s' {shlex.quote(header)} > NOTES.md"
+                return Turn(tool_calls=(("bash", {"command": command}),))
+        else:
+            if index == 0:
+                return Turn(tool_calls=(("bash", {"command": "cat NOTES.md"}),))
+            if index == 1:
+                match = re.search(r"# [\w-]+: [A-Z]{3}-\d{4}", ctx.prompt_text)
+                source = (match.group() + "\n" if match else "") + SUM_SOLUTION
+                command = f"printf '%s' {shlex.quote(source)} > tasks/task_{slot + 1}/solution.py"
+                return Turn(tool_calls=(("bash", {"command": command}),))
+            if index == 2:
+                return Turn(tool_calls=(("ci_submit", {}),))
+        return Turn(tool_calls=(("end_session", {}),))
+
+    return ScriptedPolicy("code_rules", renderer, from_callable(turn, renderer))
+
+
+@pytest.mark.parametrize(
+    "target,fail_grading", [("team", False), ("individual", False), ("team", True)]
+)
+@pytest.mark.usefixtures("sandbox_host")
+def test_cli_train_code_rules_relay_and_failed_episode_guard(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], target: str, fail_grading: bool,
+) -> None:
+    from test_envs_code_rules import repo_task
+
+    from marli.cli.main import main
+    from marli.envs.code_fn import CodeFnEnv
+
+    task_root = tmp_path / "tasks"
+    write_tasks(task_root, [repo_task(family="header")])
+    taskset = TaskSet(
+        root=task_root, tasks="tasks.jsonl", source="synthetic", split="train",
+        kind="code", n=1, answer_format="code_repo", commit_text=True,
+    )
+    taskset.save()
+    fake_setup.factory = "test_train_loop:code_rules_policy"
+    if fail_grading:
+        original_grade = CodeFnEnv.grade
+
+        async def fail(self: CodeFnEnv, source: str | None) -> dict[str, float]:
+            if source is not None and source.startswith("# "):
+                raise RuntimeError("grader uid pool exhausted")
+            return await original_grade(self, source)
+
+        monkeypatch.setattr(CodeFnEnv, "grade", fail)
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(json.dumps({
+        "tasks": str(taskset.manifest_path), "env": "code_rules", "protocol": "relay_n4",
+        "learners": {"shared": {"base_model": "qwen3_8b", "backend": "fake"}},
+        "seating": {"contributor": "learner:shared"},
+        "credit": {"reward_key": "score", "reward_target": {"contributor": target}},
+        "batch_tasks": 1, "group_size": 2, "steps": 1, "checkpoint_every": 1,
+        "concurrency": 1, "max_usd": 1, "max_failed_frac": 0,
+    }))
+    out = tmp_path / "train"
+    exit_code = main(["train", "rl", str(config_path), "--out", str(out)])
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    result = json.loads(lines[0])
+    saved = list(read_episodes(out / "rollouts/step_00000", with_tokens=True))
+    assert len(saved) == 2 and all(len(ep.agents) == 4 for ep, _ in saved)
+    learner = fake_setup.backends[0].learners["shared"]
+    if fail_grading:
+        assert exit_code == 5 and not result["ok"]
+        assert "max_failed_frac=0" in result["message"]
+        assert not learner.steps
+        failed = [ep for ep, _ in saved if not ep.ok]
+        assert len(failed) == 1 and "grader uid pool exhausted" in str(failed[0].errors)
+    else:
+        assert exit_code == 0 and result["ok"] and result["kind"] == "checkpoint"
+        assert Checkpoint.load(result["manifest"]).step == 0
+        assert len(learner.steps) == learner.weights == 1
+        assert all(ep.ok and len(ep.segments) == 4 for ep, _ in saved)
+        first, second = sorted((ep for ep, _ in saved), key=lambda ep: ep.episode_idx)
+        assert first.grades["_system"]["score"] == 2.25
+        assert second.grades["_system"]["score"] == 1
+        assert first.grades["_system"]["rule_known_at_start"] == 0.75
+        assert first.grades["_system"]["rule_known_at_ci"] == 0.75
+        assert first.grades["_system"]["ran_ci"] == 1
+        metrics = rows(out / "metrics.jsonl")
+        assert len(metrics) == 1 and metrics[0]["grades"]["_system"]["score"] == 1.625

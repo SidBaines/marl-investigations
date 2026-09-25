@@ -589,7 +589,7 @@ class AgentRuntime:
                 allocation,
                 forced=False,
             )
-            if parsed is None or self._apply_control(control):
+            if self.error is not None or parsed is None or self._apply_control(control):
                 return
             if parsed.tool_calls:
                 self._n_nudges = 0
@@ -626,14 +626,15 @@ class AgentRuntime:
                 # tools; it only gets the nudge message, not a strike.
                 if parsed.termination != Termination.LENGTH:
                     self._n_nudges += 1
-                self._nudges = [
-                    Msg(
-                        "user",
-                        "Please use a tool or call return_report with your findings."
-                        if "return_report" in self.tools
-                        else "Please use a tool to act or submit your final answer.",
-                    )
-                ]
+                if "return_report" in self.tools:
+                    nudge = "Please use a tool or call return_report with your findings."
+                elif "submit" in self.tools:
+                    nudge = "Please use a tool to act or submit your final answer."
+                elif "end_session" in self.tools:
+                    nudge = "Please use a tool to act, or call end_session when you are done."
+                else:
+                    nudge = "Please use a tool to act."
+                self._nudges = [Msg("user", nudge)]
 
     def _apply_control(self, control: dict[str, Any]) -> bool:
         if "submit" in control:
@@ -923,8 +924,13 @@ class AgentRuntime:
                             self.scheduler.tool_phase(self.info.agent_id)
                         )
                         shared = True
-                    result = await run_tool(tool, ctx, cast(dict[str, Any], call.arguments))
-                    stopped = tool.control and result.error is None
+                    try:
+                        result = await run_tool(tool, ctx, cast(dict[str, Any], call.arguments))
+                    except BackendError as exc:
+                        self.error = f"{self.info.agent_id}: {type(exc).__name__}: {exc}"
+                        self.ended_by = "error"
+                        result = ToolResult(f"error: {self.error}", self.error)
+                    stopped = self.error is not None or (tool.control and result.error is None)
                 writes = [
                     write
                     for write in self.workspace.log()[before:]
