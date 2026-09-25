@@ -1,0 +1,10 @@
+# The training layout with MTP: vLLM on GPU 0 (port 8000), the learner on GPU 1.
+model: qwen3_8_27b
+python: /opt/vllm/bin/python
+cuda_visible_devices: "0"
+gpu_memory_utilization: 0.9
+max_model_len: 32768
+max_lora_rank: 32
+max_loras: 4
+learner_ranks: [32]
+extra_args: ["--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}']
