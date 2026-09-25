@@ -29,7 +29,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import warnings
 from collections.abc import Iterator, Sequence
@@ -403,12 +402,19 @@ class SubprocessSandbox:
             return f"sandbox disk monitoring failed: {exc}"
         return None
 
-    def _watch_resources(self, stopped: threading.Event) -> str | None:
+    async def _watch_resources(self, stopped: asyncio.Event) -> str | None:
+        """Poll resource use in short off-loop checks, never parking a worker thread.
+
+        A watchdog thread held for a command's whole lifetime starved the shared
+        default executor (32 threads) at ~32 concurrent commands: each command's
+        cleanup awaited ``to_thread`` while every thread waited for that cleanup.
+        """
         while not stopped.is_set():
-            error = self._resource_error()
+            error = await asyncio.to_thread(self._resource_error)
             if error:
                 return error
-            stopped.wait(0.25)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stopped.wait(), 0.25)
         return None
 
     async def _collect(
@@ -519,8 +525,8 @@ class SubprocessSandbox:
                 self._collect(process, input_bytes, stdout, stderr, overflow)
             )
             excess_output = asyncio.create_task(overflow.wait())
-            stopped = threading.Event()
-            watchdog = asyncio.create_task(asyncio.to_thread(self._watch_resources, stopped))
+            stopped = asyncio.Event()
+            watchdog = asyncio.create_task(self._watch_resources(stopped))
             timed_out = False
             try:
                 if cancelled:
