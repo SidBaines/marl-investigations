@@ -53,6 +53,7 @@ from marli.interact.agent import SamplingOverrides
 from marli.interact.context import make_context_manager
 from marli.interact.limits import Ledger, Limits
 from marli.interact.records import Recorder, compute_metrics
+from marli.interact.replay import SEQUENTIAL_PROTOCOLS, ReplayPlan
 from marli.interact.scheduler import AsyncScheduler, Clock, LockstepScheduler, SystemClock
 from marli.interact.system import EpisodeSystem, Protocol
 from marli.interact.tools import TOOLS
@@ -83,6 +84,8 @@ class EpisodeSpec:
     clock: Clock | None = None
     # Role -> seat sampling controls (the contract's SamplingOverrides).
     sampling: dict[str, SamplingOverrides] = field(default_factory=dict)
+    # eval continue: replay a saved episode's prefix exactly, then sample live (replay.py).
+    replay: ReplayPlan | None = None
 
 
 def _validate(spec: EpisodeSpec) -> None:
@@ -99,6 +102,13 @@ def _validate(spec: EpisodeSpec) -> None:
     roles = spec.protocol.roles()
     if len({role.role for role in roles}) != len(roles):
         raise ConfigError("protocol.roles must have unique role names")
+    if spec.replay is not None and (
+        spec.protocol.name not in SEQUENTIAL_PROTOCOLS or spec.schedule != "lockstep"
+    ):
+        raise ConfigError(
+            "episode continuation supports lockstep "
+            f"{sorted(SEQUENTIAL_PROTOCOLS)} protocols, not {spec.protocol.name!r}"
+        )
     for role in roles:
         try:
             role.system_prompt.format(
@@ -222,6 +232,8 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
         errors.extend(
             runtime.error for runtime in io.runtimes.values() if runtime.error is not None
         )
+        if spec.replay is not None:
+            errors.extend(spec.replay.finish())
         submissions = {agent_id: runtime.submission for agent_id, runtime in io.runtimes.items()}
         submissions.update(outcome.submissions)
         grades = {

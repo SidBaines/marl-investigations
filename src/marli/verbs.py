@@ -132,6 +132,13 @@ VERBS: dict[str, VerbSpec] = {
         "episodes.json",
         "Sample resumable episodes with bounded concurrency and a spend guard.",
     ),
+    "eval continue": VerbSpec(
+        "eval continue",
+        "marli.eval.continuation:continue_episodes",
+        "marli.eval.continuation:ContinueConfig",
+        "episodes.json",
+        "Extend agents that ran out of budget in saved episodes under larger limits.",
+    ),
     "eval score": VerbSpec(
         "eval score",
         "marli.eval.score:score",

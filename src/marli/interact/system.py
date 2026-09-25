@@ -273,6 +273,7 @@ class EpisodeSystem(SystemIO):
             task_id=self.task.task_id,
             episode_idx=self.spec.episode_idx,
             sampling=self.spec.sampling.get(role, SamplingOverrides()),
+            replay=getattr(self.spec, "replay", None),
         )
         self.ledger.register(agent_id, kind=role_spec.limits_key, parent=parent)
         self.scheduler.register(agent_id, seat_key)
