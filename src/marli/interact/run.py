@@ -60,6 +60,7 @@ from marli.interact.types import Episode, EventKind, Outcome
 from marli.interact.workspace import DeliverySpec, Permissions, Workspace
 from marli.policy.base import Policy, SamplingSpec, TokenPolicy, check_trainable_sampling
 from marli.render.base import DeltaRenderer
+from marli.seeds import derive_seed
 
 
 @dataclass
@@ -189,6 +190,10 @@ async def run_episode(spec: EpisodeSpec) -> tuple[Episode, dict[str, list[int]]]
         return outcome
 
     try:
+        # Hidden per-episode env state (e.g. a house rule) never repeats across draws.
+        spec.env.begin_episode(
+            derive_seed(spec.run_seed, "env", spec.task.task_id, spec.episode_idx)
+        )
         await spec.env.setup()
         deadline = clock.now() + spec.limits.episode.max_wall_s
 

@@ -75,5 +75,40 @@ class Env(ABC):
     def sandbox(self) -> Any | None:  # envs.sandbox.base.Sandbox or None
         return None
 
+    def begin_episode(self, seed: int) -> None:
+        """Called by the runtime with the episode's seed before ``setup()``.
+
+        Envs that sample hidden per-episode state (e.g. code_rules' house rule)
+        derive it from this seed so repeated tasks never repeat hidden state.
+        Default: no-op.
+        """
+        return None
+
+    # --- Optional per-agent slots -------------------------------------------------
+    # A *slotted* env gives each agent its own sub-task (e.g. one problem per
+    # contributor in a shared repo; interact/protocols/relay.py). Envs with
+    # ``n_slots == 0`` present the same task to every agent and are graded from
+    # the built-in ``submit``. A slotted env's graded submissions come from the
+    # env itself (``slot_submission``), because its terminal actions (e.g. a CI
+    # run) need not end the agent's turn.
+    n_slots: int = 0
+
+    def slot_message(self, slot: int) -> str:
+        """The task as presented to the agent that owns ``slot`` (0-based)."""
+        raise NotImplementedError(f"{type(self).__name__} is not a slotted env")
+
+    def bind_agent(self, agent_id: str, slot: int) -> None:
+        """Called by the protocol before starting the agent that owns ``slot``."""
+        raise NotImplementedError(f"{type(self).__name__} is not a slotted env")
+
+    def slot_submission(self, agent_id: str) -> str | None:
+        """That agent's graded submission (e.g. its CI payload), or None."""
+        raise NotImplementedError(f"{type(self).__name__} is not a slotted env")
+
+    def bundle(self, submissions: dict[str, str | None]) -> str | None:
+        """The system submission graded as ``_system`` (e.g. all agents' payloads,
+        graded as the team mean). Keys are agent ids in slot order."""
+        raise NotImplementedError(f"{type(self).__name__} is not a slotted env")
+
 
 from marli.envs.registry import ENVS as ENVS  # noqa: E402
