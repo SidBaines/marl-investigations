@@ -1,6 +1,6 @@
 # Speed and memory benchmark (before the sacrifice-relay runs)
 
-Status: done (2026-09-25); option-2 integration test pending. Pod `nu638jwugw3f2i` (`marli-bench`), 2×H200 SXM,
+Status: done (2026-09-25), including the option-2 integration test. Pod `nu638jwugw3f2i` (`marli-bench`), 2×H200 SXM,
 SECURE, CUDA 13.0 host, $9.18/hr.
 
 ## Question
@@ -104,6 +104,26 @@ MTP + sleep mode at 0.45 utilization):
 - With vLLM asleep, a 23,571-token train step took 14–15 s (1,578–1,724
   tok/s), peaking at 78.7 GiB.
 - Projected relay step with option 2: ≈13–14 min, down from ≈25 min.
+
+**Option 2 integration test** (`train_opt2`). Same 4 repos × G = 4 as above.
+vLLM runs TP2 + MTP + sleep mode on both GPUs. The learner is data-parallel,
+one resident replica per GPU, with longest-first microbatches.
+
+| | Step 0 | Step 1 (through the adapter) | Original layout (for comparison) |
+|---|---|---|---|
+| Sampling | 588 s (117 tok/s per agent) | 586 s (88 tok/s per agent) | 651 s / 818 s |
+| Training | 305 s for 904k tokens (≈3,000 tok/s) | 244 s for 838k tokens | 838 s for 847k tokens |
+| vLLM sleep / wake | 19.9 s / 1.2 s | 0.9 s / 1.1 s | — |
+| `kl_sample_train`, mean IS ratio | 7e-4, 0.99995 | 6e-4, 1.00006 | 6e-4, 1.00003 |
+| Adapter hot-load check (effect drift) | 0.022 nats | 0.022 nats | 0.014 nats |
+| **Whole step** | **≈15 min** | **≈14 min** | ≈25–27 min |
+
+- The run took 30.6 min end to end, including 2 learner replicas starting up.
+- Adapter weights updated as expected: max |B| was 2e-5 after step 0 and 4e-5
+  after step 1. The step-0 adapter matches the single-GPU run's.
+- Sampling improves less than decode speed: the phase ends with the slowest
+  relay (four contributors near the budget, about 48k tokens in sequence),
+  and tool and test time does not shrink.
 
 **Behaviour** (untrained model, 16 relays = 64 contributors, unfiltered
 problems):
