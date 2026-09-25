@@ -1,0 +1,6 @@
+# Control: one contributor per repo (probing never pays). 16 repos x G=4 = 64 decisions/step.
+run_name: sacrifice-solo
+protocol: relay_n1
+batch_tasks: 16
+group_size: 4
+credit: {reward_target: {contributor: individual}}

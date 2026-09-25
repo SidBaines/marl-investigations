@@ -1,0 +1,6 @@
+# N=4 contributors in turn; every contributor gets the repo's mean score (team).
+run_name: sacrifice-relay-team
+protocol: relay_n4
+batch_tasks: 4
+group_size: 4
+credit: {reward_target: {contributor: team}}
