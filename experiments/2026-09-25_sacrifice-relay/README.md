@@ -151,6 +151,14 @@ tokens per episode; 6,144 per turn):
 
 - The pool is 207 problems (51 relay repos), not the ~320 extrapolated from the
   first 100 problems.
+- **Overnight trial** (`configs/trial_team.yaml`, run `out/trial_team`): only the
+  team-reward relay, for about 30 of 80 steps, on the two-GPU layout (option 2).
+  - Learning rate is a flat **4e-5**: twice the pre-registered 2e-5, because
+    only ~30 steps fit in one night.
+  - A checkpoint is written after every step, and the run resumes with the same
+    `--out`.
+  - The token limits are unchanged (12,288 per contributor, 6,144 per turn),
+    matching the filter.
 
 ## Spend
 

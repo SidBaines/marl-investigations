@@ -1,0 +1,11 @@
+# Overnight signs-of-life trial (2026-09-25/26): the team-reward relay only, flat lr 4e-5 (2x the
+# pre-registered 2e-5 because only ~30 of the planned 80 steps fit in one night), a checkpoint after
+# every step. Stopped after ~30 steps at a checkpoint; resumable to 80 with the same --out.
+run_name: sacrifice-relay-team-trial
+protocol: relay_n4
+batch_tasks: 4
+group_size: 4
+credit: {reward_target: {contributor: team}}
+learners:
+  policy: {base_model: qwen3_8_27b, backend: local, rank: 32, learning_rate: 4.0e-5}
+checkpoint_every: 1
