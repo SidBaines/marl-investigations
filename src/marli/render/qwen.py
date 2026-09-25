@@ -1,9 +1,9 @@
 """Parse Qwen's native tool formats without coercing schema-declared strings.
 
-Qwen3.5 prefills the thinking opener, whereas Qwen3 can sample it. The parser
+Qwen3.5/3.8 prefill the thinking opener, whereas Qwen3 can sample it. The parser
 therefore consumes only the thinking syntax that belongs to the completion.
 
-For Qwen3.5, suppressing thinking or forcing a tool call closes an already
+For Qwen3.5/3.8, suppressing thinking or forcing a tool call closes an already
 buffered ``<think>\n``. The resulting empty block is text-equal to the native
 non-thinking form, but has two separately encoded newline ids instead of the
 native merged double-newline id. Sampled/prefilled ids cannot be rewritten.
@@ -29,7 +29,11 @@ _PARAMETER = re.compile(r"\s*<parameter=([^<>\s]+)>(.*?)</parameter>", re.DOTALL
 
 
 def qwen_profile(
-    tokenizer: PreTrainedTokenizerBase, *, xml: bool, thinking: bool
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    xml: bool,
+    thinking: bool,
+    reasoning_effort: str | None = None,
 ) -> TemplateProfile:
     """Delta mode for every profile whose tool-loop parity holds.
 
@@ -44,9 +48,18 @@ def qwen_profile(
     so its parity depends on non-empty reasoning. ``qwen3_nothink`` deletes the
     already-sampled empty think prefill before tool results, which no append-only
     buffer can reproduce, so that profile re-renders every call.
+
+    All four ``qwen3_8*`` profiles also match after a new user message: their
+    template defaults to preserving earlier thinking, including empty blocks.
+    Thinking generation prompts still prefill ``<think>\n``. Reasoning effort
+    is passed to the template unchanged; its ``medium`` setting adds no system
+    instruction, while ``xhigh`` and ``low`` each add one when thinking is on.
     """
+    kwargs: dict[str, Any] = {"enable_thinking": thinking}
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
     return TemplateProfile(
-        chat_template_kwargs={"enable_thinking": thinking},
+        chat_template_kwargs=kwargs,
         stop_token_ids=tuple(
             tokenizer.convert_tokens_to_ids(token) for token in ("<|im_end|>", "<|endoftext|>")
         ),
