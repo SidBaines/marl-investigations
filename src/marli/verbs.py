@@ -160,6 +160,13 @@ VERBS: dict[str, VerbSpec] = {
         "view.json",
         "Render saved multi-agent episodes as one self-contained HTML page.",
     ),
+    "dashboard": VerbSpec(
+        "dashboard",
+        "marli.dashboard.verb:dashboard",
+        "marli.dashboard.verb:DashboardConfig",
+        "dashboard.json",
+        "Snapshot run progress (evals, training, servers, GPUs) as JSON and one HTML page.",
+    ),
 }
 BUILTINS: tuple[str, ...] = ("list", "describe", "inspect", "status")
 

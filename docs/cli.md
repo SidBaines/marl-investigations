@@ -39,6 +39,24 @@ YAML files merge left to right, followed by dotted overrides. `--out auto` uses
 `$MARLI_RUNS/<verb-with-hyphens>/<hash12>` (default root: `runs`). Matching completed
 runs are reused; incomplete runs resume. `--force` replaces existing run output.
 
+### dashboard
+
+Snapshot run progress (evals, training, servers, GPUs) as JSON and one HTML page.
+
+Manifest produced: `dashboard.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| roots | list[str] | ["experiments", "runs"] | false | true | false | directories scanned for run dirs (relative to cwd) |
+| annotations | str \| None | null | false | true | false | JSON file shown verbatim at the top (e.g. pod ids, $/hr, spend) |
+| title | str | marli runs | false | true | false | page title |
+| stale_s | float | 180.0 | false | true | false | an unowned or quiet run older than this is flagged |
+| refresh_s | float | 60.0 | false | true | false | page poll interval for snapshot.json when served over http(s) |
+| probe_servers | bool | true | false | true | false | GET each live server's /metrics (2 s timeout) |
+| gpus | bool | true | false | true | false | query nvidia-smi when present |
+| watch_s | float | 0.0 | false | true | false | > 0: keep refreshing every watch_s s until SIGINT |
+| max_refreshes | int \| None | null | false | true | false | stop watching after N refreshes |
+
 ### data build
 
 Build a taskset from a source, optionally excluding overlapping prompts.

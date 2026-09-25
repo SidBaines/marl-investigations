@@ -190,6 +190,28 @@ manifest is therefore historical, not a request to relaunch it. Confirm stop
 first, preserve needed logs, then launch into a **new output directory**. Never
 use `--force` on a live serving directory: that would erase its ownership record.
 
+## Dashboard
+
+`marli dashboard` scans run dirs and writes `snapshot.json`, `index.html` and
+`standalone.html`. It covers evals, training, data verbs, servers and GPUs. It
+only observes: it never takes a run's lock. A run counts as running while some
+process holds its flock, according to `/proc/locks`. Every setting is a runtime
+field, so the same `--out` refreshes on each call.
+
+```bash
+uv run --no-sync marli dashboard 'roots=[experiments,runs]' watch_s=60 --out runs/dashboard &
+python3 -m http.server 8765 --bind 127.0.0.1 --directory runs/dashboard
+# on your machine: ssh -L 8765:127.0.0.1:8765 <pod>, then open http://127.0.0.1:8765/standalone.html
+```
+
+Served over HTTP, the page polls `snapshot.json` every `refresh_s` (default
+60 s). `annotations=<file.json>` puts off-pod facts at the top, such as the pod
+id, the $/hr rate and spend so far. Snapshots hold numbers, agent ids and run
+metadata only: never prompts, tool output or answers. This makes `index.html`
+safe to publish as a claude.ai Artifact. Episode files are folded
+incrementally: `cache.json` in the out dir keeps each file's offset. SIGINT or
+SIGTERM stops `watch_s` and records the manifest.
+
 ## Checkpoints off-pod and teardown
 
 For now, rsync results back to the **orchestration box's `/workspace`** before
