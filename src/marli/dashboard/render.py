@@ -408,7 +408,20 @@ SCRIPT = r"""
       a.forEach(function (r) { var tr = h("tr"); cols.forEach(function (c) { var v = r[c]; tr.appendChild(h("td", { text: v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v) })); }); body.appendChild(tr); });
       return h("div", { cls: "scroll panel" }, h("table", { cls: "grid" }, h("thead", null, head), body));
     }
-    if (typeof a === "object") return facts(a);
+    if (typeof a === "object") {
+      // Scalars as facts; lists of records (e.g. pods) as their own small tables.
+      var scalars = {}, blocks = [];
+      Object.keys(a).forEach(function (k) {
+        var v = a[k];
+        if (Array.isArray(v) && v.length && typeof v[0] === "object") {
+          blocks.push(h("section", { cls: "section" }, h("h2", { text: k }), annotations(v)));
+        } else scalars[k] = v;
+      });
+      var wrap = h("div", { cls: "annotations" });
+      blocks.forEach(function (b) { wrap.appendChild(b); });
+      if (Object.keys(scalars).length) wrap.appendChild(facts(scalars));
+      return wrap;
+    }
     return h("div", { cls: "muted", text: String(a) });
   }
 
