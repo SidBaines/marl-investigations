@@ -169,11 +169,12 @@ def test_published_model_entries(
 
 def test_all_entries_load_and_tinker_subset_excludes_retired_model() -> None:
     names = list_models()
-    assert len(names) == 9
+    assert len(names) == 10
     assert names == sorted(names)
     assert [load_model(name).name for name in names] == names
+    # Not on Tinker: the retired Qwen3-4B-Instruct and Qwen3.8-27B (local only, unverified there).
     assert [model.name for model in tinker_models()] == [
-        name for name in names if name != "qwen3_4b_instruct_2507"
+        name for name in names if name not in {"qwen3_4b_instruct_2507", "qwen3_8_27b"}
     ]
 
 
