@@ -783,7 +783,10 @@ def collect(
         if manifest is not None:
             status = "complete"
         elif held is True:
-            status = "stalled" if idle is not None and idle > stale_s else "running"
+            # A live owner: a learner step writes nothing for many minutes, so only a
+            # much longer silence suggests a hung trainer.
+            limit = stale_s * (10 if kind == "train rl" else 1)
+            status = "stalled" if idle is not None and idle > limit else "running"
         elif held is False:
             status = "stopped"
         else:
