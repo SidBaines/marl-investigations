@@ -73,6 +73,22 @@ Manifest produced: `taskset.json`.
 | min_episodes | int | 2 | false | false | false |  |
 | metric | str | correct | false | false | false | system grade; max_wall_s failures count as zero |
 
+### data repos
+
+Group code problems into shared repositories with episode-sampled house rules.
+
+Manifest produced: `taskset.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| tasks | str \| None | null | false | false | true | code TaskSet (answer_format tests) |
+| n_per_repo | int | 4 | false | false | false |  |
+| max_repos | int \| None | null | false | false | false |  |
+| shuffle | bool | true | false | false | false |  |
+| seed | int | 0 | false | false | false |  |
+| rule_prob | float | 1.0 | false | false | false |  |
+| rule_families | tuple[str, ...] | ["header", "constant", "docstring"] | false | false | false |  |
+
 ### data sft
 
 Build exact-token SFT datums from rejection-filtered teacher episodes.

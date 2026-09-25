@@ -118,6 +118,13 @@ VERBS: dict[str, VerbSpec] = {
         "taskset.json",
         "Filter a taskset by pass rates from saved rollouts.",
     ),
+    "data repos": VerbSpec(
+        "data repos",
+        "marli.data.repos:repos",
+        "marli.data.repos:DataReposConfig",
+        "taskset.json",
+        "Group code problems into shared repositories with episode-sampled house rules.",
+    ),
     "eval rollout": VerbSpec(
         "eval rollout",
         "marli.eval.rollout:rollout",
