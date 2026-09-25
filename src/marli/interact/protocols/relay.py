@@ -1,8 +1,9 @@
 """Keep contributor contexts and credit separate while the env workspace persists.
 
 Roles are declared before the environment is available to the protocol, so the
-built-in submit tool is advertised for compatibility with non-slotted envs.
-Slotted envs exclusively supply graded submissions through their slot hooks.
+tool list is config-driven: slotted envs (e.g. code_rules) supply graded
+submissions through their slot hooks and need no ``submit``; non-slotted envs
+must list the built-in ``submit`` in ``tools`` (checked when the episode runs).
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ class RelayProtocol(Protocol):
         return [
             RoleSpec(
                 "contributor",
-                tuple(dict.fromkeys((*self.config.tools, "submit", *self.config.env_tools))),
+                tuple(dict.fromkeys((*self.config.tools, *self.config.env_tools))),
                 self.config.system_prompt,
                 count=self.config.n_agents,
                 graded=True,
@@ -69,6 +70,8 @@ class RelayProtocol(Protocol):
         slotted = io.env.n_slots > 0
         if slotted and io.env.n_slots != self.config.n_agents:
             raise ConfigError("env.n_slots must equal relay n_agents")
+        if not slotted and "submit" not in self.config.tools:
+            raise ConfigError("relay with a non-slotted env needs 'submit' in tools")
         submissions: dict[str, str | None] = {}
         final_answer: str | None = None
         for slot in range(self.config.n_agents):

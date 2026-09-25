@@ -141,12 +141,15 @@ def relay_spec(
     *,
     n_agents: int = 2,
     schedule: str = "lockstep",
+    tools: tuple[str, ...] = ("end_session",),
 ) -> EpisodeSpec:
     renderer = FakeRenderer()
     policy = ScriptedPolicy("relay", renderer, from_callable(turn, renderer), trainable=True)
     protocol = RelayProtocol(
         RelayConfig(
-            n_agents=n_agents, env_tools=tuple(tool.spec.name for tool in env.tools("contributor"))
+            n_agents=n_agents,
+            tools=tools,
+            env_tools=tuple(tool.spec.name for tool in env.tools("contributor")),
         )
     )
     return EpisodeSpec(
@@ -276,8 +279,8 @@ async def test_sequential_shared_workspace_fresh_context_and_exact_datums(
 
 
 @pytest.mark.parametrize("schedule", ["lockstep", "async"])
-@pytest.mark.parametrize("ending", ["budget", "end_session", "submit"])
-async def test_missing_ci_is_none_and_zero_even_with_builtin_submit(
+@pytest.mark.parametrize("ending", ["budget", "end_session"])
+async def test_missing_ci_is_none_and_zero(
     schedule: str, ending: str
 ) -> None:
     env = SlottedEnv(2)
@@ -334,7 +337,9 @@ async def test_non_slotted_submissions_end_contributors_and_last_non_none_wins(
             tool_calls=(("end_session", {}) if answer is None else ("submit", {"answer": answer}),)
         )
 
-    episode, _ = await run_episode(relay_spec(env, turn, n_agents=3, schedule=schedule))
+    episode, _ = await run_episode(
+        relay_spec(env, turn, n_agents=3, schedule=schedule, tools=("submit", "end_session"))
+    )
     assert episode.ok and len(episode.calls) == 3
     assert episode.outcome.submissions == dict(
         zip((f"contrib{k}" for k in range(3)), answers, strict=True)
@@ -365,3 +370,20 @@ def test_limits_preserve_full_agent_budget_and_require_enough_episode_tokens() -
 def test_invalid_contributor_count(n_agents: int) -> None:
     with pytest.raises(ConfigError, match="n_agents"):
         RelayConfig(n_agents=n_agents)
+
+
+def test_slotted_relay_configs_do_not_advertise_the_builtin_submit() -> None:
+    # ci_submit is the only scored action in code_rules; a second "submit" would
+    # invite contributors to end their turn with an ungraded answer.
+    from marli.interact.configs import build_protocol
+
+    for name in ("relay_n1", "relay_n4"):
+        (role,) = build_protocol(name, {}).roles()
+        assert "submit" not in role.tools and "end_session" in role.tools
+
+
+async def test_non_slotted_relay_requires_submit_in_tools() -> None:
+    env = ArithEnv()
+    spec = relay_spec(env, lambda ctx: Turn(content="x"), n_agents=2)
+    with pytest.raises(ConfigError, match="needs 'submit'"):
+        await run_episode(spec)
