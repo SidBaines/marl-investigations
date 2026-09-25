@@ -33,6 +33,11 @@ class VLLMServeConfig:
     max_loras: int = 4
     max_lora_rank: int = 32
     tensor_parallel_size: int = 1
+    enable_sleep_mode: bool = doc_field(
+        False,
+        help="vLLM sleep/wake endpoints so a co-located learner can use the GPUs between "
+        "sampling phases (also sets VLLM_SERVER_DEV_MODE=1)",
+    )
     cuda_visible_devices: str | None = None
     extra_args: list[str] = doc_field(
         default_factory=list, help="escape hatch: argv entries appended verbatim to vLLM"
@@ -49,6 +54,8 @@ class VLLMServeConfig:
         for name in ("port", "max_loras", "max_lora_rank", "tensor_parallel_size"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ConfigError(f"{name} must be a positive integer")
+        if type(self.enable_sleep_mode) is not bool:
+            raise ConfigError("enable_sleep_mode must be a boolean")
         if self.port > 65535:
             raise ConfigError("port must be <= 65535")
         if self.max_model_len is not None and (
@@ -79,10 +86,15 @@ VLLM_FLAGS = {
     "max_loras": "--max-loras",
     "max_lora_rank": "--max-lora-rank",
     "tensor_parallel_size": "--tensor-parallel-size",
+    "enable_sleep_mode": "--enable-sleep-mode",
     "seed": "--seed",
     "port": "--port",
     "host": "--host",
 }
+
+
+# Flags that take no value.
+_SWITCHES = frozenset({"enable_lora", "enable_sleep_mode"})
 
 
 def launch_args(cfg: VLLMServeConfig) -> tuple[ModelSpec, list[str], dict[str, str]]:
@@ -102,6 +114,7 @@ def launch_args(cfg: VLLMServeConfig) -> tuple[ModelSpec, list[str], dict[str, s
         "max_loras": cfg.max_loras,
         "max_lora_rank": cfg.max_lora_rank,
         "tensor_parallel_size": cfg.tensor_parallel_size,
+        "enable_sleep_mode": cfg.enable_sleep_mode,
         "seed": 0,
         "port": cfg.port,
         "host": cfg.host,
@@ -110,11 +123,16 @@ def launch_args(cfg: VLLMServeConfig) -> tuple[ModelSpec, list[str], dict[str, s
     for key, flag in VLLM_FLAGS.items():
         if not cfg.enable_lora and key in {"enable_lora", "max_loras", "max_lora_rank"}:
             continue
+        if key == "enable_sleep_mode" and not cfg.enable_sleep_mode:
+            continue
         argv.append(flag)
-        if key != "enable_lora":
+        if key not in _SWITCHES:
             argv.append(str(values[key]))
     argv.extend(cfg.extra_args)
     env = {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
+    if cfg.enable_sleep_mode:
+        # vLLM 0.30 registers /sleep, /wake_up and /is_sleeping only in dev mode.
+        env["VLLM_SERVER_DEV_MODE"] = "1"
     if cfg.cuda_visible_devices is not None:
         env["CUDA_VISIBLE_DEVICES"] = cfg.cuda_visible_devices
     return model, argv, env
@@ -136,6 +154,8 @@ class Server(Handle):
     enable_lora: bool = True
     max_loras: int = 4
     max_lora_rank: int = 32
+    tensor_parallel_size: int = 1
+    enable_sleep_mode: bool = False
 
     def summary(self) -> dict[str, Any]:
         return {"base_url": self.base_url, "models": self.models, "pid": self.pid}
@@ -179,6 +199,8 @@ async def vllm(cfg: VLLMServeConfig, run: RunDir) -> Server:
             enable_lora=cfg.enable_lora,
             max_loras=cfg.max_loras,
             max_lora_rank=cfg.max_lora_rank,
+            tensor_parallel_size=cfg.tensor_parallel_size,
+            enable_sleep_mode=cfg.enable_sleep_mode,
         )
         # Foreground consumers need the ready manifest while this verb is alive.
         # Detached ownership is released only after that record is durable.
