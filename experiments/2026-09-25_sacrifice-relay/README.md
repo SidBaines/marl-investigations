@@ -125,11 +125,32 @@ See `run.sh` (to be filled in as run).
 
 ## Results summary
 
-_Pending._
+_Training runs pending._
+
+**Data, as run 2026-09-25** (untrained Qwen3.8-27B; single agent; 12,288
+tokens per episode; 6,144 per turn):
+- The filter covered 800 DeepCoder train problems × 4 attempts: 3,200
+  episodes, 0 failed. It was paused after the first 100 problems and resumed
+  for the rest; the run's identity was unchanged.
+- **Kept 207 problems** (26%): solved in 1–3 of 4 attempts. Dropped 385 as
+  too easy (4 of 4) and 208 as too hard (0 of 4).
+- This makes **51 relay repos** of 4 problems (3 problems left over) and
+  **207 solo repos**.
+- With 80 steps, each relay repo is drawn about 6.3 times and each solo repo
+  about 6.2 times. The problems repeat; only the rule is resampled.
+- **22% of filter episodes ran out of budget** (702 of 3,200; 23% among the
+  kept problems). 95% of those had at least one turn stopped at the 6,144-token
+  per-turn limit mid-thought, and 74% had two or more.
+- A trial `eval continue` on 16 of them at a 20,480-token budget
+  (`out/bench/continue_test`) replayed every earlier call exactly and joined
+  the cut call correctly. 1 of the 16 then passed; 15 ran out again, mostly on
+  more turns at the per-turn limit. The per-turn limit (or reasoning effort),
+  not the total budget, is the main constraint.
 
 ## Deviations from the design
 
-_None yet._
+- The pool is 207 problems (51 relay repos), not the ~320 extrapolated from the
+  first 100 problems.
 
 ## Spend
 
