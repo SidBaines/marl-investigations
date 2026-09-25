@@ -1,8 +1,8 @@
 # Baseline + MTP speculative decoding (the model's own 1-layer MTP head, 2 draft tokens).
-# Rejection sampling keeps T=1 sampling exact; on GPU 1 / port 8001 so it can run beside tp1.
+# Rejection sampling keeps T=1 sampling exact; on GPU 1 / port 8010 (RunPod nginx holds 8001) so it can run beside tp1.
 model: qwen3_8_27b
 python: /opt/vllm/bin/python
-port: 8001
+port: 8010
 cuda_visible_devices: "1"
 gpu_memory_utilization: 0.9
 max_model_len: 32768

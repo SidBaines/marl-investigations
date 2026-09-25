@@ -153,9 +153,15 @@ def _sweep_stale(root: Path) -> None:
             continue
         try:
             if not _uid_pids(uid):
-                shutil.rmtree(path)
+                # A concurrent close (this or another trainer process) may have just removed it.
+                shutil.rmtree(path, onexc=_ignore_missing)
         finally:
             os.close(lock_fd)
+
+
+def _ignore_missing(function: object, path: str, exc: BaseException) -> None:
+    if not isinstance(exc, FileNotFoundError):
+        raise exc
 
 
 def _disk_usage(workdir: Path, limit: int) -> int:
