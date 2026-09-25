@@ -25,7 +25,7 @@ import httpx
 from marli.budget import SpendGuard
 from marli.errors import BackendError, ConfigError
 from marli.model import ModelSpec
-from marli.policy.vllm import VLLMPolicy
+from marli.policy.vllm import VLLMPolicy, http_client
 from marli.render.registry import get_renderer
 from marli.serve.vllm import Server
 from marli.train.backends.base import SamplerSnapshot
@@ -136,7 +136,7 @@ class LocalBackend:
         self.spend = spend
         self.pool: LocalLearnerPool | None = None
         self.learners: dict[str, LocalLearner] = {}
-        self.client = httpx.AsyncClient(timeout=600, trust_env=False)
+        self.client = http_client(600, trust_env=False)
         self._lock = asyncio.Lock()
         self._owned: dict[str, str] = {}
         self._owner = uuid4().hex

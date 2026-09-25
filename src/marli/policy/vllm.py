@@ -16,6 +16,19 @@ from marli.interact.types import Termination, Usage
 from marli.policy.base import CallMeta, Sample, SamplingSpec, check_trainable_sampling
 
 
+def http_client(timeout_s: float, **kwargs: Any) -> httpx.AsyncClient:
+    """A client whose pool never caps in-flight requests (the caller's concurrency does).
+
+    httpx's default pool allows 100 connections, which silently capped 128- and
+    256-way rollouts at 100 requests in flight.
+    """
+    return httpx.AsyncClient(
+        timeout=timeout_s,
+        limits=httpx.Limits(max_connections=None, max_keepalive_connections=1024),
+        **kwargs,
+    )
+
+
 class VLLMPolicy:
     def __init__(
         self,
@@ -37,7 +50,7 @@ class VLLMPolicy:
         self.policy_version = policy_version
         self.timeout_s = timeout_s
         self._owns_client = client is None
-        self.client = client if client is not None else httpx.AsyncClient(timeout=timeout_s)
+        self.client = client if client is not None else http_client(timeout_s)
 
     async def aclose(self) -> None:
         if self._owns_client:

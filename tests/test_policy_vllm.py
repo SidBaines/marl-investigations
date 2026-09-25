@@ -343,3 +343,20 @@ def test_invalid_server_manifest(tmp_path: Path, data: str | None) -> None:
         path.write_text(data)
     with pytest.raises(ConfigError, match="server manifest"):
         read_server_json(path)
+
+
+
+async def test_default_clients_do_not_cap_in_flight_requests() -> None:
+    # httpx's default pool (100 connections) silently capped 128/256-way rollouts at 100.
+    from marli.policy.vllm import http_client
+
+    policy = VLLMPolicy("p", "http://x", "m", renderer_name="fake", trainable=False)
+    shared = http_client(30, trust_env=False)
+    try:
+        for client in (policy.client, shared):
+            pool = client._transport._pool  # httpcore.AsyncConnectionPool; None -> sys.maxsize
+            assert pool._max_connections >= 1_000_000
+            assert pool._max_keepalive_connections >= 256
+    finally:
+        await policy.aclose()
+        await shared.aclose()
