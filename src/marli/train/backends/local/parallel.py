@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import math
 import multiprocessing
 import os
 import socket
@@ -149,7 +150,8 @@ def _all_equal(value: float, device: torch.device) -> bool:
     mine = torch.tensor([value], dtype=torch.float64, device=device)
     gathered = [torch.zeros_like(mine) for _ in range(dist.get_world_size())]
     dist.all_gather(gathered, mine)
-    return all(float(t.item()) == value for t in gathered)
+    # Different checkpoints differ by far more than float64 reduction noise.
+    return all(math.isclose(float(t.item()), value, rel_tol=1e-9, abs_tol=1e-6) for t in gathered)
 
 
 def all_ok(ok: bool, device: torch.device) -> bool:
@@ -526,6 +528,11 @@ class Replicas:
 
         def target() -> None:
             try:
+                if self.devices[0].startswith("cuda"):
+                    import torch
+
+                    # The current CUDA device is per thread; NCCL expects rank 0's.
+                    torch.cuda.set_device(torch.device(self.devices[0]))
                 result = operation()
             except BaseException as exc:  # delivered to the awaiting task
                 loop.call_soon_threadsafe(settle, None, exc)
