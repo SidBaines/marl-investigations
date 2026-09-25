@@ -43,6 +43,15 @@ class TrainRLConfig:
     # versioned adapters are written (default <out>/adapters; must be readable by vLLM)
     local_server_json: str | None = runtime_field(None, help="server.json of `marli serve vllm`")
     local_adapters_dir: str | None = runtime_field(None, help="adapter snapshots dir")
+    # Hardware placement only (the update equals the one-device update up to float
+    # rounding): several devices make the learner data-parallel; sleep_sampler
+    # time-shares the GPUs with a vLLM started with enable_sleep_mode=true.
+    local_devices: list[str] | None = runtime_field(
+        None, help="learner devices, e.g. [cuda:0, cuda:1] for a data-parallel learner"
+    )
+    local_sleep_sampler: bool = runtime_field(
+        False, help="put vLLM to sleep while the learner trains (server needs enable_sleep_mode)"
+    )
 
     def __post_init__(self) -> None:
         for name in ("batch_tasks", "group_size", "steps", "checkpoint_every", "concurrency"):
@@ -82,6 +91,12 @@ class TrainRLConfig:
                 raise ConfigError("train rl does not support cross_entropy; use train sft")
             if spec.backend in {"tinker", "local"} and self.max_usd is None:
                 raise ConfigError("paid learners require max_usd")
+        if self.local_devices is not None:
+            from marli.train.backends.local.parallel import validate_devices
+
+            validate_devices(self.local_devices)
+        if type(self.local_sleep_sampler) is not bool:
+            raise ConfigError("local_sleep_sampler must be a boolean")
         for sampling in self.frozen_sampling.values():
             sampling.__post_init__()
         self.credit.__post_init__()

@@ -289,6 +289,7 @@ Manifest produced: `server.json`.
 | max_loras | int | 4 | false | false | false |  |
 | max_lora_rank | int | 32 | false | false | false |  |
 | tensor_parallel_size | int | 1 | false | false | false |  |
+| enable_sleep_mode | bool | false | false | false | false | vLLM sleep/wake endpoints so a co-located learner can use the GPUs between sampling phases (also sets VLLM_SERVER_DEV_MODE=1) |
 | cuda_visible_devices | str \| None | null | false | false | false |  |
 | extra_args | list[str] | [] | false | false | false | escape hatch: argv entries appended verbatim to vLLM |
 | learner_ranks | list[int] | [] | false | false | false | optional planned learner ranks; reserve one snapshot slot |
@@ -367,6 +368,8 @@ Manifest produced: `checkpoint.json`.
 | base_url | str \| None | null | false | true | false | Tinker base URL (explicit) |
 | local_server_json | str \| None | null | false | true | false | server.json of `marli serve vllm` |
 | local_adapters_dir | str \| None | null | false | true | false | adapter snapshots dir |
+| local_devices | list[str] \| None | null | false | true | false | learner devices, e.g. [cuda:0, cuda:1] for a data-parallel learner |
+| local_sleep_sampler | bool | false | false | true | false | put vLLM to sleep while the learner trains (server needs enable_sleep_mode) |
 
 ### train sft
 
