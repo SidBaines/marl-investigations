@@ -125,7 +125,58 @@ See `run.sh` (to be filled in as run).
 
 ## Results summary
 
-_Training runs pending._
+### Overnight trial (team reward, 30 steps, 2026-09-25/26)
+
+Run `out/trial_team`: the team-reward relay, 4 repos × G = 4 per step, flat
+lr 4e-5. It took 30 steps in 7 h (14.0 min per step) and stopped cleanly
+after the step-29 checkpoint. The table compares steps 0–9 with steps 20–29
+(160 relays and 640 contributors in each); ± is a 95% interval
+(`out/trial_team_analysis/early_vs_late.txt`).
+
+| | Steps 0–9 | Steps 20–29 | Change |
+|---|---|---|---|
+| Team score (mean over the 4 contributors) | 0.545 ± 0.054 | 0.631 ± 0.049 | **+0.086 (z = 2.3)** |
+| Contributors who reached CI | 61.4% | 70.2% | +8.8 pts |
+| Base tests pass when submitted | 83.3% | 85.9% | +2.6 pts |
+| Sacrificed, among contributors with a real choice (no rule at start, ran CI) | 38/359 = 10.6% ± 3.2% | 30/419 = 7.2% ± 2.5% | **−3.4 pts (z = −1.7)** |
+| Scored 3 when the rule was known at the start and they submitted | 81.8% (n = 33) | 82.1% (n = 28) | — |
+| Contributors scoring 3 | 4.2% | 3.6% | — |
+
+Sacrifice rate by position (early → late):
+
+| Contributor 1 | Contributor 2 | Contributor 3 | Contributor 4 (can help no one) |
+|---|---|---|---|
+| 4/125 = 3% → 2/133 = 2% | 17/98 = 17% → 16/124 = 13% | 14/73 = 19% → 9/80 = 11% | 3/63 = 5% → 3/82 = 4% |
+
+- **Signs of life: yes.** The team reward rose clearly within 30 steps. Most of
+  the gain came from contributors reaching CI more often: the model spends
+  fewer turns before running CI, and the 12,288-token budget is the bottleneck.
+- **H-team: not supported so far.** The sacrifice rate fell slightly rather
+  than rising; the decline is suggestive but not conclusive at n = 1 seed.
+  Learning to reveal the rule for others did not show up in 30 steps.
+  - The first contributor, who could help the most people, almost never
+    sacrifices. Contributors 2 and 3 do so most often; one possibility is that
+    they react to an earlier contributor's notes about failed extended checks.
+    That is a hypothesis to check in transcripts.
+- **Followers use the notes:** when the rule was known and they submitted,
+  they scored 3 about 82% of the time.
+- **Training health:** `kl_sample_train` ≤ 7.5e-4 and a mean IS ratio of
+  1.0000 ± 0.0001 at every step. Adapter hot-load drift stayed at 0.016–0.028
+  nats (tolerance 0.05). There were no errors, restarts or stalls.
+- **Caveats:**
+  - One seed and one arm.
+  - The 51 relay repos repeat (each drawn about 2.4 times over 30 steps).
+  - The token budget still binds: about 30% of contributors never reach CI.
+  - One step's gradient mixes 16 relays, so a single sacrifice decision is a
+    weak signal under team reward.
+
+Artefacts:
+- Adapters for every step, trainer states every 5 steps, metrics and analysis:
+  HF `sidbaines/amber-baton` (public; no prompts or transcripts).
+- Rollouts: dev box `out/trial_team/rollouts` (private; they contain problem
+  text).
+- To resume: restore the run dir, with its states and checkpoints, and rerun
+  the same `train rl` command with the same `--out`.
 
 **Data, as run 2026-09-25** (untrained Qwen3.8-27B; single agent; 12,288
 tokens per episode; 6,144 per turn):
