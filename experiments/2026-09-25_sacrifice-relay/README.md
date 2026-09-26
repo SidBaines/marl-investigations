@@ -1,6 +1,6 @@
 # Sacrifice relay: do agents learn to give up their own reward for later agents?
 
-Status: planned (2026-09-25). This is a signs-of-life study: one seed and three
+Status: overnight trial done (2026-09-26); the full three-arm runs are not started. This is a signs-of-life study: one seed and three
 runs.
 
 ## Question
@@ -215,4 +215,4 @@ tokens per episode; 6,144 per turn):
 
 | Item | Budget | Actual |
 |---|---|---|
-| 2×H200 pod: spike, filter/base-rate eval, 3 runs | to be confirmed with Sid | — |
+| 2×H200 pod `nu638jwugw3f2i`: benchmark, filter (800 problems), option-2 test, continue test, overnight trial (30 steps) | approved by Sid step by step | about $153 (2026-09-25 14:22 → 2026-09-26 07:03 UTC; pod deleted after HF + dev box persistence was verified; see `/workspace/marli-orchestration/2026-09-25/CLEANUP_RECEIPT.md`) |
