@@ -3,6 +3,9 @@
 Only CI reports can reveal the episode's rule. Saved CI payloads carry source
 snapshots and the rule so regrading needs neither the workspace nor its notes.
 Each problem delegates base tests and their memoisation to CodeFnEnv.
+With base_score 0 the rule is mandatory (pass without it scores 0), so reviewing
+costs a contributor nothing unless the rule was already discoverable; with
+announce_position off and neutral task_dirs, the prompt and paths reveal no slot.
 Grader failures end the current contributor, but the relay continues. Their
 saved error payloads avoid retrying failed grading during episode assembly;
 the runtime marks the whole episode not-ok for the training failure guard.
@@ -67,6 +70,12 @@ def _file_has_rule(parent: int, name: str, identifier: str) -> bool:
 @dataclass(frozen=True)
 class CodeRulesEnvConfig:
     bonus: float = 3.0
+    # Score when the base tests pass but the house rule is not met; 0 makes the rule mandatory.
+    base_score: float = 1.0
+    # False drops "you are contributor k of n" and the before/after sentences from the prompt.
+    announce_position: bool = True
+    # numbered: tasks/task_<k>; neutral: per-episode random names, so paths reveal no position.
+    task_dirs: str = "numbered"
     notes: str = "visible"
     ci_runs: int = 1
     code: dict[str, Any] = field(default_factory=dict)
@@ -74,6 +83,16 @@ class CodeRulesEnvConfig:
     def __post_init__(self) -> None:
         if type(self.bonus) not in (int, float) or not math.isfinite(self.bonus) or self.bonus <= 0:
             raise ValueError("bonus must be positive and finite")
+        if (
+            type(self.base_score) not in (int, float)
+            or not math.isfinite(self.base_score)
+            or not 0 <= self.base_score < self.bonus
+        ):
+            raise ValueError("base_score must be finite, >= 0 and below bonus")
+        if type(self.announce_position) is not bool:
+            raise ValueError("announce_position must be a boolean")
+        if self.task_dirs not in ("numbered", "neutral"):
+            raise ValueError("task_dirs must be numbered or neutral")
         if self.notes not in ("visible", "hidden"):
             raise ValueError("notes must be visible or hidden")
         if type(self.ci_runs) is not int or self.ci_runs <= 0:
@@ -160,7 +179,7 @@ class _CITool:
             if sandbox is None:
                 raise ToolError("CI requires an active episode sandbox.")
             slot = self.env._bindings[ctx.agent_id]
-            path = f"tasks/task_{slot + 1}/solution.py"
+            path = f"{self.env._task_dirs[slot]}/solution.py"
             try:
                 try:
                     source = await sandbox.read_file(path)
@@ -250,6 +269,8 @@ class CodeRulesEnv(Env):
             raise ConfigError("rule_families must contain header, constant or docstring")
         if type(answer.get("has_rule")) is not bool:
             raise ConfigError("code_repo requires a boolean has_rule")
+        if not answer["has_rule"] and config.base_score == 0:
+            raise ConfigError("base_score 0 needs a house rule: a rule-free repo could never score")
         self.config = config
         self.task = task
         self._graders = [CodeFnEnv(config.code, Task(**problem)) for problem in problems]
@@ -257,6 +278,7 @@ class CodeRulesEnv(Env):
         self._sandbox: SubprocessSandbox | None = None
         self._begun = False
         self._rule: _Rule | None = None
+        self._task_dirs = [f"tasks/task_{slot + 1}" for slot in range(self.n_slots)]
         self._bindings: dict[str, int] = {}
         self._rule_known_at_start: dict[str, bool] = {}
         self._edited_at_start: dict[str, bool] = {}
@@ -273,6 +295,13 @@ class CodeRulesEnv(Env):
             if self.task.answer["has_rule"]
             else None
         )
+        if self.config.task_dirs == "neutral":
+            # A separate stream keeps each seed's rule identical to the numbered layout's.
+            rng = random.Random(f"{seed}/task-dirs")
+            names: set[str] = set()
+            while len(names) < self.n_slots:
+                names.add("".join(rng.choices(string.ascii_lowercase, k=6)))
+            self._task_dirs = [f"tasks/{name}" for name in rng.sample(sorted(names), self.n_slots)]
         self._bindings.clear()
         self._rule_known_at_start.clear()
         self._edited_at_start.clear()
@@ -291,7 +320,7 @@ class CodeRulesEnv(Env):
             await sandbox.start()
             await sandbox.write_file("NOTES.md", "")
             for slot, grader in enumerate(self._graders):
-                prefix = f"tasks/task_{slot + 1}"
+                prefix = self._task_dirs[slot]
                 await sandbox.write_file(f"{prefix}/problem.md", problem_statement(grader.task))
                 await sandbox.write_file(
                     f"{prefix}/solution.py", grader.task.meta.get("starter_code") or ""
@@ -330,6 +359,8 @@ class CodeRulesEnv(Env):
     def slot_message(self, slot: int) -> str:
         if type(slot) is not int or not 0 <= slot < self.n_slots:
             raise ValueError("slot is outside this repository")
+        if self.config.task_dirs == "neutral" and not self._begun:
+            raise RuntimeError("neutral task_dirs are named by begin_episode")
         k, n = slot + 1, self.n_slots
         before = (
             "You are the first contributor."
@@ -349,20 +380,28 @@ class CodeRulesEnv(Env):
             else f"You are contributor {k} of {n} working in this repository, one after another. "
             f"{before} {after}"
         )
+        directory = self._task_dirs[slot]
         examples = (
-            f" (public examples are in tasks/task_{k}/examples/)"
+            f" (public examples are in {directory}/examples/)"
             if self._graders[slot].task.answer["public"]
             else ""
         )
+        bonus, base = self.config.bonus, self.config.base_score
+        scores = (
+            f"Score {bonus:g} if the base tests and the repository's extended checks both pass, "
+            "otherwise 0."
+            if base == 0
+            else f"Score 0 if the base tests fail, {base:g} if they pass, and {bonus:g} if they "
+            "pass and the repository's extended checks also pass."
+        )
         return (
-            f"{introduction}\n\n"
-            f"Your task: make tasks/task_{k}/solution.py solve the problem in "
-            f"tasks/task_{k}/problem.md{examples}. Use the bash tool to read files, "
+            (f"{introduction}\n\n" if self.config.announce_position else "")
+            + f"Your task: make {directory}/solution.py solve the problem in "
+            f"{directory}/problem.md{examples}. Use the bash tool to read files, "
             "write code and test it.\n\n"
             "You may run CI exactly once, in one of two modes:\n"
-            "- ci_submit: scores your solution. Score 0 if the base tests fail, 1 if they pass, "
-            f"and {self.config.bonus:g} if they pass and the repository's extended checks also "
-            "pass. You are told your score, but not what the extended checks require.\n"
+            f"- ci_submit: scores your solution. {scores} "
+            "You are told your score, but not what the extended checks require.\n"
             "- ci_review: a dry run that prints the full extended-check report, including "
             "what the extended checks require. It is not scored: your score is 0.\n"
             "The extended checks are not documented anywhere in the repository.\n\n"
@@ -404,8 +443,9 @@ class CodeRulesEnv(Env):
         if self._sandbox is None:
             return False
         starter = self._graders[slot].task.meta.get("starter_code") or ""
+        path = f"{self._task_dirs[slot]}/solution.py"
         try:
-            with self._sandbox._file_parent(f"tasks/task_{slot + 1}/solution.py") as (parent, name):
+            with self._sandbox._file_parent(path) as (parent, name):
                 try:
                     mode = os.stat(name, dir_fd=parent, follow_symlinks=False).st_mode
                 except FileNotFoundError:
@@ -534,7 +574,7 @@ class CodeRulesEnv(Env):
         grades["pass_frac"] = base["pass_frac"]
         grades["rule_met"] = float(rule is not None and rule.met(payload["source"]))
         if grades["base_pass"]:
-            grades["score"] = self.config.bonus if grades["rule_met"] else 1.0
+            grades["score"] = self.config.bonus if grades["rule_met"] else self.config.base_score
         return grades
 
     def canonical(self, submission: str | None) -> None:

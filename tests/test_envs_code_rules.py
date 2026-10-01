@@ -106,6 +106,12 @@ def test_registration_config_and_rule_sampling() -> None:
         {"bonus": 0},
         {"bonus": float("nan")},
         {"bonus": True},
+        {"base_score": -1},
+        {"base_score": 3},
+        {"base_score": float("inf")},
+        {"base_score": "0"},
+        {"announce_position": 1},
+        {"task_dirs": "random"},
         {"code": []},
         {"code": {"typo": 1}},
         {"code": {"timeout_per_test_s": 0}},
@@ -827,3 +833,78 @@ async def test_ci_infrastructure_errors_end_contributor_and_record_not_ok_episod
     monkeypatch.setattr(fresh._graders[0], "grade", fail)
     assert await fresh.grade(episode.outcome.final_answer) == episode.grades["_system"]
     assert calls == 1
+
+
+ANON_BINARY = {"bonus": 1.0, "base_score": 0.0, "announce_position": False, "task_dirs": "neutral"}
+
+
+def test_anonymous_binary_message_reveals_no_position() -> None:
+    instance = CodeRulesEnv(ANON_BINARY, repo_task())
+    with pytest.raises(RuntimeError, match="begin_episode"):
+        instance.slot_message(0)
+    instance.begin_episode(19)
+    dirs = instance._task_dirs
+    assert len(set(dirs)) == 4 and all(re.fullmatch(r"tasks/[a-z]{6}", d) for d in dirs)
+    expected = f"""Your task: make {dirs[2]}/solution.py solve the problem in {dirs[2]}/problem.md (public examples are in {dirs[2]}/examples/). Use the bash tool to read files, write code and test it.
+
+You may run CI exactly once, in one of two modes:
+- ci_submit: scores your solution. Score 1 if the base tests and the repository's extended checks both pass, otherwise 0. You are told your score, but not what the extended checks require.
+- ci_review: a dry run that prints the full extended-check report, including what the extended checks require. It is not scored: your score is 0.
+The extended checks are not documented anywhere in the repository.
+
+NOTES.md is shared by everyone who works in this repository. You may read it and write to it (with bash) at any time, including after your CI run. When you are done, call end_session."""  # noqa: E501
+    assert instance.slot_message(2) == expected
+    for slot in range(4):
+        message = instance.slot_message(slot)
+        assert "contributor" not in message and "task_" not in message
+        assert not re.search(r"\b[2-4]\b", message)
+    numbered = CodeRulesEnv({**ANON_BINARY, "task_dirs": "numbered"}, repo_task())
+    assert numbered.slot_message(1).startswith("Your task: make tasks/task_2/solution.py")
+    # The rule and the folder names come from separate streams of the same seed.
+    reference = CodeRulesEnv({}, repo_task())
+    reference.begin_episode(19)
+    assert instance._rule == reference._rule
+    again = CodeRulesEnv(ANON_BINARY, repo_task())
+    again.begin_episode(19)
+    assert again._task_dirs == dirs
+    again.begin_episode(20)
+    assert again._task_dirs != dirs
+
+
+def test_rule_free_repo_cannot_use_mandatory_rule() -> None:
+    with pytest.raises(ConfigError, match="rule-free"):
+        CodeRulesEnv({"bonus": 1.0, "base_score": 0.0}, repo_task(has_rule=False))
+
+
+@pytest.mark.usefixtures("sandbox_host")
+async def test_neutral_layout_and_binary_scores() -> None:
+    instance = CodeRulesEnv(ANON_BINARY, repo_task())
+    instance.begin_episode(3)
+    await instance.setup()
+    try:
+        sandbox, rule, dirs = instance.sandbox, instance._rule, instance._task_dirs
+        assert sandbox is not None and rule is not None
+        names = sorted(p.name for p in (sandbox.workdir / "tasks").iterdir())
+        assert names == sorted(d.removeprefix("tasks/") for d in dirs)
+        assert not (sandbox.workdir / "tasks/task_1").exists()
+        for slot in range(3):
+            instance.bind_agent(f"worker{slot}", slot)
+        # Base tests pass without the rule: 0. With the rule: 1. Review: 0.
+        await sandbox.write_file(f"{dirs[0]}/solution.py", SUM_SOLUTION)
+        result = await tool(instance, "ci_submit")(context(instance))
+        assert result.content.endswith(
+            "Extended checks: FAILED. Score: 0. Extended-check details are only shown by ci_review."
+        )
+        await sandbox.write_file(f"{dirs[1]}/solution.py", following(rule) + SUM_SOLUTION)
+        await tool(instance, "ci_submit")(context(instance, "worker1"))
+        await tool(instance, "ci_review")(context(instance, "worker2"))
+        grades = [await instance.grade(instance.slot_submission(f"worker{i}")) for i in range(3)]
+        assert [g["score"] for g in grades] == [0, 1, 0]
+        assert [g["base_pass"] for g in grades] == [1, 1, 0]
+        assert grades[0]["rule_met"] == 0 and grades[1]["rule_met"] == 1
+        # The edited-at-start snapshot follows the neutral path too.
+        await sandbox.write_file(f"{dirs[3]}/solution.py", "print(1)\n")
+        instance.bind_agent("worker3", 3)
+        assert instance._edited_at_start["worker3"]
+    finally:
+        await instance.teardown()
