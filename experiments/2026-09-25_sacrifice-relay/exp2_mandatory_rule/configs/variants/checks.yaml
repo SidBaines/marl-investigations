@@ -1,0 +1,3 @@
+# Prompt variant: the extended checks "check repository-specific conventions that cannot be worked
+# out from the task, the code or the tests" (a fact about the environment).
+env_config: {checks_note: true}

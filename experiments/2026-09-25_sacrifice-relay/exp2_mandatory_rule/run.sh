@@ -7,7 +7,10 @@
 #   ./run.sh train          # team-reward training; resume = rerun (same --out)
 #   ./run.sh check [run]    # abort-rule numbers (default: the training run)
 #   ./run.sh gate           # optional: base rates of the untrained model (51 repos x 4), GO/STOP
+#   ./run.sh serve_eval     # vLLM for evals only: one engine per GPU (DP2) + MTP, full memory
+#   ./run.sh variants       # untrained model under each prompt variant (configs/variants/), GO/STOP each
 #   ./run.sh stop           # stop vLLM and the dashboard
+# VARIANT=<name> ./run.sh train adds configs/variants/<name>.yaml and trains into out/train_team_<name>.
 # Inputs from experiment 1 (copied in from the dev box): ../out/repos_n4 (51 relay repos).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" >/dev/null && pwd)"; STUDY="$(dirname "$HERE")"
@@ -18,6 +21,9 @@ REPOS="$STUDY/out/repos_n4/taskset.json"
 M="uv run --no-sync marli"
 export HF_HOME=/workspace/hf HF_HUB_OFFLINE=1
 SERVER="$OUT/serve/server.json"
+EVAL_SERVER="$OUT/serve_eval/server.json"
+VARIANT_ARGS=(); RUN=train_team
+if [ -n "${VARIANT:-}" ]; then VARIANT_ARGS=("$C/variants/$VARIANT.yaml"); RUN="train_team_$VARIANT"; fi
 
 case "${1:?phase}" in
 serve)
@@ -30,9 +36,26 @@ gate)
 train)
   # No CUDA_VISIBLE_DEVICES: the server and both learner ranks see both GPUs.
   TRITON_CACHE_DIR=/workspace/.triton/cache \
-    $M train rl "$SC/base.yaml" "$C/env.yaml" "$C/train_team.yaml" tasks="$REPOS" max_usd=1 \
-    local_server_json="$SERVER" 'local_devices=[cuda:0,cuda:1]' local_sleep_sampler=true \
-    concurrency=64 "${@:2}" --out "$OUT/train_team" ;;
+    $M train rl "$SC/base.yaml" "$C/env.yaml" "${VARIANT_ARGS[@]}" "$C/train_team.yaml" tasks="$REPOS" \
+    max_usd=1 local_server_json="$SERVER" 'local_devices=[cuda:0,cuda:1]' local_sleep_sampler=true \
+    concurrency=64 "${@:2}" --out "$OUT/$RUN" ;;
+serve_eval)
+  HF_HUB_OFFLINE=0 $M serve vllm "$STUDY/bench/serve/dp2_mtp2.yaml" detach=true "${@:2}" \
+    --out "$OUT/serve_eval" ;;
+variants)
+  # The current prompt on the first 16 repos; each variant on the first 8 (a subset), 4 each.
+  pids=()
+  for v in baseline tools others checks all; do
+    n=8; [ "$v" = baseline ] && n=16
+    $M eval rollout "$SC/eval_common.yaml" "$SC/eval_gate_n4.yaml" "$C/env.yaml" "$C/gate.yaml" \
+      "$C/variants/$v.yaml" tasks="$REPOS" max_tasks=$n concurrency=$((n * 4)) \
+      "policies.q.ref=vllm:@$EVAL_SERVER#qwen3_8_27b" max_usd=1 --out "$OUT/variants/$v" \
+      > "$OUT/variants_$v.log" 2>&1 & pids+=($!)
+  done
+  wait "${pids[@]}" || true
+  for v in baseline tools others checks all; do
+    echo "== $v"; python3 "$HERE/check.py" "$OUT/variants/$v"
+  done | tee "$OUT/variants_summary.txt" ;;
 dashboard)
   # Off loopback the page needs its key: the URL with ?key= is in out/dashboard/serve.json.
   # Open https://<pod-id>-8888.proxy.runpod.net/?key=<key> (stop Jupyter first if it holds 8888).
