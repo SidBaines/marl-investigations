@@ -112,6 +112,9 @@ def test_registration_config_and_rule_sampling() -> None:
         {"base_score": "0"},
         {"announce_position": 1},
         {"task_dirs": "random"},
+        {"others_note": 1},
+        {"checks_note": "yes"},
+        {"tool_text": "friendly"},
         {"code": []},
         {"code": {"typo": 1}},
         {"code": {"timeout_per_test_s": 0}},
@@ -908,3 +911,37 @@ async def test_neutral_layout_and_binary_scores() -> None:
         assert instance._edited_at_start["worker3"]
     finally:
         await instance.teardown()
+
+
+def test_neutral_prompt_variants_add_facts_only() -> None:
+    base = CodeRulesEnv(ANON_BINARY, repo_task())
+    base.begin_episode(5)
+    plain = base.slot_message(1)
+    variant = CodeRulesEnv(
+        {**ANON_BINARY, "others_note": True, "checks_note": True, "tool_text": "neutral"},
+        repo_task(),
+    )
+    variant.begin_episode(5)
+    message = variant.slot_message(1)
+    others = "Other contributors also work in this repository, each on their own task.\n\n"
+    checks = (
+        " They check repository-specific conventions that cannot be worked out from the task, "
+        "the code or the tests."
+    )
+    assert message.startswith(others)
+    assert message.removeprefix(others).replace(checks, "") == plain
+    assert not re.search(r"contributor \d|\bfirst\b|\blast\b|before you\b|after you\b", message)
+    specs = {t.spec.name: t.spec.description for t in variant.tools("worker")}
+    assert specs["ci_submit"] == (
+        "Run CI in scored mode: grades your solution and reports the score. Uses your one CI run."
+    )
+    assert specs["ci_review"] == (
+        "Run CI in report mode: prints the extended-check requirements, not scored. "
+        "Uses your one CI run."
+    )
+    original = {t.spec.name: t.spec.description for t in base.tools("worker")}
+    assert original["ci_review"].startswith("Spend your CI run")
+    # A solo repo has no one else, so others_note adds nothing there.
+    solo = CodeRulesEnv({**ANON_BINARY, "others_note": True}, repo_task(1))
+    solo.begin_episode(5)
+    assert solo.slot_message(0).startswith("Your task:")
