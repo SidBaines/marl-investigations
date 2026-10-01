@@ -453,7 +453,8 @@ SCRIPT = r"""
 
   function runRow(run) {
     var d = h("details", { cls: "run" });
-    if (openRuns.has(run.path) || (run.kind === "train rl" && run.status === "running" && !openRuns.has("!" + run.path))) d.open = true;
+    var charted = run.train && run.train.groups && run.train.groups.length;
+    if (openRuns.has(run.path) || (run.kind === "train rl" && (run.status === "running" || charted) && !openRuns.has("!" + run.path))) d.open = true;
     d.addEventListener("toggle", function () {
       if (d.open) { openRuns.add(run.path); openRuns.delete("!" + run.path); }
       else { openRuns.delete(run.path); openRuns.add("!" + run.path); }

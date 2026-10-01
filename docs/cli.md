@@ -59,6 +59,8 @@ Manifest produced: `dashboard.json`.
 | grouped | dict[str, str] | {} | false | true | false | train rl: grade component -> chart title; one chart per component with a line per agent plus the average, in mapping order (empty: no such charts) |
 | agent_labels | dict[str, str] | {} | false | true | false | legend label per agent id in grouped charts (default: the id; _system is 'average') |
 | smooth_steps | int | 5 | false | true | false | grouped charts: trailing rolling-mean window in steps (1 = no smoothing) |
+| serve_port | int \| None | null | false | true | false | serve the live page on this port (0 = any free port) and keep refreshing every watch_s (default refresh_s) until SIGINT; the URL is logged and written to serve.json |
+| serve_host | str | 127.0.0.1 | false | true | false | bind address for serve_port; off loopback (e.g. 0.0.0.0 behind a pod's HTTPS proxy) every request needs the access key ($MARLI_DASHBOARD_KEY, else random per start) |
 
 ### data build
 

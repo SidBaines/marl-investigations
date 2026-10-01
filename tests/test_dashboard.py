@@ -316,6 +316,12 @@ def test_cli_prints_one_json_line(
         {"smooth_steps": 0},
         {"smooth_steps": 2.5},
         {"smooth_steps": True},
+        {"serve_port": -1},
+        {"serve_port": 70000},
+        {"serve_port": True},
+        {"serve_port": 8.5},
+        {"serve_host": ""},
+        {"serve_host": " "},
     ],
 )
 def test_invalid_config(overrides: dict[str, Any]) -> None:

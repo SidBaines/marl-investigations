@@ -248,25 +248,48 @@ use `--force` on a live serving directory: that would erase its ownership record
 
 ## Dashboard
 
-`marli dashboard` scans run dirs and writes `snapshot.json`, `index.html` and
-`standalone.html`. It covers evals, training, data verbs, servers and GPUs. It
-only observes: it never takes a run's lock. A run counts as running while some
-process holds its flock, according to `/proc/locks`. Every setting is a runtime
-field, so the same `--out` refreshes on each call.
+`marli dashboard` is a reusable live GUI for any runs: evals, training, data
+verbs, servers and GPUs. It only observes run dirs (it never takes a run's lock;
+a run counts as running while some process holds its flock, per `/proc/locks`),
+and its snapshot holds numbers, agent ids and run metadata only: never prompts,
+tool output or answers.
+
+**Per study, a small YAML** sets the title and any charts, e.g.
+`experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/dashboard.yaml`:
+`grouped` maps a grade component to a chart title (one chart per component,
+a line per agent plus the average), `agent_labels` names the agents and
+`smooth_steps` sets the rolling mean. Everything is a runtime setting, so the
+same `--out` can be reused.
+
+**Run it where the run dirs are** (a pod, the dev box, or a laptop with
+synced copies) and leave it running; it refreshes every `watch_s` (default
+`refresh_s`, 60 s) and the open page picks up each new snapshot by itself:
 
 ```bash
-uv run --no-sync marli dashboard 'roots=[experiments,runs]' watch_s=60 --out runs/dashboard &
-python3 -m http.server 8765 --bind 127.0.0.1 --directory runs/dashboard
-# on your machine: ssh -L 8765:127.0.0.1:8765 <pod>, then open http://127.0.0.1:8765/standalone.html
+uv run --no-sync marli dashboard <study>/dashboard.yaml 'roots=[<study>/out]' \
+  serve_port=8765 --out runs/dashboard
+# -> "dashboard live at http://127.0.0.1:8765/" (also in runs/dashboard/serve.json)
 ```
 
-Served over HTTP, the page polls `snapshot.json` every `refresh_s` (default
-60 s). `annotations=<file.json>` puts off-pod facts at the top, such as the pod
-id, the $/hr rate and spend so far. Snapshots hold numbers, agent ids and run
-metadata only: never prompts, tool output or answers. This makes `index.html`
-safe to publish as a claude.ai Artifact. Episode files are folded
+Ways to open it:
+- **Same machine, or an SSH tunnel** (`ssh -L 8765:127.0.0.1:8765 <host>`):
+  open `http://127.0.0.1:8765/`. On loopback no key is needed.
+- **A RunPod pod's HTTPS proxy, from any browser or phone:** bind every
+  interface on a port the pod exposes as `/http` (our pods expose `8888`; stop
+  Jupyter first if it holds it), e.g. `serve_host=0.0.0.0 serve_port=8888`, then
+  open `https://<pod-id>-8888.proxy.runpod.net/?key=<key>`. Off loopback every
+  request needs the access key: the logged URL carries it once, the server
+  swaps it for an HttpOnly cookie and drops it from the address bar. Set
+  `MARLI_DASHBOARD_KEY` to keep one key (and bookmark) across restarts;
+  otherwise each start makes a new random key. The key never enters a config
+  or manifest, only `serve.json` (mode 0600) and the log.
+
+Only the page and `snapshot.json` are served. `annotations=<file.json>` puts
+off-pod facts at the top (pod id, $/hr, spend). Without `serve_port`, the verb
+writes `snapshot.json`, `index.html` (an Artifact fragment) and
+`standalone.html` once, or every `watch_s` seconds. Episode files are folded
 incrementally: `cache.json` in the out dir keeps each file's offset. SIGINT or
-SIGTERM stops `watch_s` and records the manifest.
+SIGTERM stops watching or serving and records the manifest.
 
 ## Continue truncated episodes
 
