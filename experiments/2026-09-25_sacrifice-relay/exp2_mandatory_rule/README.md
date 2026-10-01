@@ -120,11 +120,11 @@ It also shows the share of groups with no learning signal. It refreshes once per
 | Phase | Time | Cost |
 |---|---|---|
 | Pod setup (install, model download, vLLM start) | ~45 min | ~$7 |
-| Gate (204 playthroughs) | ~45–60 min | ~$7–9 |
+| Gate (204 playthroughs, ~7.5M generated tokens at 64 at a time) | ~1–1.5 h | ~$9–14 |
 | Training, ~30 steps | ~7 h | ~$64 |
 | Persist to HF and delete the pod | ~30 min | ~$5 |
-| **Gate only** | **~2 h** | **~$20** |
-| **Gate + 30 training steps** | **~9 h** | **~$85** |
+| **Gate only** | **~2.5 h** | **~$25** |
+| **Gate + 30 training steps** | **~9.5 h** | **~$90** |
 
 ## Commands
 
