@@ -116,11 +116,13 @@ def main() -> None:
         b = block(steps[0])
         show("gate", b)
         no_signal = b["tied"] / b["groups"] if b["groups"] else 1.0
-        ok = no_signal <= NO_SIGNAL_MAX and b["anyone"] >= ANYONE_SCORED_MIN * b["n"]
+        scoring = b["anyone"] / b["n"] if b["n"] else 0.0
+        ok = b["groups"] > 0 and no_signal <= NO_SIGNAL_MAX and scoring >= ANYONE_SCORED_MIN
+        failed = len(steps[0]) - b["n"]
         print(
             f"GATE: {'GO' if ok else 'STOP'} (no-signal share {no_signal:.0%} vs max "
-            f"{NO_SIGNAL_MAX:.0%}; anyone scored {b['anyone'] / b['n']:.0%} vs min "
-            f"{ANYONE_SCORED_MIN:.0%})"
+            f"{NO_SIGNAL_MAX:.0%}; anyone scored {scoring:.0%} vs min {ANYONE_SCORED_MIN:.0%}; "
+            f"{failed} failed playthroughs excluded)"
         )
         return
     order = sorted(steps)

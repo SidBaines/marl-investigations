@@ -1,6 +1,6 @@
 # Experiment 2: mandatory house rule, no position in the prompt
 
-Status: **ready to run, not started** (2026-10-01). Waiting for Sid's go-ahead.
+Status: **running overnight 2026-10-01/02** with the `checks` prompt variant (see "Log of the night").
 
 Part of the sacrifice-relay study (`../README.md`). Experiment 1 found that sharing the rule paid
 off for the team, and that training rewarded it, but the model did not learn to do it: reviews were
@@ -147,3 +147,32 @@ Persistence:
 - Weights go straight to HF (public codename repo; no rollouts or problem text) via the dev box's
   `/tmp`, never through the dev box's shared `/workspace`.
 - Rollouts and metrics are kept on the dev box.
+
+## Log of the night (2026-10-01/02)
+
+- **Pod swap.** The first pod (`n7gq0g825l2s5v`) had a GPU stuck in thermal slowdown: 86 °C at 345 MHz, against
+  1,980 MHz on the other GPU. Sampling ran 2.6× slower, about 26 min per step. It was replaced by `su24myzficgx5o`
+  and deleted (receipt in the orchestration dir).
+- **Experiment 2 as planned** (`out/old_pod/train_team_hot_gpu`). Steps 0–1 of team training gave no learning signal,
+  so the learner skipped both steps:
+  - 2 of 82 CI runs were reviews, and 0 of 32 playthroughs scored;
+  - submitters often wrote notes about the failed extended checks, but followers still submitted;
+  - their reasoning: a review is a sure 0, while a submit "has a chance". They did not realise the extended checks
+    cannot be passed by luck.
+- **Prompt variants** (Sid: try prompts that do not steer toward either CI mode). These are new `code_rules` settings,
+  each adding facts only (`configs/variants/`):
+  - `tools`: symmetric CI tool descriptions. The original says ci_review "spends" the CI run.
+  - `others`: "Other contributors also work in this repository, each on their own task."
+  - `checks`: the extended checks "check repository-specific conventions that cannot be worked out from the task,
+    the code or the tests".
+  - `all`: all three together.
+- **Variant test** (`out/variants/`). The untrained model ran on the first 8–16 repos × 4. The test was stopped early
+  because the eval server was overloaded (KV cache full, ~2.8k preemptions), and 22 of the 34 finished playthroughs
+  failed on client timeouts. The survivors lean towards short playthroughs. Among them:
+  - `checks`: 4/6 CI runs were reviews, and 3/4 playthroughs scored;
+  - current prompt: 2/10 and 1/4;
+  - `all`: 2/7 and 1/3;
+  - `tools`: 1/1 and 1/1;
+  - `others`: none survived.
+- **Decision:** train with `checks`, the least-changed variant with a clear signal (22:48 UTC, `out/train_team_checks`).
+  Its first steps re-measure the base rates without the timeout bias.
