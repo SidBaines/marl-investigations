@@ -105,7 +105,7 @@ prompt no longer states it.
 
 ## Dashboard
 
-`dashboard.yaml` (see below) adds one chart per measure: a line per position plus the average, with
+`dashboard.yaml` adds one chart per measure: a line per position plus the average, with
 smoothed and raw values. The measures are:
 - reached CI;
 - chose review;
