@@ -1,0 +1,10 @@
+# Experiment 2 training: the team-reward relay, otherwise as experiment 1's trial (flat lr 4e-5, a checkpoint
+# after every step, resumable with the same --out). steps is an upper bound; we stop when the evidence is in.
+run_name: sacrifice-relay-exp2-team
+protocol: relay_n4
+batch_tasks: 4
+group_size: 4
+credit: {reward_target: {contributor: team}}
+learners:
+  policy: {base_model: qwen3_8_27b, backend: local, rank: 32, learning_rate: 4.0e-5}
+checkpoint_every: 1
