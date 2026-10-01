@@ -1,7 +1,7 @@
-# Live dashboard for experiment 2 (marli dashboard; every key is a runtime setting). On the pod, from the
-# checkout root:
-#   uv run --no-sync marli dashboard experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/dashboard.yaml \
-#     "roots=[experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/out]" --out /workspace/dashboard
+# Live dashboard for experiment 2 (marli dashboard; every key is a runtime setting). `./run.sh dashboard`
+# serves it on the pod; anywhere else (dev box, laptop with synced runs):
+#   uv run --no-sync marli dashboard <this file> "roots=[<exp2>/out]" serve_port=8765 --out runs/dashboard
+# and open the logged URL (see docs/runbooks/pod.md, "Dashboard").
 # Per-position rates are out of all contributors at that position (e.g. "chose review" includes those
 # who never reached CI); check.py gives the conditional rates.
 title: Sacrifice relay, experiment 2

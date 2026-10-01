@@ -61,17 +61,16 @@ Every contributor gets the same message apart from the folder name.
   - in 59% of groups all four playthroughs would tie, which gives no learning signal.
 
   The new prompt states that submitting without the extended checks scores 0, so the untrained model
-  should review much more often than in experiment 1. The gate measures this before any training.
+  should review much more often than in experiment 1. Training's first steps measure this (below).
 
 ## Plan
 
-1. **Gate: base rates of the untrained model** (`./run.sh gate`, `configs/gate.yaml`).
-   - All 51 repos × 4 playthroughs (204), on the training server.
-   - `check.py` prints GO or STOP. **GO** requires both:
-     - at most 75% of the 51 groups have all playthroughs tied;
-     - at least 10% of playthroughs have anyone scoring.
-
-   On STOP, we do not train; we discuss first.
+1. **No separate gate** (Sid, 2026-10-01). Step 0 samples the untrained model (4 repos × 4
+   playthroughs), and groups whose playthroughs all tie make no update, so the first steps measure
+   the base rates. The early abort rule below stops the run if the signal is too sparse.
+   - `./run.sh gate` (`configs/gate.yaml`: all 51 repos × 4) remains available if a full base-rate
+     measurement is wanted later. Its GO rule: at most 75% of groups tied and at least 10% of
+     playthroughs scoring.
 2. **Training** (`./run.sh train`, `configs/train_team.yaml`).
    - Team reward, flat lr 4e-5, a checkpoint after every step.
    - The run is resumable with the same `--out`.
@@ -105,26 +104,29 @@ prompt no longer states it.
 
 ## Dashboard
 
-`dashboard.yaml` adds one chart per measure: a line per position plus the average, with
-smoothed and raw values. The measures are:
+A live page served from the pod (`./run.sh dashboard`; `dashboard.yaml` sets the charts), opened at
+`https://<pod-id>-8888.proxy.runpod.net/?key=<key>` from any browser. It refreshes itself every
+minute; nobody republishes it. It shows one chart per measure, with a line per position plus the
+average, smoothed and raw. The measures are:
 - reached CI;
 - chose review;
 - chose submit;
 - score (the average line is the team score);
 - started knowing the rule.
 
-It also shows the share of groups with no learning signal. It refreshes once per training step.
+It also shows the share of groups with no learning signal. New numbers arrive once per training
+step (about 14 min), and the current step's progress shows in between.
 
 ## Cost (2×H200 SXM SECURE, $9.18/hr)
 
 | Phase | Time | Cost |
 |---|---|---|
 | Pod setup (install, model download, vLLM start) | ~45 min | ~$7 |
-| Gate (204 playthroughs, ~7.5M generated tokens at 64 at a time) | ~1–1.5 h | ~$9–14 |
 | Training, ~30 steps | ~7 h | ~$64 |
 | Persist to HF and delete the pod | ~30 min | ~$5 |
-| **Gate only** | **~2.5 h** | **~$25** |
-| **Gate + 30 training steps** | **~9.5 h** | **~$90** |
+| **Stopped early by the abort rule after step 5** | **~2.75 h** | **~$25** |
+| **Full ~30-step run** | **~8.25 h** | **~$76** |
+| (Optional gate, if run: 204 playthroughs) | (+1–1.5 h) | (+$9–14) |
 
 ## Commands
 
@@ -132,10 +134,10 @@ On the pod, from the checkout root:
 
 ```bash
 S=experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule
-$S/run.sh serve     # vLLM: TP2 + MTP + sleep mode, 45% of each GPU
-$S/run.sh gate      # -> out/gate, out/gate_check.txt (GO/STOP)
-$S/run.sh train     # -> out/train_team; rerun to resume
-$S/run.sh check     # abort-rule numbers for the training run
+$S/run.sh serve       # vLLM: TP2 + MTP + sleep mode, 45% of each GPU
+$S/run.sh dashboard   # live page on port 8888; URL with key in out/dashboard/serve.json
+$S/run.sh train       # -> out/train_team; rerun to resume
+$S/run.sh check       # abort-rule numbers for the training run
 ```
 
 Inputs: `../out/repos_n4` (51 relay repos from experiment 1's filter) is copied to the pod from
