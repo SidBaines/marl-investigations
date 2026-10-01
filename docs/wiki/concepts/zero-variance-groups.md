@@ -4,7 +4,7 @@ title: Zero-variance groups at small G
 description: With a group baseline and small groups, most groups have identical rewards, so advantages are zero and the group is dropped; at B=2×G=2 the Tinker RL smoke's multi-session runs barely stepped and could not compare credit schemes.
 resource: src/marli/train/credit.py
 tags: [training, rl, credit-assignment, grpo, group-size, diagnostics]
-timestamp: 2026-09-24
+timestamp: 2026-10-01
 ---
 
 # Zero-variance groups at small G
@@ -37,6 +37,26 @@ baseline and `norm=mean`. Source: [smoke README](../../sources/tinker-rl-smoke.m
   datums.
 - So the smoke **cannot compare credit schemes**. The README says a pilot needs
   B≥8 and G≥4 per step.
+
+## Team reward on the relay: the drop logic checked [partial]
+
+In the sacrifice-relay trial ([Qwen3.8-27B](../entities/qwen3-8-27b.md) on the
+[local backend](../entities/local-backend.md), [relay](../entities/protocol-relay.md)
+N=4, team reward, 4 repos × G=4, 30 steps, one seed), `payoff.py`
+recomputed every advantage from the saved rollouts. It used the same rule:
+team score minus the leave-one-out group mean, with zero-variance groups
+dropped. The result matched the logged mean |advantage| exactly. This is an
+independent check of the credit pipeline under team reward
+([experiment 1](../../sources/sacrifice-relay-experiment-1.md)).
+
+- The share of groups dropped was not reported. [open]
+- Groups that survive can still carry too little signal for a rare choice.
+  There were 3–4 sacrifices per step, each sharing one advantage with every
+  token of its playthrough. That is a different way for a behaviour's gradient
+  to vanish (see [rewarded but not learned](rewarded-choice-not-learned.md)).
+- The study filtered problems to those solved in 1–3 of 4 attempts
+  ([DeepCoder](../entities/deepcoder.md)). The source gives no reason, but the
+  filter also keeps group rewards varied.
 
 ## Bugs this exposed (fixed in M3-5-fix, 70d7cd1)
 

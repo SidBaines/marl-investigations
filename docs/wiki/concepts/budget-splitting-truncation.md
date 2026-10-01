@@ -4,7 +4,7 @@ title: Budget splitting truncates thinking-model chains
 description: Splitting a fixed episode budget across parallel agents gives each agent less than a thinking model's typical chain, so peers run to their caps and accuracy falls (SC@4, swarm and debate at 32k with Qwen3.5-4B).
 resource: experiments/2026-09-23_compute-matched-baselines/configs/grid.yaml
 tags: [compute, budgets, thinking-models, protocols, swarm, debate]
-timestamp: 2026-09-24
+timestamp: 2026-10-01
 ---
 
 # Budget splitting truncates thinking-model chains
@@ -83,6 +83,16 @@ non-thinking model could change the ranking. None of these has been run.
   is "alarming for a 512-token direct cell and normal for a 4096-token
   thinking one" ([GRPOOptions](../../sources/scimt-grpo-options.md)). A single
   budget is not neutral across model types.
+
+## Related: the per-call cap in agentic coding
+
+The same model-budget interaction appears in a coding agent's loop. With
+[Qwen3.8-27B](../entities/qwen3-8-27b.md) (effort `medium`) at 12,288 tokens
+per agent and 6,144 per call, 22% of single-agent
+[DeepCoder](../entities/deepcoder.md) episodes ran out of budget. 95% of those
+had a turn cut off mid-thought at the per-call cap. Continuing 16 of them at a
+20,480-token total rescued 1. [partial] See
+[token budget binding](token-budget-binding.md).
 
 ## Tensions
 

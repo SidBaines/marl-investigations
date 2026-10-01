@@ -1,5 +1,84 @@
 # Wiki log
 
+## [2026-10-01] ingest | Sacrifice relay experiment 1 + throughput benchmark
+
+Second experiment ingest. Sources added, both from branch m6-harness @ 0bd4647
+(no PR yet):
+
+- [Sacrifice relay, experiment 1](../sources/sacrifice-relay-experiment-1.md)
+  (README; status pilot: one seed, one arm, 30 of 80 planned steps).
+- [Speed and memory benchmark](../sources/sacrifice-relay-throughput-bench.md)
+  (bench/README; status partial: direct measurements, each run once).
+
+Headline, recorded in the new synthesis
+[does RL teach sacrifice?](syntheses/does-rl-teach-sacrifice.md):
+
+- Not seen yet. Qwen3.8-27B ran on the local backend, on the code_rules relay
+  (N=4, m=3), with team reward for 30 steps of 4 repos × G=4.
+- Team score rose by +0.086 (z=2.3), mostly from more contributors reaching CI.
+- The sacrifice rate fell from 10.6% to 7.2% (z=−1.7), even though
+  sacrificing paid off for the team (+0.31 [+0.21, +0.42]) and the advantage
+  favoured it for contributors 1–2.
+- Reviews are triggered by an earlier contributor's note.
+
+Ops headline: on 2×H200, time-sharing the GPUs (vLLM TP2 + MTP + sleep mode,
+data-parallel learner) cut a relay step from ≈25 to ≈14–15 min. Logprobs stayed
+exact.
+
+Pages created:
+
+- concepts:
+  [rewarded-choice-not-learned](concepts/rewarded-choice-not-learned.md),
+  [reactive-information-sharing](concepts/reactive-information-sharing.md),
+  [token-budget-binding](concepts/token-budget-binding.md),
+  [speculative-decoding-mtp](concepts/speculative-decoding-mtp.md),
+  [gpu-time-sharing](concepts/gpu-time-sharing.md).
+- entities: [qwen3-8-27b](entities/qwen3-8-27b.md),
+  [local-backend](entities/local-backend.md),
+  [deepcoder](entities/deepcoder.md),
+  [env-code-rules](entities/env-code-rules.md) (a new "Environments" group in
+  the index), [protocol-relay](entities/protocol-relay.md).
+- synthesis: [does-rl-teach-sacrifice](syntheses/does-rl-teach-sacrifice.md).
+
+Pages updated:
+
+- [on-policy-check](concepts/on-policy-check.md): local-backend
+  `kl_sample_train`, IS ratio and adapter effect drift. The "local path not
+  measured" caveat is struck through.
+- [zero-variance-groups](concepts/zero-variance-groups.md): the payoff check's
+  recomputed advantages, including the drop, match the log under team reward.
+- [unanswered-episodes](concepts/unanswered-episodes.md): case 3, contributors
+  who never reach CI.
+- [budget-splitting-truncation](concepts/budget-splitting-truncation.md): the
+  per-call cap in agentic coding.
+- [tinker](entities/tinker.md): link to the local backend.
+- [qwen3-5-4b](entities/qwen3-5-4b.md): same architecture class now trained
+  locally at 27B.
+- [index.md](index.md).
+
+Tensions recorded:
+
+- The pre-registered early-vs-late readout (steps 0–9 vs 70–79) became 0–9 vs
+  20–29.
+- The pre-training gate (stop if the probe rate is below 3%) is not reported.
+- The sacrifice-rate denominator conditions on reaching CI, which itself rose.
+- The source names the per-call cap as the main constraint, while scimt found
+  that raising a thinking cap barely helps.
+- The registry still says Qwen3.8-27B `local: unverified`.
+- The DeepCoder build did not pass the `lcb_v6` exclude.
+- The learner-copy memory estimate in the serve config is superseded by the
+  measurement.
+
+Candidate follow-ups:
+
+- The individual-reward and solo arms, plus seeds.
+- 80 steps.
+- More choice events per step, or decision-level credit.
+- Effort `low` vs a larger per-call cap.
+- Read transcripts to check the "note" heuristic.
+- Report the share of zero-variance groups.
+- Update the qwen3_8_27b registry `local` field.
+
 ## [2026-09-24] ingest | Compute-matched baselines pilot + Tinker RL smoke
 
 First experiment ingest. Sources added:

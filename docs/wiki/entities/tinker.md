@@ -4,13 +4,15 @@ title: Tinker (backend)
 description: "Hosted sampling and LoRA-training backend; marli policy refs `tinker:<model>` and `backend: tinker` learners, with exact sampled ids, raw logprobs and versioned sampler sync."
 resource: src/marli/train/backends/tinker.py
 tags: [backend, tinker, training, sampling, lora]
-timestamp: 2026-09-24
+timestamp: 2026-10-01
 ---
 
 # Tinker (backend)
 
-One of marli's two training/sampling backends. The other is local: a PEFT
-multi-LoRA learner with vLLM on RunPod.
+One of marli's two training/sampling backends. The other is the
+[local backend](local-backend.md): a PEFT multi-LoRA learner with vLLM on
+RunPod. Qwen3.8-27B, the policy of the sacrifice-relay study, has no Tinker id
+in the registry (Tinker availability unverified), and that study ran locally.
 
 - **Sampling:** policy ref `tinker:<hf id>` (`src/marli/policy/tinker.py`)
   keeps the exact sampled ids and raw logprobs. Prompts are built by the
