@@ -8,8 +8,8 @@ default_max_tokens: 8192
 thinking: true
 tool_format: qwen3_5_xml
 tinker_id: null
-local: unverified
-notes: "Native context 262144; serving capped at 32768. Qwen3.5 architecture; local LoRA support awaits the GPU spike. Tinker availability is unverified."
+local: "yes"
+notes: "Native context 262144; serving capped at 32768. Qwen3.5 architecture; local LoRA training verified on 2xH200 (sacrifice-relay experiment 1, 2026-09-25: kl_sample_train <= 7.5e-4 over 30 steps). Tinker availability is unverified."
 lora:
   target_modules: [q_proj, k_proj, v_proj, o_proj, in_proj_qkv, in_proj_z, in_proj_a, in_proj_b, out_proj, gate_proj, up_proj, down_proj]
   export_key_map:

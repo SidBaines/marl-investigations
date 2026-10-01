@@ -399,7 +399,7 @@ def test_qwen38_registry_entry() -> None:
     assert model.architecture == "Qwen3_5ForConditionalGeneration"
     assert model.max_ctx == 32768 and model.default_max_tokens == 8192
     assert model.thinking is True and model.tool_format == "qwen3_5_xml"
-    assert model.local == "unverified"
+    assert model.local == "yes"
     assert model.tinker_id is model.tinker_max_ctx is model.tinker_prices is None
     assert model not in tinker_models()
     assert "262144" in model.notes
