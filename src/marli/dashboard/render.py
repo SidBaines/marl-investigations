@@ -30,6 +30,8 @@ STYLE = r"""
   --run: #16804f; --run-soft: #dcf1e6; --warn: #a35f00; --warn-soft: #f8ead3;
   --bad: #b3261e; --bad-soft: #f9e0dd; --pause: #5b57a6; --pause-soft: #e6e5f4;
   --done: #56636f; --done-soft: #e2e7ec;
+  --series-1: #2a78d6; --series-2: #ba8416; --series-3: #3b6f30; --series-4: #d55181;
+  --series-5: #4a3aa7; --series-6: #e34948;
   --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --cond: "IBM Plex Sans Condensed", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -44,6 +46,8 @@ STYLE = r"""
     --warn-soft: rgba(227, 165, 72, 0.15); --bad: #f2796f; --bad-soft: rgba(242, 121, 111, 0.15);
     --pause: #a9a5f0; --pause-soft: rgba(169, 165, 240, 0.15); --done: #93a1ad;
     --done-soft: rgba(147, 161, 173, 0.14);
+    --series-1: #3987e5; --series-2: #b98a24; --series-3: #2b7c37; --series-4: #d55181;
+    --series-5: #9085e9; --series-6: #e66767;
     color-scheme: dark;
   }
 }
@@ -55,6 +59,8 @@ STYLE = r"""
   --warn-soft: rgba(227, 165, 72, 0.15); --bad: #f2796f; --bad-soft: rgba(242, 121, 111, 0.15);
   --pause: #a9a5f0; --pause-soft: rgba(169, 165, 240, 0.15); --done: #93a1ad;
   --done-soft: rgba(147, 161, 173, 0.14);
+  --series-1: #3987e5; --series-2: #b98a24; --series-3: #2b7c37; --series-4: #d55181;
+  --series-5: #9085e9; --series-6: #e66767;
   color-scheme: dark;
 }
 body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.45 var(--sans); }
@@ -133,6 +139,29 @@ details.run > summary:focus-visible { outline: 2px solid var(--accent); outline-
 .spark svg { width: 100%; height: 46px; display: block; }
 .spark .range { font: 10.5px var(--mono); color: var(--ink-3); display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0 8px; }
 .spark .range span { white-space: nowrap; }
+.groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 330px), 1fr)); gap: 10px; min-width: 0; }
+.groups-cap { font-size: 12px; color: var(--ink-3); }
+.gchart { background: var(--surface-2); border: 1px solid var(--grid); border-radius: 6px; padding: 9px 12px 8px;
+  display: grid; gap: 6px; min-width: 0; }
+.gchart .t { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 10px; }
+.gchart .t b { font: 600 14px/1.3 var(--cond); letter-spacing: 0.01em; }
+.gchart .t span { font: 10.5px var(--mono); color: var(--ink-3); overflow-wrap: anywhere; }
+.legend { display: flex; flex-wrap: wrap; gap: 2px 12px; margin: 0; padding: 0; list-style: none; font-size: 12px; color: var(--ink-2); }
+.legend li { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.legend i { display: inline-block; width: 15px; border-top: 2px solid; border-radius: 1px; }
+.legend li.avg { color: var(--ink); font-weight: 500; }
+.legend li.avg i { border-top-width: 3px; }
+.legend .num { color: var(--ink); font-size: 11.5px; }
+.gplot { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 6px; }
+.gplot svg { width: 100%; height: 150px; display: block; }
+.gplot .yax { display: flex; flex-direction: column; justify-content: space-between; text-align: right;
+  font: 10.5px/12px var(--mono); color: var(--ink-3); }
+.gplot .xax { grid-column: 2; display: flex; justify-content: space-between; gap: 8px; font: 10.5px var(--mono); color: var(--ink-3); }
+.gplot .hit { fill: transparent; }
+.gplot .hit:hover { fill: var(--ink); fill-opacity: 0.06; }
+.hide-raw .g-raw { display: none; }
+.toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; margin-left: auto; }
+.toggle input { accent-color: var(--accent); margin: 0; }
 .scroll { overflow-x: auto; }
 table.grid { border-collapse: collapse; font-size: 12px; min-width: 100%; }
 table.grid th, table.grid td { padding: 4px 10px; border-bottom: 1px solid var(--grid); text-align: right;
@@ -166,6 +195,11 @@ SCRIPT = r"""
   var openRuns = new Set();
   try { JSON.parse(localStorage.getItem("marli-dash-open") || "[]").forEach(function (p) { openRuns.add(p); }); } catch (e) {}
   var SVGNS = "http://www.w3.org/2000/svg";
+  var showRaw = true;
+  try { showRaw = localStorage.getItem("marli-dash-raw") !== "0"; } catch (e) {}
+  function applyRaw() { app.classList.toggle("hide-raw", !showRaw); }
+  applyRaw();
+  var NAMES = { "credit/no_signal_share": "Share of groups with no learning signal (all playthroughs tied)" };
 
   function h(tag, attrs) {
     var node = document.createElement(tag);
@@ -230,6 +264,7 @@ SCRIPT = r"""
     return m;
   }
   function label(key) {
+    if (NAMES[key]) return NAMES[key];
     return key.replace(/^grades\/_system\//, "system · ").replace(/^grades\//, "").replace(/^learner\//, "")
       .replace(/_seconds$/, " (s)").split("/").join(" · ").replace(/_/g, " ");
   }
@@ -262,6 +297,95 @@ SCRIPT = r"""
       h("div", { cls: "range" },
         h("span", { text: fmt(Math.min.apply(null, ys)) + " – " + fmt(Math.max.apply(null, ys)) }),
         h("span", { text: pts.length > 1 ? "steps " + x0 + "–" + x1 : "step " + x0 })));
+  }
+
+  function groupChart(group, smoothN) {
+    var W = 300, H = 150, P = 6;
+    var series = group.series || [];
+    var all = [], steps = {};
+    series.forEach(function (sr) {
+      sr.points.forEach(function (p) { all.push(p[1]); steps[p[0]] = 1; });
+      sr.smooth.forEach(function (p) { all.push(p[1]); });
+    });
+    var xs = Object.keys(steps).map(Number).sort(function (a, b) { return a - b; });
+    var lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
+    var ylo = lo, yhi = hi;
+    if (yhi === ylo) { var pad = Math.abs(yhi) * 0.1 || 1; ylo -= pad; yhi += pad; }
+    var x0 = xs[0], x1 = xs[xs.length - 1];
+    function X(x) { return x1 === x0 ? W / 2 : ((x - x0) / (x1 - x0)) * (W - 2 * P) + P; }
+    function Y(y) { return H - P - ((y - ylo) / (yhi - ylo)) * (H - 2 * P); }
+    function path(pts) { return pts.map(function (p, i) { return (i ? "L" : "M") + X(p[0]).toFixed(1) + " " + Y(p[1]).toFixed(1); }).join(" "); }
+    function color(sr) { return sr.agent === "_system" ? "var(--ink)" : "var(--series-" + ((sr.slot || 0) % 6 + 1) + ")"; }
+    function dash(sr) { return sr.agent !== "_system" && sr.slot >= 6 ? "5 3" : null; }
+    var svg = s("svg", { viewBox: "0 0 " + W + " " + H, preserveAspectRatio: "none", role: "img",
+      "aria-label": group.title + ": " + series.map(function (sr) { return sr.label; }).join(", ") + " over " + xs.length + " steps" });
+    [0, 0.5, 1].forEach(function (f) {
+      var y = P + f * (H - 2 * P);
+      svg.appendChild(s("line", { x1: 0, x2: W, y1: y, y2: y, stroke: "var(--grid)", "stroke-width": 1, "vector-effect": "non-scaling-stroke" }));
+    });
+    var base = { fill: "none", "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round", "stroke-linecap": "round" };
+    function line(sr, pts, extra) {
+      var attrs = Object.assign({ d: path(pts), stroke: color(sr) }, base, extra);
+      if (dash(sr)) attrs["stroke-dasharray"] = dash(sr);
+      return s("path", attrs);
+    }
+    if (smoothN > 1) series.forEach(function (sr) {
+      if (sr.points.length > 1) svg.appendChild(line(sr, sr.points, { "stroke-width": 1, "stroke-opacity": 0.4, "class": "g-raw" }));
+    });
+    series.forEach(function (sr) {
+      var avg = sr.agent === "_system";
+      if (sr.smooth.length > 1) svg.appendChild(line(sr, sr.smooth, { "stroke-width": avg ? 3 : 2 }));
+      var last = sr.smooth[sr.smooth.length - 1];
+      var dx = X(last[0]).toFixed(1), dy = Y(last[1]).toFixed(1);
+      svg.appendChild(s("path", { d: "M" + dx + " " + dy + " L" + dx + " " + dy, stroke: color(sr), "stroke-width": avg ? 7 : 6, "stroke-linecap": "round", "vector-effect": "non-scaling-stroke" }));
+    });
+    // One invisible column per step; its tooltip lists every line's value there.
+    var lookup = series.map(function (sr) {
+      var raw = {}, sm = {};
+      sr.points.forEach(function (p) { raw[p[0]] = p[1]; });
+      sr.smooth.forEach(function (p) { sm[p[0]] = p[1]; });
+      return { label: sr.label, raw: raw, sm: sm };
+    });
+    xs.forEach(function (x, i) {
+      var left = i ? (X(xs[i - 1]) + X(x)) / 2 : 0, right = i < xs.length - 1 ? (X(x) + X(xs[i + 1])) / 2 : W;
+      var rect = s("rect", { x: left.toFixed(1), y: 0, width: Math.max(0.5, right - left).toFixed(1), height: H, "class": "hit" });
+      var lines = ["step " + x];
+      lookup.forEach(function (row) {
+        if (!(x in row.raw)) return;
+        lines.push(row.label + ": " + fmt(row.sm[x]) + (smoothN > 1 ? " (this step " + fmt(row.raw[x]) + ")" : ""));
+      });
+      var title = s("title", {});
+      title.textContent = lines.join("\n");
+      rect.appendChild(title);
+      svg.appendChild(rect);
+    });
+    var legend = h("ul", { cls: "legend" });
+    series.forEach(function (sr) {
+      var sw = h("i");
+      sw.style.borderTopColor = color(sr);
+      if (dash(sr)) sw.style.borderTopStyle = "dashed";
+      legend.appendChild(h("li", { cls: sr.agent === "_system" ? "avg" : null }, sw, sr.label + " ",
+        h("span", { cls: "num", text: fmt(sr.smooth[sr.smooth.length - 1][1]) })));
+    });
+    return h("div", { cls: "gchart" },
+      h("div", { cls: "t" }, h("b", { text: group.title }), h("span", { text: group.component })),
+      legend,
+      h("div", { cls: "gplot" },
+        h("div", { cls: "yax", "aria-hidden": "true" }, h("span", { text: fmt(yhi) }), h("span", { text: fmt(ylo) })),
+        svg,
+        h("div", { cls: "xax" }, h("span", { text: "step " + x0 }), h("span", { text: xs.length > 1 ? "step " + x1 : "" }))));
+  }
+
+  function groupCharts(train) {
+    var groups = (train && train.groups) || [];
+    if (!groups.length) return null;
+    var n = snap.smooth_steps || 1;
+    var grid = h("div", { cls: "groups" });
+    groups.forEach(function (g) { grid.appendChild(groupChart(g, n)); });
+    var cap = n > 1
+      ? "Solid lines: average of the last " + n + " steps. Faint lines: each step on its own. Thick line: the average over agents. Legend numbers are the latest solid-line values."
+      : "Each step's value. Thick line: the average over agents. Legend numbers are the latest values.";
+    return h("div", { style: "display:grid;gap:8px" }, h("div", { cls: "groups-cap", text: cap }), grid);
   }
 
   function facts(obj) {
@@ -349,6 +473,8 @@ SCRIPT = r"""
       h("div", { cls: "cell num" }, h("small", { text: "updated" }), updated));
     d.appendChild(sum);
     var detail = h("div", { cls: "detail" });
+    var gc = run.train ? groupCharts(run.train) : null;
+    if (gc) detail.appendChild(gc);
     var f = facts(Object.assign({ path: run.path }, run.facts || {}));
     if (f) detail.appendChild(f);
     if (run.train) detail.appendChild(trainDetail(run.train));
@@ -448,6 +574,16 @@ SCRIPT = r"""
     var runs = snap.runs || [];
     var runsSec = h("section", { cls: "section" }, h("div", { cls: "section-head" }, h("h2", { text: "Runs" }),
       h("span", { cls: "muted num", style: "font-size:12px", text: Object.keys(snap.counts || {}).map(function (k) { return snap.counts[k] + " " + k; }).join(" · ") })));
+    if (runs.some(function (r) { return r.train && r.train.groups && r.train.groups.length; })) {
+      var cb = h("input", { type: "checkbox" });
+      cb.checked = showRaw;
+      cb.addEventListener("change", function () {
+        showRaw = cb.checked;
+        try { localStorage.setItem("marli-dash-raw", showRaw ? "1" : "0"); } catch (e) {}
+        applyRaw();
+      });
+      runsSec.firstChild.appendChild(h("label", { cls: "toggle" }, cb, "show raw per-step values"));
+    }
     if (!runs.length) {
       runsSec.appendChild(h("div", { cls: "panel empty", text: "No run directories under " + (snap.roots || []).join(", ") + " yet. A run appears once a marli verb writes its .marli/run.json." }));
     }

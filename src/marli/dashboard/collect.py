@@ -25,7 +25,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -52,6 +52,8 @@ PRUNE = frozenset(
 MAX_DEPTH = 8
 RECENT_ENDS = 256  # episode completion times kept per file for rate estimates
 TRAIN_KEYS = ("loss", "grad_norm", "kl_sample_train", "n_datums", "n_tokens", "n_action_tokens")
+SYSTEM_AGENT = "_system"  # grade rows' mean over agents; drawn last, as "average"
+NO_SIGNAL_SHARE = "credit/no_signal_share"  # zero_variance_groups / n_groups, derived per step
 SERVER_GAUGES = {
     "vllm:num_requests_running": "running",
     "vllm:num_requests_waiting": "waiting",
@@ -415,7 +417,16 @@ def _eval_rollout(run: dict[str, Any], path: Path, cache: dict[str, Any], now: f
     run["_refs"] = _server_refs(config)
 
 
-def _train_rl(run: dict[str, Any], path: Path, cache: dict[str, Any], now: float) -> None:
+def _train_rl(
+    run: dict[str, Any],
+    path: Path,
+    cache: dict[str, Any],
+    now: float,
+    *,
+    grouped: Mapping[str, str] | None = None,
+    agent_labels: Mapping[str, str] | None = None,
+    smooth_steps: int = 5,
+) -> None:
     config = _read_yaml(path / "config.yaml")
     progress = _read_json(path / "progress.json") or {}
     steps = (
@@ -458,10 +469,13 @@ def _train_rl(run: dict[str, Any], path: Path, cache: dict[str, Any], now: float
             rollout_points.append(point)
     points = points or rollout_points
     curves: dict[str, list[list[float]]] = {}
-    for point in points:
+    for point in points:  # cached fold state: read, never mutate
         for key, value in point.items():
             if key != "step":
                 curves.setdefault(key, []).append([point["step"], value])
+        zero, groups = point.get("credit/zero_variance_groups"), point.get("credit/n_groups")
+        if zero is not None and groups is not None and groups > 0:
+            curves.setdefault(NO_SIGNAL_SHARE, []).append([point["step"], zero / groups])
     run["progress"] = {
         "done": completed + 1,
         "total": steps,
@@ -482,6 +496,8 @@ def _train_rl(run: dict[str, Any], path: Path, cache: dict[str, Any], now: float
         "current_step": current,
         "mean_step_s": mean_step,
     }
+    if grouped:
+        run["train"]["groups"] = grade_groups(curves, grouped, agent_labels or {}, smooth_steps)
     run["facts"] = _config_facts(
         config,
         (
@@ -515,10 +531,84 @@ def _train_rl(run: dict[str, Any], path: Path, cache: dict[str, Any], now: float
     run["_refs"] = _server_refs(config)
 
 
+def _natural(text: str) -> list[Any]:
+    """Sort key ordering embedded numbers by value: contrib2 before contrib10."""
+    # re.split with a capture group alternates text (even) and digit runs (odd).
+    return [int(part) if i % 2 else part for i, part in enumerate(re.split(r"(\d+)", text))]
+
+
+def trailing_mean(points: list[list[float]], window: int) -> list[list[float]]:
+    """Mean of each point's value and up to ``window - 1`` points before it."""
+    values = [value for _, value in points]
+    return [
+        [step, sum(values[max(0, i - window + 1) : i + 1]) / min(i + 1, window)]
+        for i, (step, _) in enumerate(points)
+    ]
+
+
+def grade_groups(
+    curves: Mapping[str, list[list[float]]],
+    grouped: Mapping[str, str],
+    agent_labels: Mapping[str, str],
+    smooth_steps: int,
+) -> list[dict[str, Any]]:
+    """One chart per grade component: a series per agent, then the average.
+
+    ``slot`` is the agent's index among every agent charted for this run, so an
+    agent keeps its colour in charts where another agent has no data. Components
+    without any ``grades/<agent>/<component>`` curve are left out.
+    """
+    if smooth_steps < 1:
+        raise ValueError("smooth_steps must be a positive integer")
+    found: dict[str, dict[str, list[list[float]]]] = {}
+    for component in grouped:
+        suffix = "/" + component
+        found[component] = {
+            key[len("grades/") : -len(suffix)]: points
+            for key, points in curves.items()
+            if key.startswith("grades/")
+            and key.endswith(suffix)
+            and len(key) > len("grades/") + len(suffix)
+            and points
+        }
+    agents = sorted(
+        {agent for series in found.values() for agent in series if agent != SYSTEM_AGENT},
+        key=_natural,
+    )
+    slots = {agent: i for i, agent in enumerate(agents)}
+    groups = []
+    for component, title in grouped.items():
+        series = found[component]
+        order = [agent for agent in agents if agent in series]
+        order += [SYSTEM_AGENT] if SYSTEM_AGENT in series else []
+        if not order:
+            continue
+        groups.append(
+            {
+                "component": component,
+                "title": title,
+                "series": [
+                    {
+                        "agent": agent,
+                        "label": "average"
+                        if agent == SYSTEM_AGENT
+                        else agent_labels.get(agent, agent),
+                        "slot": slots.get(agent),
+                        "points": series[agent],
+                        "smooth": trailing_mean(series[agent], smooth_steps),
+                    }
+                    for agent in order
+                ],
+            }
+        )
+    return groups
+
+
 def _key_curves(curves: dict[str, Any]) -> list[str]:
     """The small multiples shown first: rewards, team grades, off-policy gap, timing."""
     order: list[str] = []
     order += sorted(k for k in curves if k.startswith("reward/"))
+    order += [k for k in (NO_SIGNAL_SHARE,) if k in curves]
     order += [k for k in ("accuracy",) if k in curves]
     order += sorted(k for k in curves if k.startswith("grades/_system/") and not k.endswith("/n"))
     order += sorted(
@@ -754,8 +844,18 @@ def collect(
     title: str = "marli runs",
     refresh_s: float = 60.0,
     exclude: Iterable[Path] = (),
+    grouped: Mapping[str, str] | None = None,
+    agent_labels: Mapping[str, str] | None = None,
+    smooth_steps: int = 5,
 ) -> dict[str, Any]:
-    """Snapshot every run under ``roots``; ``cache`` is updated in place."""
+    """Snapshot every run under ``roots``; ``cache`` is updated in place.
+
+    ``grouped`` (grade component -> chart title) adds ``train.groups`` to train
+    runs: per component, one series per agent (labelled from ``agent_labels``)
+    plus the average, each with a trailing ``smooth_steps``-point mean.
+    """
+    if type(smooth_steps) is not int or smooth_steps < 1:
+        raise ValueError("smooth_steps must be a positive integer")
     cache = cache if cache is not None else {}
     files = cache.setdefault("files", {})
     now = time.time()
@@ -824,7 +924,15 @@ def collect(
             if kind == "eval rollout":
                 _eval_rollout(run, path, files, now)
             elif kind == "train rl":
-                _train_rl(run, path, files, now)
+                _train_rl(
+                    run,
+                    path,
+                    files,
+                    now,
+                    grouped=grouped,
+                    agent_labels=agent_labels,
+                    smooth_steps=smooth_steps,
+                )
             elif manifest is not None:
                 _data_run(run, path)
         except Exception as exc:  # one odd run dir must not blank the whole page
@@ -845,6 +953,7 @@ def collect(
         "roots": [_display(root, cwd) for root in root_paths],
         "refresh_s": refresh_s,
         "stale_s": stale_s,
+        "smooth_steps": smooth_steps,
         "gpus": gpu_rows,
         "servers": servers,
         "runs": runs,

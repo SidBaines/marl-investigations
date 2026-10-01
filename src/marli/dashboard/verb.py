@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from marli.config import runtime_field
-from marli.dashboard.collect import collect
+from marli.dashboard.collect import SYSTEM_AGENT, collect
 from marli.dashboard.render import render
 from marli.errors import ConfigError
 from marli.handles import Handle, atomic_write_text, register_handle
@@ -47,6 +47,18 @@ class DashboardConfig:
     gpus: bool = runtime_field(True, help="query nvidia-smi when present")
     watch_s: float = runtime_field(0.0, help="> 0: keep refreshing every watch_s s until SIGINT")
     max_refreshes: int | None = runtime_field(None, help="stop watching after N refreshes")
+    grouped: dict[str, str] = runtime_field(
+        default_factory=dict,
+        help="train rl: grade component -> chart title; one chart per component with a line"
+        " per agent plus the average, in mapping order (empty: no such charts)",
+    )
+    agent_labels: dict[str, str] = runtime_field(
+        default_factory=dict,
+        help="legend label per agent id in grouped charts (default: the id; _system is 'average')",
+    )
+    smooth_steps: int = runtime_field(
+        5, help="grouped charts: trailing rolling-mean window in steps (1 = no smoothing)"
+    )
 
     def __post_init__(self) -> None:
         if not self.roots or not all(isinstance(root, str) and root for root in self.roots):
@@ -65,6 +77,19 @@ class DashboardConfig:
             type(self.max_refreshes) is not int or self.max_refreshes < 1
         ):
             raise ConfigError("max_refreshes must be a positive integer or None")
+        for name in ("grouped", "agent_labels"):
+            mapping = getattr(self, name)
+            if not isinstance(mapping, dict) or not all(
+                isinstance(key, str) and key and isinstance(value, str) and value.strip()
+                for key, value in mapping.items()
+            ):
+                raise ConfigError(f"{name} must map nonempty strings to nonempty strings")
+        if any("/" in component for component in self.grouped):
+            raise ConfigError("grouped keys are grade component names and cannot contain '/'")
+        if SYSTEM_AGENT in self.agent_labels:
+            raise ConfigError(f"agent_labels cannot relabel {SYSTEM_AGENT} (always 'average')")
+        if type(self.smooth_steps) is not int or self.smooth_steps < 1:
+            raise ConfigError("smooth_steps must be a positive integer")
 
 
 @register_handle
@@ -141,6 +166,9 @@ async def dashboard(cfg: DashboardConfig, run: RunDir) -> Dashboard:
                 title=cfg.title,
                 refresh_s=float(cfg.refresh_s),
                 exclude=(run.out,),
+                grouped=cfg.grouped,
+                agent_labels=cfg.agent_labels,
+                smooth_steps=cfg.smooth_steps,
             )
             refreshes += 1
             snapshot["refresh"] = refreshes

@@ -18,8 +18,9 @@ from test_train_loop import config as train_config
 from test_train_loop import fake_setup as fake_setup
 
 from marli.cli.main import main
+from marli.config import compose
 from marli.dashboard import collect as collect_module
-from marli.dashboard.collect import collect, fold_jsonl
+from marli.dashboard.collect import collect, fold_jsonl, trailing_mean
 from marli.dashboard.render import render
 from marli.dashboard.verb import DashboardConfig
 from marli.data.filter import FilterConfig
@@ -299,7 +300,23 @@ def test_cli_prints_one_json_line(
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"roots": []}, {"stale_s": 0}, {"watch_s": -1}, {"max_refreshes": 0}, {"refresh_s": True}],
+    [
+        {"roots": []},
+        {"stale_s": 0},
+        {"watch_s": -1},
+        {"max_refreshes": 0},
+        {"refresh_s": True},
+        {"grouped": ["score"]},
+        {"grouped": {"score": ""}},
+        {"grouped": {"": "Score"}},
+        {"grouped": {"a/score": "Score"}},
+        {"grouped": {"score": 1}},
+        {"agent_labels": {"contrib0": " "}},
+        {"agent_labels": {"_system": "team"}},
+        {"smooth_steps": 0},
+        {"smooth_steps": 2.5},
+        {"smooth_steps": True},
+    ],
 )
 def test_invalid_config(overrides: dict[str, Any]) -> None:
     with pytest.raises(ConfigError):
@@ -311,3 +328,194 @@ def test_render_escapes_script_breakout() -> None:
     page = render(snapshot)
     assert page.startswith("<title>&lt;b&gt;t&lt;/b&gt;</title>")
     assert "</script><x>" not in page
+
+
+# ---------------------------------------------------------------- grouped per-agent charts
+
+RELAY_SCORES = {"contrib0": [0, 1, 2, 3], "contrib2": [4, 0, 2, 6], "contrib10": [1, 1, 1, 1]}
+RELAY_CREDIT = [
+    {"zero_variance_groups": 1, "n_groups": 4},
+    {"zero_variance_groups": 0, "n_groups": 0},  # no groups: no share
+    {"zero_variance_groups": 2},  # n_groups missing: no share
+    {"zero_variance_groups": 3, "n_groups": 3, "action_tokens": {"policy": 9}},
+]
+
+
+def relay_row(step: int) -> dict[str, Any]:
+    """A metrics.jsonl row; contrib2 has no ``probed`` grade."""
+    grades: dict[str, dict[str, float]] = {
+        agent: {"score": scores[step], "n": 4} for agent, scores in RELAY_SCORES.items()
+    }
+    grades["contrib0"]["probed"] = step / 4
+    grades["contrib10"]["probed"] = 1 - step / 4
+    grades["_system"] = {
+        "score": sum(scores[step] for scores in RELAY_SCORES.values()) / 3,
+        "probed": 0.5,
+        "n": 12,
+    }
+    return {
+        "step": step,
+        "accuracy": 0.5,
+        "reward_mean": {"contributor": step / 10},
+        "grades": grades,
+        "credit": RELAY_CREDIT[step] if step < len(RELAY_CREDIT) else {},
+        "sample_seconds": 10.0,
+        "train_seconds": 5.0,
+    }
+
+
+def relay_run(tmp_path: Path, steps: int = 4, name: str = "relay") -> Path:
+    path = tmp_path / "experiments" / "2026-01-01_relay" / "out" / name
+    (path / ".marli").mkdir(parents=True)
+    record = {"kind": "train rl", "manifest": "checkpoint.json", "config_hash": "c" * 64}
+    (path / ".marli" / "run.json").write_text(json.dumps(record))
+    (path / "config.yaml").write_text("steps: 10\nbatch_tasks: 2\ngroup_size: 2\n")
+    (path / "metrics.jsonl").write_text(
+        "".join(json.dumps(relay_row(i)) + "\n" for i in range(steps))
+    )
+    return path
+
+
+GROUPED = {"score": "Score (average = team score)", "probed": "Chose review", "absent": "Nobody"}
+
+
+def test_grouped_config_from_yaml_keeps_order(tmp_path: Path) -> None:
+    path = tmp_path / "dash.yaml"
+    path.write_text(
+        "grouped:\n  submitted: Chose submit\n  probed: Chose review\n"
+        "agent_labels:\n  contrib0: 1st\nsmooth_steps: 3\n"
+    )
+    cfg = compose(DashboardConfig, path, overrides=["grouped.ran_ci=Ran CI", "agent_labels.c1=2nd"])
+    assert list(cfg.grouped) == ["submitted", "probed", "ran_ci"]
+    assert cfg.agent_labels == {"contrib0": "1st", "c1": "2nd"} and cfg.smooth_steps == 3
+    assert DashboardConfig().grouped == {} and DashboardConfig().smooth_steps == 5
+
+
+async def test_grouped_charts_one_series_per_agent_then_average(tmp_path: Path) -> None:
+    relay_run(tmp_path)
+    cfg = dash(tmp_path, grouped=GROUPED, agent_labels={"contrib0": "1st"}, smooth_steps=3)
+    await run_verb("dashboard", cfg, out=tmp_path / "dash")
+    snapshot = json.loads((tmp_path / "dash" / "snapshot.json").read_text())
+    assert snapshot["smooth_steps"] == 3
+    groups = by_name(snapshot)["relay"]["train"]["groups"]
+    # Mapping order, not alphabetical; a component nobody has is left out.
+    assert [(g["component"], g["title"]) for g in groups] == [
+        ("score", "Score (average = team score)"),
+        ("probed", "Chose review"),
+    ]
+    score, probed = groups
+    assert [(s["agent"], s["label"], s["slot"]) for s in score["series"]] == [
+        ("contrib0", "1st", 0),
+        ("contrib2", "contrib2", 1),
+        ("contrib10", "contrib10", 2),
+        ("_system", "average", None),
+    ]
+    # contrib2 has no probed grade; contrib10 keeps its colour slot anyway.
+    assert [(s["agent"], s["slot"]) for s in probed["series"]] == [
+        ("contrib0", 0),
+        ("contrib10", 2),
+        ("_system", None),
+    ]
+    series = {s["agent"]: s for s in score["series"]}
+    assert series["contrib0"]["points"] == [[0, 0], [1, 1], [2, 2], [3, 3]]
+    assert [v for _, v in series["contrib0"]["smooth"]] == [0, 0.5, 1, 2]
+    assert [v for _, v in series["contrib2"]["smooth"]] == pytest.approx([4, 2, 2, 8 / 3], abs=1e-6)
+    assert [step for step, _ in series["contrib2"]["smooth"]] == [0, 1, 2, 3]
+    assert [v for _, v in series["_system"]["points"]] == pytest.approx(
+        [5 / 3, 2 / 3, 5 / 3, 10 / 3]
+    )
+    for name in ("snapshot.json", "standalone.html"):
+        text = (tmp_path / "dash" / name).read_text()
+        assert "Chose review" in text and "1st" in text and "average" in text
+
+
+def test_trailing_mean_windows() -> None:
+    points = [[0, 4.0], [1, 0.0], [2, 2.0], [5, 6.0]]
+    assert trailing_mean(points, 1) == points
+    assert trailing_mean(points, 3) == [[0, 4.0], [1, 2.0], [2, 2.0], [5, pytest.approx(8 / 3)]]
+    assert trailing_mean(points, 10) == [[0, 4.0], [1, 2.0], [2, 2.0], [5, 3.0]]
+    assert trailing_mean([], 3) == []
+
+
+def test_smooth_window_one_is_the_raw_series(tmp_path: Path) -> None:
+    relay_run(tmp_path)
+    snapshot = collect(
+        [str(tmp_path / "experiments")],
+        probe_servers=False,
+        gpus=False,
+        grouped=GROUPED,
+        smooth_steps=1,
+    )
+    for group in by_name(snapshot)["relay"]["train"]["groups"]:
+        for series in group["series"]:
+            assert series["smooth"] == series["points"]
+    with pytest.raises(ValueError):
+        collect([str(tmp_path / "experiments")], gpus=False, grouped=GROUPED, smooth_steps=0)
+
+
+def test_no_signal_share_is_derived_and_listed_after_rewards(tmp_path: Path) -> None:
+    relay_run(tmp_path)
+    train = by_name(collect([str(tmp_path / "experiments")], probe_servers=False, gpus=False))[
+        "relay"
+    ]["train"]
+    # Steps 1 (n_groups 0) and 2 (n_groups missing) have no share.
+    assert train["curves"]["credit/no_signal_share"] == [[0, 0.25], [3, 1.0]]
+    assert train["key_curves"][:3] == ["reward/contributor", "credit/no_signal_share", "accuracy"]
+    assert "groups" not in train  # grouped is empty: the old structure
+
+
+def test_no_signal_share_skipped_without_group_counts(tmp_path: Path) -> None:
+    path = relay_run(tmp_path)
+    rows = [relay_row(i) for i in range(3)]
+    rows[0]["credit"] = {"zero_variance_groups": 2, "n_groups": 0}
+    rows[1]["credit"] = {"zero_variance_groups": 2}
+    rows[2].pop("credit")
+    (path / "metrics.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    train = by_name(collect([str(tmp_path / "experiments")], probe_servers=False, gpus=False))[
+        "relay"
+    ]["train"]
+    assert "credit/no_signal_share" not in train["curves"]
+    assert "credit/no_signal_share" not in train["key_curves"]
+
+
+def test_grouped_charts_follow_appended_rows_incrementally(tmp_path: Path) -> None:
+    path = relay_run(tmp_path, steps=3)
+    cache: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {"probe_servers": False, "gpus": False, "grouped": GROUPED}
+    roots = [str(tmp_path / "experiments")]
+    first = by_name(collect(roots, cache=cache, **kwargs))["relay"]["train"]
+    assert len(first["groups"][0]["series"][0]["points"]) == 3
+    with (path / "metrics.jsonl").open("a") as stream:
+        stream.write(json.dumps(relay_row(3)) + "\n")
+    second = by_name(collect(roots, cache=cache, **kwargs))["relay"]["train"]
+    entry = cache["files"][str((path / "metrics.jsonl").resolve())]
+    assert entry["parsed"] == 1 and entry["rows"] == 4
+    assert [len(s["points"]) for s in second["groups"][0]["series"]] == [4, 4, 4, 4]
+    assert second["curves"]["credit/no_signal_share"] == [[0, 0.25], [3, 1.0]]
+    # Derived values never leak into the cached fold state.
+    assert all("credit/no_signal_share" not in p for p in entry["state"]["points"])
+
+
+def test_render_draws_grouped_charts_and_raw_toggle(tmp_path: Path) -> None:
+    relay_run(tmp_path)
+    snapshot = collect(
+        [str(tmp_path / "experiments")],
+        probe_servers=False,
+        gpus=False,
+        grouped=GROUPED,
+        agent_labels={"contrib0": "1st", "contrib2": "3rd"},
+    )
+    for page in (render(snapshot), render(snapshot, standalone=True)):
+        embedded = json.loads(page.split('id="snapshot">', 1)[1].split("</script>", 1)[0])
+        groups = by_name(embedded)["relay"]["train"]["groups"]
+        assert [g["title"] for g in groups] == ["Score (average = team score)", "Chose review"]
+        assert [s["label"] for s in groups[0]["series"]] == ["1st", "3rd", "contrib10", "average"]
+        for text in ("Score (average = team score)", "Chose review", '"1st"', '"3rd"'):
+            assert text in page
+        assert "show raw per-step values" in page and "marli-dash-raw" in page
+        assert "Share of groups with no learning signal (all playthroughs tied)" in page
+        # Six series colours, each with light and both dark-mode definitions.
+        for slot in range(1, 7):
+            assert page.count(f"--series-{slot}:") == 3
+    plain = collect([str(tmp_path / "experiments")], probe_servers=False, gpus=False)
+    assert "groups" not in by_name(plain)["relay"]["train"]

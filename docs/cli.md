@@ -56,6 +56,9 @@ Manifest produced: `dashboard.json`.
 | gpus | bool | true | false | true | false | query nvidia-smi when present |
 | watch_s | float | 0.0 | false | true | false | > 0: keep refreshing every watch_s s until SIGINT |
 | max_refreshes | int \| None | null | false | true | false | stop watching after N refreshes |
+| grouped | dict[str, str] | {} | false | true | false | train rl: grade component -> chart title; one chart per component with a line per agent plus the average, in mapping order (empty: no such charts) |
+| agent_labels | dict[str, str] | {} | false | true | false | legend label per agent id in grouped charts (default: the id; _system is 'average') |
+| smooth_steps | int | 5 | false | true | false | grouped charts: trailing rolling-mean window in steps (1 = no smoothing) |
 
 ### data build
 
