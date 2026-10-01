@@ -1,7 +1,8 @@
 # Sacrifice relay: do agents learn to give up their own reward for later agents?
 
-Status: overnight trial done (2026-09-26); the full three-arm runs are not started. This is a signs-of-life study: one seed and three
-runs.
+Status: **experiment 1 wrapped up (2026-10-01).** Experiment 1 is the overnight team-reward trial
+below (30 steps, one seed), plus the payoff check. The three-arm runs planned under "Runs" were not
+started; the next experiment changes the setup (no position in the prompt, 0/1 scoring).
 
 ## Question
 
@@ -169,6 +170,58 @@ Sacrifice rate by position (early → late):
   - The token budget still binds: about 30% of contributors never reach CI.
   - One step's gradient mixes 16 relays, so a single sacrifice decision is a
     weak signal under team reward.
+
+### Payoff check: did sacrificing pay off, and what did training reward? (2026-10-01)
+
+`payoff.py out/trial_team` (full output: `out/trial_team_analysis/payoff.txt`). It compares
+playthroughs of the same repo in the same step (one group = 4 playthroughs), so problem
+difficulty cancels. 480 playthroughs in 120 groups; 103 contain a sacrifice. Intervals are
+95% bootstrap intervals.
+
+**Sacrificing paid off for the team.** Team score, sacrifice playthrough minus the same group's
+no-sacrifice playthroughs:
+
+| First sacrifice by | Difference | Groups |
+|---|---|---|
+| any contributor | +0.31 [+0.21, +0.42] | 72 |
+| contributor 1 | +0.62 [+0.30, +0.97] | 11 |
+| contributor 2 | +0.46 [+0.30, +0.60] | 40 |
+| contributor 3 | +0.12 [+0.01, +0.24] | 26 |
+| contributor 4 | −0.13 [−0.22, −0.04] | 10 |
+
+- The sacrificer loses 0.5–0.75 points; each later contributor gains 0.9–1.4. This matches a
+  back-of-envelope estimate from observed rates (+0.74, +0.49, +0.20, −0.11).
+- **The hand-off works.** For 87 of 93 sacrifices by contributors 1–3 (94%), the rule reached the
+  next contributor; the other 6 ran out of tokens before writing notes.
+  - Followers who started knowing the rule averaged 1.64 and scored 3 in 54% of cases. Their main
+    limit is reaching CI (66%).
+  - Contributors 2–4 in no-sacrifice playthroughs averaged 0.47.
+
+**Training rewarded sacrifice.** The advantage under the trial's credit settings was recomputed;
+it matches the logged mean |advantage| exactly. Among contributors who started without the rule
+and ran CI:
+
+| | Reviewed | Submitted |
+|---|---|---|
+| contributor 1 | +0.57 [+0.24, +0.94] (n = 11) | +0.02 |
+| contributor 2 | +0.35 [+0.19, +0.53] (n = 51) | −0.02 |
+| contributor 3 | +0.06 [−0.05, +0.16] (n = 32) | −0.03 |
+| contributor 4 | −0.12 [−0.20, −0.03] (n = 10) | −0.02 |
+
+**But the behaviour moved the other way.**
+- Reviews are reactive: 90 of 93 reviews by contributors 2–4 came after an earlier contributor
+  submitted and wrote about the extended checks in `NOTES.md`. Without such a note, the rate was
+  2% (3/194).
+- Contributor 1 never sees such a note and reviewed 2–4% of the time.
+- After such a note, the review rate fell over training: 20% (steps 0–9), 18% (10–19) and 11%
+  (20–29). This split was chosen after looking at the data, and n = 1 seed.
+
+**Reading.** The null result for H-team is not a missing incentive. The incentive was large, and
+the training signal pointed toward reviewing for contributors 1–2, but the policy did not follow
+it in 30 steps. Untested candidate reasons:
+- the signal is thin: 3–4 reviews per step, and 11 by contributor 1 in the whole run;
+- the choice is a few tokens among ~550k action tokens per step, all carrying the same advantage;
+- spill-over from the dominant learned behaviour (reach CI and submit sooner).
 
 Artefacts:
 - Adapters for every step, trainer states every 5 steps, metrics and analysis:
