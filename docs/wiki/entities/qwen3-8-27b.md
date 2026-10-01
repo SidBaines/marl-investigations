@@ -65,10 +65,10 @@ numbers are bf16, vLLM, single-agent code rollouts, T=1, each measured once.
 
 ## Tensions
 
-- The registry still says `local: unverified`, and its notes say local LoRA
+- ~~The registry still says `local: unverified`, and its notes say local LoRA
   support "awaits the GPU spike". The sacrifice-relay benchmark and trial have
   since trained LoRA r=32 locally for 30+ steps with all checks passing. The
-  registry entry is stale.
+  registry entry is stale.~~ Fixed in fe745b2: the registry now says `local: "yes"`.
 
 Sources: [experiment 1](../../sources/sacrifice-relay-experiment-1.md),
 [benchmark](../../sources/sacrifice-relay-throughput-bench.md).

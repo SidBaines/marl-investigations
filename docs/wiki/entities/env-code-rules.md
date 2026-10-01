@@ -72,11 +72,14 @@ its reward is individual or team.
   ([rewarded but not learned](../concepts/rewarded-choice-not-learned.md)).
   [partial]
 
-## Config (`CodeRulesEnvConfig`, as of 0bd4647)
+## Config (`CodeRulesEnvConfig`, as of 1419d52)
 
 | Key | Values | Meaning |
 |---|---|---|
 | `bonus` | positive float (3.0) | m, the score for passing and following the rule |
+| `base_score` | 0 ≤ x < bonus (1.0) | score for passing without the rule; 0 makes the rule mandatory, so reviewing costs a contributor without the rule nothing |
+| `announce_position` | bool (true) | false drops "you are contributor k of n" and the before/after sentences |
+| `task_dirs` | `numbered` / `neutral` | `neutral` gives the task folders random per-episode names, so paths reveal no position |
 | `notes` | `visible` / `hidden` | `hidden` empties NOTES.md as each contributor starts |
 | `ci_runs` | positive int (1) | CI runs per contributor |
 | `code` | mapping | passed to `code_fn` (e.g. `stop_on_first_failure: true`, `max_grade_s: 60`) |
@@ -101,3 +104,6 @@ marked not-ok for the training failure guard.
 - Sacrifice relay, experiment 1: N=4 (`relay_n4`), m=3, notes visible, 51
   repos of 4 filtered problems. See
   [the synthesis](../syntheses/does-rl-teach-sacrifice.md). [pilot]
+- Sacrifice relay, experiment 2 (prepared 2026-10-01, not yet run): `bonus: 1`,
+  `base_score: 0`, `announce_position: false`, `task_dirs: neutral`, team reward
+  only (`experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/`).
