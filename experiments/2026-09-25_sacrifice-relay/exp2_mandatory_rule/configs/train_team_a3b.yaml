@@ -1,10 +1,14 @@
-# Experiment 2's team arm on Qwen3.6-35B-A3B (MODEL=a3b VARIANT=checks ./run.sh train): identical to
-# train_team.yaml except the base model and run name. LoRA rank 32 on the registry targets (attention,
-# linear attention, shared expert; the routed experts and router stay frozen), flat lr 4e-5, 4 repos x 4
-# playthroughs, team reward, a checkpoint after every step. steps is an upper bound.
+# Experiment 2's team arm on Qwen3.6-35B-A3B (MODEL=a3b VARIANT=checks ./run.sh train). Exploratory, for
+# the clearest signal rather than an exact match to the 27B run: the same as train_team.yaml except the
+# base model, the run name and 8 repos x 4 playthroughs per step (27B: 4 x 4).
+# - Batch: twice the games per step gives a less noisy update direction. Adam keeps the step size set by
+#   the learning rate, which stays at the 27B's flat 4e-5, the top of tinker-cookbook's RL recipes (1e-5 to 4e-5).
+# - LoRA: rank 32 on the registry targets (attention, linear attention, shared expert); the routed experts
+#   and router stay frozen.
+# Team reward, a checkpoint after every step; steps is an upper bound (80, run in full).
 run_name: sacrifice-relay-exp2-team-a3b
 protocol: relay_n4
-batch_tasks: 4
+batch_tasks: 8
 group_size: 4
 credit: {reward_target: {contributor: team}}
 learners:

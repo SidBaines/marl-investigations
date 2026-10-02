@@ -80,13 +80,17 @@ Both runs use the `checks` prompt variant, 0/1 scoring, the 51 repos, 4 repos ×
   - This is equivalent to the "resample contributor 1 from experiment 2's final checkpoint" option. No repo state
     needs reconstructing from saved rollouts, every episode gets a fresh rule, and nothing saved is reused.
 
-## Next: the team arm on Qwen3.6-35B-A3B (prepared 2026-10-02, not started; needs Sid's approval)
+## Next: the team arm on Qwen3.6-35B-A3B (started 2026-10-02 on pod r66r0di3a4vcxh; Sid approved, 80 steps)
 
-The same run as `out/train_team_checks` (team reward, `checks` prompt, 0/1 scoring, the 51 repos, 4 repos ×
-4 playthroughs, flat lr 4e-5, LoRA rank 32, about 30 steps) with one change: the model is Qwen3.6-35B-A3B, a
+Exploratory: Sid asked for the clearest signal, not an exact match to the 27B. It is `out/train_team_checks`
+(team reward, `checks` prompt, 0/1 scoring, the 51 repos, flat lr 4e-5, LoRA rank 32) on Qwen3.6-35B-A3B, a
 mixture-of-experts model with about 3B of its 35B parameters active per token. Same pod layout as the 27B.
+Unlike the 27B run, it does **8 repos × 4 playthroughs per step** (27B: 4 × 4) and runs the full 80 steps.
+- The bigger batch gives a less noisy update direction. Adam keeps the step size set by the learning rate.
+- 4e-5 is the top of tinker-cookbook's RL recipes (1e-5 to 4e-5); its 5e-4 formula is for supervised fine-tuning.
+- Each repo comes up about 12 times in 80 steps, each time with a newly drawn rule.
 
-- **Configs:** `configs/train_team_a3b.yaml` (differs from `train_team.yaml` only in the model and run name) and
+- **Configs:** `configs/train_team_a3b.yaml` (differs from `train_team.yaml` in the model, run name and batch) and
   `configs/serve_a3b.yaml` (the 27B's server settings at 40% instead of 45% of each GPU).
 - **Out dirs:** everything goes to `out/*_a3b` (`out/serve_a3b`, `out/train_team_checks_a3b`); the 27B runs are untouched.
 - **What the adapter can change.** The adapter covers the same kinds of layers as the 27B's: attention, linear
