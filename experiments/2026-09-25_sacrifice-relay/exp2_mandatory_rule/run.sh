@@ -32,8 +32,10 @@ export HF_HOME=/workspace/hf HF_HUB_OFFLINE=1
 export NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-0}
 SLOT=${SLOT:-a}; ARM=${ARM:-team}; MODEL=${MODEL:-27b}
 case "$MODEL" in
-  27b) SFX=""; SERVE_YAML="$STUDY/bench/serve/tp2_mtp2_sleep.yaml" ;;
-  a3b) SFX="_a3b"; SERVE_YAML="$C/serve_a3b.yaml" ;;
+  27b) SFX=""; SERVE_YAML="$STUDY/bench/serve/tp2_mtp2_sleep.yaml"; MODEL_ARGS=() ;;
+  # A3B: its fixed-probe drift is ~0.18 nats from MoE routing near-ties (preflight 2026-10-02), so the
+  # hot-load check is loosened; sampled-token agreement (kl_sample_train, abort > 5e-3) is the real guard.
+  a3b) SFX="_a3b"; SERVE_YAML="$C/serve_a3b.yaml"; MODEL_ARGS=(local_adapter_check_tol=0.5) ;;
   *) echo "MODEL must be 27b or a3b" >&2; exit 2 ;;
 esac
 case "${1:-}" in
@@ -82,7 +84,7 @@ train)
   TRITON_CACHE_DIR=/workspace/.triton/cache \
     $M train rl "$SC/base.yaml" "$C/env.yaml" "${VARIANT_ARGS[@]}" "$TRAIN_CFG" tasks="$REPOS" \
     max_usd=1 local_server_json="$SERVER" "$DEVICES" local_sleep_sampler=true \
-    concurrency=64 "${@:2}" --out "$OUT/$RUN" ;;
+    concurrency=64 "${MODEL_ARGS[@]}" "${@:2}" --out "$OUT/$RUN" ;;
 serve_eval)
   HF_HUB_OFFLINE=0 $M serve vllm "$STUDY/bench/serve/dp2_mtp2.yaml" detach=true "${@:2}" \
     --out "$OUT/serve_eval" ;;
