@@ -277,6 +277,19 @@ sharing one y-range) with a line per `split_agents` agent plus all of them
 pooled, then the same pair counting turns. Everything is a runtime setting, so
 the same `--out` can be reused.
 
+**The explorer.** With `grouped`, each train run's detail opens with one
+configurable plot. You choose which agents to draw, whether to add an average
+line and over which agents (it pools their turns, sum over sum, rather than
+averaging their lines), a `split_by` filter (all rollouts, where 1, where 0),
+and a metric for each y-axis (the right one is dashed and optional). Metrics are
+the grouped components (per agent, so the filter applies) or any whole-run
+curve, such as team grades, reward, KL or the no-signal share; the agent and
+filter choices do not apply to those. Lines pool the last `smooth_steps` steps,
+or show each step. Choices are kept per browser and survive refreshes. The data
+is `train.explore` in `snapshot.json`: per completed step, sums and counts by
+agent, side of `split_by` and grouped component, from the rollouts (numbers and
+agent ids only).
+
 **Run it where the run dirs are** (a pod, the dev box, or a laptop with
 synced copies) and leave it running; it refreshes every `watch_s` (default
 `refresh_s`, 60 s) and the open page picks up each new snapshot by itself:

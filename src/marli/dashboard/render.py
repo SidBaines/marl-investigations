@@ -167,6 +167,34 @@ details.run > summary:focus-visible { outline: 2px solid var(--accent); outline-
 .pair-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; min-width: 0; }
 .pair-side { display: grid; gap: 4px; align-content: start; min-width: 0; }
 .side-name { font: 600 12px var(--cond); color: var(--ink-2); letter-spacing: 0.02em; }
+.explorer { background: var(--surface-2); border: 1px solid var(--grid); border-radius: 6px; padding: 10px 12px;
+  display: grid; gap: 10px; min-width: 0; }
+.explorer > .t { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0 10px; }
+.explorer > .t b { font: 600 15px/1.3 var(--cond); letter-spacing: 0.01em; }
+.explorer > .t span { font-size: 11.5px; color: var(--ink-3); }
+.explorer .legend li { white-space: normal; }
+.explorer .gplot svg { height: 230px; }
+.ex-controls { display: flex; flex-wrap: wrap; gap: 10px 24px; align-items: flex-start; min-width: 0; }
+.ex-group { border: 0; margin: 0; padding: 0; min-width: 0; max-width: 100%; }
+.ex-group legend { padding: 0; margin-bottom: 3px; font: 600 11px var(--cond); color: var(--ink-3);
+  text-transform: uppercase; letter-spacing: 0.08em; }
+.ex-group .opts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; }
+.ex-group.inert { opacity: 0.5; }
+.check { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; }
+.check.off { opacity: 0.5; cursor: default; }
+.check input { accent-color: var(--accent); margin: 0; }
+.check .sw { display: inline-block; width: 14px; border-top: 3px solid; border-radius: 1px; }
+.ex-select { display: inline-grid; gap: 2px; font-size: 12px; color: var(--ink-2); min-width: 0; max-width: 100%; }
+.ex-select select { font: 12.5px var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--rule);
+  border-radius: 5px; padding: 3px 6px; min-width: 0; max-width: 100%; }
+.ex-select select:focus-visible, .check input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ex-chart { display: grid; gap: 6px; min-width: 0; }
+.ex-readout { display: grid; gap: 2px; font-size: 11.5px; color: var(--ink-2); min-height: 1.5em; }
+.ex-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 14px; }
+.ex-line span { display: inline-flex; align-items: center; gap: 5px; }
+.ex-readout i { display: inline-block; width: 12px; border-top: 2px solid; }
+.ex-readout b { color: var(--ink); font-weight: 500; }
+.ex-note { font-size: 12px; color: var(--ink-2); border-left: 2px solid var(--rule); padding-left: 8px; }
 .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; margin-left: auto; }
 .toggle input { accent-color: var(--accent); margin: 0; }
 .scroll { overflow-x: auto; }
@@ -190,6 +218,7 @@ details.more > summary:focus-visible { outline: 2px solid var(--accent); outline
 }
 @media (max-width: 520px) {
   .pair-grid { grid-template-columns: minmax(0, 1fr); }
+  .explorer .gplot svg { height: 190px; }
 }
 @media (prefers-reduced-motion: no-preference) {
   .meter i { transition: width 0.4s ease; }
@@ -535,6 +564,199 @@ SCRIPT = r"""
       h("div", { cls: "groups-cap", text: cap }), grid);
   }
 
+  // ------------------------------------------------------------ explorer
+  var exploreState = {};  // run path -> control state; outlives each re-render
+  var EXPLORE_KEY = "marli-dash-explore:";
+
+  function exploreMetrics(train) {
+    var ex = train.explore, out = [];
+    (ex.components || []).forEach(function (c) { out.push({ key: "c:" + c, comp: c, text: (ex.titles || {})[c] || c, perAgent: true }); });
+    var curves = train.curves || {};
+    // Whole-run curves; per-agent grade curves are the cube's job.
+    var keys = Object.keys(curves).filter(function (k) { return curves[k].length && (!/^grades\//.test(k) || /^grades\/_system\//.test(k)); });
+    var first = (train.key_curves || []).filter(function (k) { return keys.indexOf(k) >= 0; });
+    first.concat(keys.filter(function (k) { return first.indexOf(k) < 0; }).sort()).forEach(function (k) {
+      out.push({ key: "r:" + k, curve: k, text: label(k), perAgent: false });
+    });
+    return out;
+  }
+
+  function exploreGet(path, metrics, hasSplit, n) {
+    var st = exploreState[path];
+    if (!st) { try { st = JSON.parse(localStorage.getItem(EXPLORE_KEY + path) || "null"); } catch (e) { st = null; } }
+    if (!st || typeof st !== "object") st = {};
+    var keys = metrics.map(function (m) { return m.key; });
+    function ids(v) { return Array.isArray(v) ? v.filter(function (id) { return typeof id === "string"; }) : []; }
+    // Agents are stored as the ones left out, so an agent that appears later starts ticked.
+    st = {
+      hide: ids(st.hide), avg: st.avg !== false, avgSkip: ids(st.avgSkip),
+      filter: hasSplit && (st.filter === "1" || st.filter === "0") ? st.filter : "all",
+      left: keys.indexOf(st.left) >= 0 ? st.left : keys[0],
+      right: keys.indexOf(st.right) >= 0 ? st.right : "",
+      lines: n > 1 ? (["smooth", "both", "raw"].indexOf(st.lines) >= 0 ? st.lines : "smooth") : "raw"
+    };
+    exploreState[path] = st;
+    return st;
+  }
+
+  // The explorer's readout: each axis's metric once, then each line's value at step x.
+  function showStep(box, x, rows) {
+    while (box.firstChild) box.removeChild(box.firstChild);
+    var line = null, axis = null;
+    rows.forEach(function (r) {
+      if (r.sr.axis !== axis || !line) {
+        axis = r.sr.axis;
+        line = h("div", { cls: "ex-line" }, line ? null : h("b", { text: "step " + x }), h("span", { cls: "muted", text: r.sr.metric + ":" }));
+        box.appendChild(line);
+      }
+      var sw = h("i", { "aria-hidden": "true" });
+      sw.style.borderTopColor = r.sr.color;
+      if (r.sr.dash) sw.style.borderTopStyle = "dashed";
+      line.appendChild(h("span", null, sw, r.sr.label + " ", h("b", { text: fmt(r.value) }),
+        r.raw != null ? " (this step " + fmt(r.raw) + ")" : null));
+    });
+  }
+
+  // One configurable plot: which agents, an average over chosen agents, a split_by filter and a
+  // metric per y-axis. Controls are rebuilt from exploreState on every render, so they persist.
+  function explorer(run) {
+    var train = run.train, ex = train && train.explore;
+    if (!ex) return null;
+    var metrics = exploreMetrics(train);
+    if (!metrics.length) return null;
+    var split = train.split && train.split.labels ? train.split : null;
+    var n = snap.smooth_steps || 1;
+    var agents = ex.agents || [];
+    var st = exploreGet(run.path, metrics, !!split, n);
+    var byKey = {};
+    metrics.forEach(function (m) { byKey[m.key] = m; });
+    var uid = "ex-" + run.path.replace(/[^A-Za-z0-9_-]/g, "_");
+    var chartBox = h("div", { cls: "ex-chart" });
+    function changed() {
+      try { localStorage.setItem(EXPLORE_KEY + run.path, JSON.stringify(st)); } catch (e) {}
+      draw();
+    }
+    function include(list, id, on) {
+      var i = list.indexOf(id);
+      if (on && i >= 0) list.splice(i, 1);
+      else if (!on && i < 0) list.push(id);
+    }
+    function check(id, text, checked, onChange, color) {
+      var cb = h("input", { type: "checkbox", id: id });
+      cb.checked = checked;
+      cb.addEventListener("change", function () { onChange(cb.checked); });
+      var sw = null;
+      if (color) { sw = h("i", { cls: "sw", "aria-hidden": "true" }); sw.style.borderTopColor = color; }
+      return { input: cb, node: h("label", { cls: "check" }, cb, sw, text) };
+    }
+    function group(name, nodes) {
+      var opts = h("div", { cls: "opts" });
+      nodes.forEach(function (node) { if (node) opts.appendChild(node); });
+      return h("fieldset", { cls: "ex-group" }, h("legend", { text: name }), opts);
+    }
+    function choice(id, text, options, value, onChange) {
+      var sel = h("select", { id: id });
+      options.forEach(function (o) {
+        if (o.group) {
+          var og = h("optgroup", { label: o.group });
+          o.options.forEach(function (oo) { og.appendChild(h("option", { value: oo[0], text: oo[1] })); });
+          if (o.options.length) sel.appendChild(og);
+        } else sel.appendChild(h("option", { value: o[0], text: o[1] }));
+      });
+      sel.value = value;
+      sel.addEventListener("change", function () { onChange(sel.value); });
+      return h("label", { cls: "ex-select" }, h("span", { text: text }), sel);
+    }
+
+    var fsAgents = group("Agents", agents.map(function (a, i) {
+      return check(uid + "-show-" + i, a.label, st.hide.indexOf(a.id) < 0, function (on) { include(st.hide, a.id, on); changed(); }, slotColor(a.slot)).node;
+    }));
+    var over = [];
+    function syncAvg() { over.forEach(function (c) { c.input.disabled = !st.avg; c.node.classList.toggle("off", !st.avg); }); }
+    var avgNodes = [check(uid + "-avg", "show, over", st.avg, function (on) { st.avg = on; syncAvg(); changed(); }).node];
+    agents.forEach(function (a, i) {
+      var c = check(uid + "-avg-" + i, a.label, st.avgSkip.indexOf(a.id) < 0, function (on) { include(st.avgSkip, a.id, on); changed(); });
+      over.push(c);
+      avgNodes.push(c.node);
+    });
+    syncAvg();
+    var fsAvg = group("Average line", avgNodes);
+    var fsFilter = null;
+    if (split) {
+      fsFilter = group("Filter", [["all", "all rollouts"], ["1", split.labels[0]], ["0", split.labels[1]]].map(function (o, i) {
+        var r = h("input", { type: "radio", name: uid + "-filter", id: uid + "-filter-" + i, value: o[0] });
+        r.checked = st.filter === o[0];
+        r.addEventListener("change", function () { if (r.checked) { st.filter = o[0]; changed(); } });
+        return h("label", { cls: "check" }, r, o[1]);
+      }));
+    }
+    var perAgent = metrics.filter(function (m) { return m.perAgent; }).map(function (m) { return [m.key, m.text]; });
+    var whole = metrics.filter(function (m) { return !m.perAgent; }).map(function (m) { return [m.key, m.text]; });
+    var options = [{ group: "Per agent (agent, average and filter choices apply)", options: perAgent },
+      { group: "Whole run, one curve (agent, average and filter choices do not apply)", options: whole }];
+    var fsPlot = group("Metrics", [
+      choice(uid + "-left", "Left axis (solid)", options, st.left, function (v) { st.left = v; changed(); }),
+      choice(uid + "-right", "Right axis (dashed)", [["", "none"]].concat(options), st.right, function (v) { st.right = v; changed(); })]);
+    var fsLines = n > 1 ? group("Smoothing", [choice(uid + "-lines", "Lines", [
+      ["smooth", "pooled over the last " + n + " steps"], ["both", "pooled, plus each step (faint)"], ["raw", "each step on its own"]],
+      st.lines, function (v) { st.lines = v; changed(); })]) : null;
+    var agentGroups = [fsAgents, fsAvg, fsFilter].filter(Boolean);
+
+    function draw() {
+      while (chartBox.firstChild) chartBox.removeChild(chartBox.firstChild);
+      var sides = st.filter === "all" ? ["1", "0", "none"] : [st.filter];
+      var shown = agents.filter(function (a) { return st.hide.indexOf(a.id) < 0; });
+      var pooled = agents.filter(function (a) { return st.avgSkip.indexOf(a.id) < 0; });
+      var avgLabel = "average" + (pooled.length < agents.length ? " of " + pooled.map(function (a) { return a.label; }).join(", ") : "");
+      var all = [], legends = [], notes = [], anyAgent = false;
+      [st.left, st.right].forEach(function (key, axis) {
+        var m = byKey[key];
+        if (!m) return;
+        var dash = axis ? "6 4" : null, series = [];
+        if (m.perAgent) {
+          anyAgent = true;
+          shown.forEach(function (a) {
+            series.push(lineSeries(meanLines(cubeTotals(ex, [a.id], sides, m.comp), n), st.lines, { axis: axis, metric: m.text,
+              label: a.label, tip: m.text + " · " + a.label, color: slotColor(a.slot), dash: dash || (a.slot >= 6 ? "5 3" : null) }));
+          });
+          if (st.avg && pooled.length) {
+            series.push(lineSeries(meanLines(cubeTotals(ex, pooled.map(function (a) { return a.id; }), sides, m.comp), n), st.lines, {
+              axis: axis, metric: m.text, label: avgLabel, tip: m.text + " · " + avgLabel, color: "var(--ink)", dash: dash, thick: true }));
+          }
+        } else {
+          var pts = (train.curves[m.curve] || []).map(function (p) { return [p[0], p[1], 1]; });
+          series.push(lineSeries(meanLines(pts, n), st.lines, { axis: axis, metric: m.text, label: "whole run", tip: m.text,
+            color: "var(--ink)", dash: dash, thick: true }));
+          notes.push("“" + m.text + "” is one curve for the whole run: the agent, average and filter choices do not apply to it" +
+            (n > 1 && st.lines !== "raw" ? "; its solid line is the mean of the last " + n + " steps." : "."));
+        }
+        series = series.filter(function (sr) { return sr.main.length; });
+        all = all.concat(series);
+        legends.push(legend(series, (axis ? "Right axis, dashed: " : "Left axis: ") + m.text));
+      });
+      agentGroups.forEach(function (fs) { fs.classList.toggle("inert", !anyAgent); });
+      legends.forEach(function (l) { chartBox.appendChild(l); });
+      var readout = h("div", { cls: "ex-readout num", "aria-label": "values at the chosen step" });
+      var names = all.map(function (sr) { return sr.tip || sr.label; }).join(", ");
+      chartBox.appendChild(plot({ label: "Explorer: " + (names || "nothing selected"), series: all,
+        empty: "Nothing to draw for this selection yet.", onStep: function (x, rows) { showStep(readout, x, rows); } }));
+      if (all.length) chartBox.appendChild(readout);
+      notes.forEach(function (t) { chartBox.appendChild(h("div", { cls: "ex-note", text: t })); });
+    }
+    draw();
+    var cap = "Per-agent metrics come from completed steps' rollouts" + (n > 1
+      ? ": each line pools its turns over the last " + n + " steps (sum over sum), so a step with few turns weighs less" : "") +
+      ". The average pools the ticked agents' turns rather than averaging their lines." +
+      (split ? " The filter keeps each agent's turns by its own value of " + split.by + "." : "") +
+      " The two axes have separate scales, so where their lines cross means nothing." +
+      " Hover or tap the chart for a step's values.";
+    return h("section", { cls: "explorer", "aria-label": "Explorer" },
+      h("div", { cls: "t" }, h("b", { text: "Explore" }), h("span", { text: "choices are kept in this browser" })),
+      h("div", { cls: "ex-controls" }, fsAgents, fsAvg, fsFilter, fsPlot, fsLines),
+      h("div", { cls: "groups-cap", text: cap }),
+      chartBox);
+  }
+
   function facts(obj) {
     var dl = h("dl", { cls: "facts" });
     Object.keys(obj || {}).forEach(function (k) {
@@ -621,6 +843,8 @@ SCRIPT = r"""
       h("div", { cls: "cell num" }, h("small", { text: "updated" }), updated));
     d.appendChild(sum);
     var detail = h("div", { cls: "detail" });
+    var ex = run.train ? explorer(run) : null;
+    if (ex) detail.appendChild(ex);
     var gc = run.train ? groupCharts(run.train) : null;
     if (gc) detail.appendChild(gc);
     var sc = run.train ? splitCharts(run.train) : null;
@@ -754,8 +978,12 @@ SCRIPT = r"""
       runsSec.appendChild(st);
     });
     nodes.push(runsSec);
+    // A refresh rebuilds the page; keep keyboard focus on the same control (stable ids).
+    var focused = document.activeElement && app.contains(document.activeElement) ? document.activeElement.id : "";
     while (app.firstChild) app.removeChild(app.firstChild);
     nodes.forEach(function (n) { app.appendChild(n); });
+    var again = focused && document.getElementById(focused);
+    if (again) try { again.focus({ preventScroll: true }); } catch (e) {}
   }
 
   render();

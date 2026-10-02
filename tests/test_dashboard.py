@@ -715,3 +715,38 @@ def test_render_draws_grouped_charts_and_raw_toggle(tmp_path: Path) -> None:
     plain = collect([str(tmp_path / "experiments")], probe_servers=False, gpus=False)
     assert "groups" not in by_name(plain)["relay"]["train"]
     assert "explore" not in by_name(plain)["relay"]["train"]
+
+
+def test_render_carries_the_explorer_and_its_cube(tmp_path: Path) -> None:
+    split_rollouts(relay_run(tmp_path))
+    snapshot = collect(
+        [str(tmp_path / "experiments")],
+        probe_servers=False,
+        gpus=False,
+        grouped=SPLIT_GROUPED,
+        split_by="knew",
+        split_labels=["Knew", "Did not"],
+    )
+    for page in (render(snapshot), render(snapshot, standalone=True)):
+        embedded = json.loads(page.split('id="snapshot">', 1)[1].split("</script>", 1)[0])
+        train = by_name(embedded)["relay"]["train"]
+        assert train["explore"] == by_name(snapshot)["relay"]["train"]["explore"]
+        assert train["split"]["labels"] == ["Knew", "Did not"]
+        # The explorer's controls, persistence and the per-agent split charts.
+        for text in (
+            "function explorer(run)",
+            "marli-dash-explore:",
+            "Left axis (solid)",
+            "Right axis (dashed)",
+            "all rollouts",
+            "Whole run, one curve (agent, average and filter choices do not apply)",
+            "Average line",
+            "function splitCharts(train)",
+            "Agents in each group per step",
+            ".explorer {",
+            ".pair-grid {",
+        ):
+            assert text in page, text
+        # Every browser-storage access is wrapped: the page must work without it.
+        uses = [line for line in page.splitlines() if "localStorage" in line]
+        assert len(uses) >= 6 and all("try {" in line and "catch (e)" in line for line in uses)

@@ -59,7 +59,8 @@ class DashboardConfig:
     grouped: dict[str, str] = runtime_field(
         default_factory=dict,
         help="train rl: grade component -> chart title; one chart per component with a line"
-        " per agent plus the average, in mapping order (empty: no such charts)",
+        " per agent plus the average, in mapping order, and an explorer plot of them from the"
+        " rollouts (empty: neither)",
     )
     agent_labels: dict[str, str] = runtime_field(
         default_factory=dict,
@@ -72,7 +73,7 @@ class DashboardConfig:
         None,
         help="train rl: a 0/1 grade component that splits each agent's turns by its own value:"
         " per other grouped component a pair of charts (where 1, where 0) with a line per split"
-        " agent plus all of them pooled",
+        " agent plus all of them pooled, and the explorer's filter",
     )
     split_labels: list[str] = runtime_field(
         default_factory=list,
