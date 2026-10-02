@@ -2,7 +2,11 @@
 
 Status: **experiment 1 wrapped up (2026-10-01).** Experiment 1 is the overnight team-reward trial
 below (30 steps, one seed), plus the payoff check. The three-arm runs planned under "Runs" were not
-started; the next experiment changes the setup (no position in the prompt, 0/1 scoring).
+started.
+
+**Experiment 2 done (2026-10-02)**: `exp2_mandatory_rule/README.md`. It has no position in the prompt, 0/1 scoring
+and one factual sentence about the checks. Team training taught contributor 1 to review: 17% → 52%. The team score
+doubled.
 
 ## Question
 

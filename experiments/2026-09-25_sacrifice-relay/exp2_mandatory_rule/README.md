@@ -1,11 +1,57 @@
 # Experiment 2: mandatory house rule, no position in the prompt
 
-Status: **running overnight 2026-10-01/02** with the `checks` prompt variant (see "Log of the night").
+Status: **done (2026-10-02)**: 30 steps of team-reward training with the `checks` prompt variant. See Results.
 
 Part of the sacrifice-relay study (`../README.md`). Experiment 1 found that sharing the rule paid
 off for the team, and that training rewarded it, but the model did not learn to do it: reviews were
 reactive, coming after an earlier contributor's note, and contributor 1 almost never reviewed. This
 experiment changes the setup in three ways, then reruns the team-reward relay.
+
+## Results (2026-10-02)
+
+Run `out/train_team_checks`: team reward, 4 repos × 4 playthroughs per step, flat lr 4e-5. The prompt is experiment 2's
+plus one sentence (the `checks` variant). 30 steps (0–29), 22:48–05:29 UTC, 13.3 min per step. ± is a 95% interval.
+Numbers come from `check.py --every 10` and `health.py` (`out/analysis/`, also on HF under `exp2/analysis/`).
+
+| | Steps 0–9 | Steps 10–19 | Steps 20–29 |
+|---|---|---|---|
+| Team score (mean of the 4 contributors' 0/1 scores) | 0.089 ± 0.029 | 0.152 | **0.177 ± 0.034** (z = 3.9 vs steps 0–9) |
+| Playthroughs where anyone scored | 22% | 38% | 46% |
+| Groups with no learning signal (all 4 playthroughs tied) | 42% | 18% | 18% |
+| Contributor 1 chose review (among those who ran CI) | 17% (19/112) | 40% (46/114) | **52% (52/100)** (z = 5.7) |
+| All positions chose review (no rule at start, ran CI) | 26% | 37% | 53% |
+| Started knowing the rule (all contributors) | 19% | 31% | 38% |
+| Rule reached the next contributor after a review by 1–3 | 94% | 98% | 98% |
+| Redundant reviews (knew the rule, reviewed anyway) | 18% | 14% | 12% |
+| Reached CI | 60% | 64% | 63% |
+
+- **Training taught the first mover to review.**
+  - Contributor 1 never scores itself, so it only gains through the team score; its review rate tripled.
+  - The team score doubled, and wasted reviews by contributors who already knew the rule fell.
+  - This is the behaviour experiment 1 rewarded but did not learn.
+- **What still limits the team.** Followers who start knowing the rule score in only 46–47% of cases, with no
+  change during training: about 68% reach CI, and some fail the base tests. More reviewing cannot fix this; the
+  budget and coding ability bind.
+- **Comparison with the prompt as planned.** Steps 0–1 under the planned prompt, without the `checks` sentence, had
+  2 reviews in 82 CI runs and 0 of 32 playthroughs scoring (`out/old_pod`, `analysis/baseline_prompt_steps_0_1.txt`).
+  With the sentence, step 0 already had 5 reviews in 32. The sentence gives the agent a fact: the hidden checks
+  cannot be passed by luck. Without it, the untrained model treats a submit as a gamble worth taking.
+- **Training health:** `kl_sample_train` ≤ 7.4e-4 at every step, and the mean IS ratio stayed at 1.000 ± 0.0002.
+  No errors or restarts. Only steps with no informative group skip the update.
+- **Caveats:**
+  - One seed and one arm.
+  - The 51 repos repeat (each drawn about 2.4 times).
+  - The `checks` variant was chosen from a partial, timeout-biased test (Log of the night).
+  - The prompt now says the checks cannot be worked out from the task or code. This states a fact and recommends
+    neither CI mode, but it makes reviewing easier to discover than in experiment 1.
+
+Artefacts:
+- **HF `sidbaines/amber-baton` under `exp2/`:**
+  - adapters for all 30 steps;
+  - trainer states for steps 9, 19 and 29 (enough to resume);
+  - checkpoint manifests, metrics, config and analysis.
+- **Dev box (private):** `out/` holds rollouts, variant runs, the old pod's run and logs.
+- **Resume:** restore the run dir and rerun `VARIANT=checks run.sh train`.
 
 ## What changes from experiment 1
 
