@@ -9,11 +9,18 @@ A pool may be data-parallel (``LocalLearnerPool.data_parallel``): identical
 replicas on several devices train on token-balanced shards and all-reduce their
 LoRA gradients, so the update equals the single-device one (see ``parallel``).
 
-Qwen3.5's multimodal architecture is loaded through Qwen3_5ForCausalLM.
-Transformers 5.5.4's qwen3_5_text conversion mapping strips
-``model.language_model`` prefixes and ignores visual weights. Training uses
-text-only PEFT paths. Export maps them to the serving architecture and
+Qwen3.5's multimodal architectures are loaded through their text-only classes
+(``Qwen3_5ForCausalLM``, ``Qwen3_5MoeForCausalLM``). Transformers 5.5.4's
+qwen3_5_text conversion mapping (aliased by qwen3_5_moe_text) strips
+``model.language_model`` prefixes and ignores visual and MTP weights. Training
+uses text-only PEFT paths. Export maps them to the serving architecture and
 records the inverse needed for state restore. Sampling belongs to the backend.
+
+Fused-expert MoE (Qwen3.5-MoE): the routed experts are 3-D parameters, not
+``nn.Linear``, so registry ``target_modules`` reach attention, linear attention
+and the shared expert only; routed experts and the router stay frozen. Such
+models must name their targets explicitly (no all-Linear fallback) and run the
+experts through ``grouped_mm``, never the per-expert Python loop.
 """
 
 from __future__ import annotations
@@ -42,6 +49,14 @@ if TYPE_CHECKING:
     from marli.train.backends.local.parallel import PoolRecipe, Replicas
 
 _T = TypeVar("_T")
+
+# Vision-language serving architectures and the text-only classes the learner trains.
+_TEXT_ONLY = {
+    "Qwen3_5ForConditionalGeneration": "Qwen3_5ForCausalLM",
+    "Qwen3_5MoeForConditionalGeneration": "Qwen3_5MoeForCausalLM",
+}
+# Text-only classes with fused (3-D) routed experts, loaded with grouped_mm experts.
+_FUSED_EXPERT_MOE = frozenset({"Qwen3_5MoeForCausalLM"})
 
 
 def _map_adapter_keys(
@@ -121,19 +136,22 @@ class LocalLearnerPool:
             raise ValueError(f"model {model.name!r} does not support local training")
         if dtype not in {"float32", "bfloat16", "float16"}:
             raise ValueError(f"unsupported local dtype {dtype!r}")
-        architecture = model.architecture
-        if architecture == "Qwen3_5ForConditionalGeneration":
-            architecture = "Qwen3_5ForCausalLM"
+        architecture = _TEXT_ONLY.get(model.architecture, model.architecture)
         loader = (
             getattr(transformers, architecture)
             if architecture
             else (transformers.AutoModelForCausalLM)
+        )
+        # Explicit, so an unsupported class raises instead of looping over experts in Python.
+        experts = (
+            {"experts_implementation": "grouped_mm"} if architecture in _FUSED_EXPERT_MOE else {}
         )
         base = loader.from_pretrained(
             model.hf_id,
             dtype=getattr(torch, dtype),
             attn_implementation=attn_implementation
             or ("flex_attention" if model.family == "gpt_oss" else "sdpa"),
+            **experts,
         )
         self._initialize(base, model, resolved, gradient_checkpointing, tokenizer_sha=None)
 
@@ -149,9 +167,12 @@ class LocalLearnerPool:
     ) -> LocalLearnerPool:
         """Use an already constructed text model without loading weights/tokenizers."""
         if model_spec is None:
-            family = {"qwen3": "qwen3", "qwen3_5_text": "qwen3_5", "gpt_oss": "gpt_oss"}[
-                model.config.model_type
-            ]
+            family = {
+                "qwen3": "qwen3",
+                "qwen3_5_text": "qwen3_5",
+                "qwen3_5_moe_text": "qwen3_5",
+                "gpt_oss": "gpt_oss",
+            }[model.config.model_type]
             model_spec = ModelSpec(
                 name="local-test",
                 hf_id=model.config._name_or_path or "random-init",
@@ -213,7 +234,19 @@ class LocalLearnerPool:
         if spec.family != "gpt_oss" and any(
             parameter.ndim > 2 for name, parameter in base.named_parameters() if "experts" in name
         ):
-            raise ValueError("fused expert MLP adapters are unsupported by this local learner")
+            # Linear LoRA cannot reach 3-D routed experts; the all-Linear fallback
+            # would freeze them silently, so the registry must choose the targets.
+            if not spec.lora.get("target_modules"):
+                raise ValueError(
+                    f"model {spec.name!r} has fused routed experts: set registry "
+                    "lora.target_modules explicitly (routed experts stay frozen)"
+                )
+            implementation = getattr(base.config, "_experts_implementation", None)
+            if implementation != "grouped_mm":
+                raise ValueError(
+                    "fused experts must run with experts_implementation='grouped_mm', "
+                    f"got {implementation!r} (the eager per-expert loop is too slow to train)"
+                )
         if base.get_decoder() is base:
             raise ValueError("local learner requires a separable text decoder and lm_head")
         self.model = spec

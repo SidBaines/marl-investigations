@@ -14,9 +14,12 @@ tinker_prices:
   sample: 1.34
   train: 1.18
   as_of: "2026-09-23"
-local: "no"
-notes: "Qwen3.5 vision-language MoE architecture; not supported by the local learner"
+local: unverified
+notes: "Qwen3.5 vision-language MoE architecture (256 routed experts, top-8, plus a shared expert); local LoRA covers attention, linear attention and the shared expert, routed experts and router frozen; GPU parity to be verified"
 lora:
+  # The 27B's list. Routed experts are fused 3-D parameters, not nn.Linear, so
+  # gate_proj/up_proj/down_proj reach only the shared expert. Serve with the same
+  # list as vLLM lora_target_modules so neither engine adapts anything else.
   target_modules: [q_proj, k_proj, v_proj, o_proj, in_proj_qkv, in_proj_z, in_proj_a, in_proj_b, out_proj, gate_proj, up_proj, down_proj]
   export_key_map:
     base_model.model.model.layers.: base_model.model.model.language_model.layers.

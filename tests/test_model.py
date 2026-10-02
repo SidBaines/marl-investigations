@@ -67,7 +67,7 @@ from marli.registry import Registry, catalog_kinds, catalog_names
             "Qwen3_5MoeForConditionalGeneration",
             65536,
             (0.54, 1.34, 1.18),
-            "no",
+            "unverified",
             True,
             "qwen3_5_xml",
         ),
@@ -154,7 +154,9 @@ def test_published_model_entries(
     assert model.tinker_id == (hf_id if prices is not None else None)
     assert model.tinker_prices == (TinkerPrices(*prices, "2026-09-23") if prices else None)
     assert for_hf_id(hf_id) == model
-    if family == "qwen3_5" and local == "unverified":
+    if name == "qwen3_6_35b_a3b":
+        assert "routed experts and router frozen" in model.notes
+    elif family == "qwen3_5" and local == "unverified":
         assert model.notes == (
             "Qwen3.5 is a vision-language architecture; "
             "local LoRA support to be verified (M2 spike)"
