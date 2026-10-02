@@ -24,6 +24,8 @@ REPOS="$STUDY/out/repos_n4/taskset.json"
 # --no-sync: a plain `uv run` would re-sync .venv to uv.lock and drop the pod-train torch pins.
 M="uv run --no-sync marli"
 export HF_HOME=/workspace/hf HF_HUB_OFFLINE=1
+# Some H200 hosts have broken NVLink SHARP (NCCL "unhandled cuda error" at TP2 start); it is not needed on 2 GPUs.
+export NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-0}
 SLOT=${SLOT:-a}; ARM=${ARM:-team}
 case "$SLOT" in
   a) GPUS=0,1; PORT=8000; SERVE_DIR="$OUT/serve"; DEVICES='local_devices=[cuda:0,cuda:1]'; LORAS=4 ;;
@@ -50,8 +52,11 @@ opener)
     "/workspace/opener-hf/exp2/train_team_checks/adapters/$(basename "$OPENER_DIR")" /workspace/opener/; }
   curl -sf -X POST "http://127.0.0.1:$PORT/v1/load_lora_adapter" -H 'Content-Type: application/json' \
     -d "{\"lora_name\": \"exp2-team-s29\", \"lora_path\": \"$OPENER_DIR\"}" && echo
-  curl -s "http://127.0.0.1:$PORT/v1/models" | python3 -c \
-    "import json,sys; print([m['id'] for m in json.load(sys.stdin)['data']])" ;;
+  # Record it in the server manifest: policies only use models the manifest lists. It is not an
+  # `adapters` entry, so the learner's slot bookkeeping and stale-adapter sweep leave it alone.
+  uv run --no-sync python -c "import sys; from dataclasses import replace; from marli.serve.vllm import Server
+s = Server.load(sys.argv[1]); s.models.count('exp2-team-s29') or replace(s, models=[*s.models, 'exp2-team-s29']).save()
+print(Server.load(sys.argv[1]).models)" "$SERVER" ;;
 gate)
   $M eval rollout "$SC/eval_common.yaml" "$SC/eval_gate_n4.yaml" "$C/env.yaml" "$C/gate.yaml" \
     tasks="$REPOS" "policies.q.ref=vllm:@$SERVER#qwen3_8_27b" max_usd=1 "${@:2}" --out "$OUT/gate"
