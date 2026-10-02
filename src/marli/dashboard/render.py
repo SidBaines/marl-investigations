@@ -65,7 +65,7 @@ STYLE = r"""
 }
 body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.45 var(--sans); }
 #app { max-width: 1180px; margin: 0 auto; padding-inline: 16px; padding-block: 20px 48px;
-  display: grid; gap: 22px; }
+  display: grid; grid-template-columns: minmax(0, 1fr); gap: 22px; }
 h1, h2, h3 { font-family: var(--cond); font-weight: 600; margin: 0; text-wrap: balance; }
 h1 { font-size: 22px; letter-spacing: 0.01em; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-2); }
@@ -74,7 +74,8 @@ h3 { font-size: 16px; }
 .muted { color: var(--ink-3); }
 .top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 10px 24px;
   border-bottom: 1px solid var(--rule); padding-bottom: 14px; }
-.top .sub { color: var(--ink-3); font-size: 12.5px; margin-top: 3px; }
+.top > div { min-width: 0; }
+.top .sub { color: var(--ink-3); font-size: 12.5px; margin-top: 3px; overflow-wrap: anywhere; }
 .clock { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--ink-2); }
 .chip { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 2px 9px;
   font: 500 12px/1.6 var(--cond); letter-spacing: 0.03em; white-space: nowrap; }
@@ -86,7 +87,7 @@ h3 { font-size: 16px; }
 .chip svg { width: 9px; height: 9px; flex: none; }
 .attention { display: flex; flex-wrap: wrap; gap: 8px; }
 .attention .chip { white-space: normal; border-radius: 6px; padding: 5px 10px; font-size: 12.5px; }
-.attention .path { font-family: var(--mono); font-size: 11.5px; opacity: 0.85; }
+.attention .path { font-family: var(--mono); font-size: 11.5px; opacity: 0.85; overflow-wrap: anywhere; }
 .panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; }
 .section { display: grid; gap: 10px; }
 .section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; }
