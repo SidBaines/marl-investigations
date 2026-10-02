@@ -255,6 +255,8 @@ def test_vllm_argv_env_and_runtime_hash() -> None:
         "VLLM_SERVER_DEV_MODE": "1",
         "CUDA_VISIBLE_DEVICES": "0,1",
     }
+    _, argv, _ = launch_args(replace(cfg, lora_target_modules=["q_proj", "down_proj"]))
+    assert argv[-5:] == ["--lora-target-modules", "q_proj", "down_proj", "--dtype", "bfloat16"]
     from marli.config import config_hash
 
     assert config_hash(cfg) == config_hash(replace(cfg, detach=True, ready_timeout_s=30))
@@ -270,6 +272,8 @@ def test_vllm_argv_env_and_runtime_hash() -> None:
         ({"port": 0}, "port"),
         ({"gpu_memory_utilization": 1.1}, "utilization"),
         ({"enable_sleep_mode": 1}, "enable_sleep_mode"),
+        ({"lora_target_modules": [""]}, "non-empty module names"),
+        ({"lora_target_modules": ["q_proj"], "enable_lora": False}, "requires enable_lora"),
     ],
 )
 def test_validation_before_launch(overrides: dict, match: str) -> None:
@@ -307,6 +311,7 @@ async def test_server_roundtrip_and_serve_detach(
         assert server.adapters == [] and server.log == "server.log"
         assert server.max_loras == 4 and server.max_lora_rank == 32
         assert server.tensor_parallel_size == 1 and server.enable_sleep_mode is False
+        assert server.lora_target_modules == []
         assert process_alive(server.pid)
         assert server.config_hash == result.config_hash
     finally:

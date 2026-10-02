@@ -186,6 +186,15 @@ class LocalBackend:
             raise ConfigError("local learners must share one base model per run")
         if spec.rank > server.max_lora_rank:
             raise ConfigError("learner rank exceeds server max_lora_rank")
+        if server.lora_target_modules:
+            # vLLM silently drops adapter weights for modules it did not wrap.
+            targets = model.lora.get("target_modules", [])
+            missing = sorted(set(targets) - set(server.lora_target_modules))
+            if not targets or missing:
+                raise ConfigError(
+                    f"server LoRA is restricted to {server.lora_target_modules}; the learner "
+                    f"would also train {missing or 'every nn.Linear (no registry targets)'}"
+                )
         if len(self.learners) + 2 > server.max_loras:
             raise ConfigError("max_loras must reserve one slot beyond the learner count")
         # Like Tinker: a checkpoint manifest restores its recorded sampler version

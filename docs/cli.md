@@ -313,6 +313,7 @@ Manifest produced: `server.json`.
 | enable_lora | bool | true | false | false | false |  |
 | max_loras | int | 4 | false | false | false |  |
 | max_lora_rank | int | 32 | false | false | false |  |
+| lora_target_modules | list[str] | [] | false | false | false | restrict vLLM's LoRA wrappers to these module names (packed parents match their parts, e.g. q_proj -> qkv_proj); empty = every supported module. Learners may only train names in this list |
 | tensor_parallel_size | int | 1 | false | false | false |  |
 | enable_sleep_mode | bool | false | false | false | false | vLLM sleep/wake endpoints so a co-located learner can use the GPUs between sampling phases (also sets VLLM_SERVER_DEV_MODE=1) |
 | cuda_visible_devices | str \| None | null | false | false | false |  |

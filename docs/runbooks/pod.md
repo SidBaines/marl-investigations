@@ -212,6 +212,18 @@ default. The hot-load parity check still applies. gpt-oss code-tool bodies may
 be raw code with `code` or `<|constrain|>code` headers; Harmony binds non-JSON
 bodies only when the advertised tool has exactly one string parameter.
 
+Qwen3.6-35B-A3B (Qwen3.5-MoE; `local: unverified` until a pod run passes) trains
+through `Qwen3_5MoeForCausalLM` with `experts_implementation="grouped_mm"`. Its
+256 routed experts are fused 3-D parameters, so the registry's Linear targets
+reach attention, linear attention and the shared expert only; the routed
+experts and the router stay frozen (PEFT `target_parameters` adds the expert
+update into the bf16 weight on every forward, which rounds small updates away;
+gpt-oss expert LoRA showed the 6% vLLM mismatch above). Serve it with `lora_target_modules` equal to those targets so vLLM
+does not wrap the experts either; a learner whose targets the server does not
+wrap is refused. `experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/`
+has the serve config (`configs/serve_a3b.yaml`) and a pod preflight
+(`a3b_preflight.py`: memory, logprob agreement, 32k step, hot-load).
+
 The training CLI exposes `local_server_json` and `local_adapters_dir`, and
 uses the backend defaults for adapter naming and tolerance. The latter options
 are currently available through the Python backend factory above; adding CLI

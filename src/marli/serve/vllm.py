@@ -32,6 +32,12 @@ class VLLMServeConfig:
     enable_lora: bool = True
     max_loras: int = 4
     max_lora_rank: int = 32
+    lora_target_modules: list[str] = doc_field(
+        default_factory=list,
+        help="restrict vLLM's LoRA wrappers to these module names (packed parents match "
+        "their parts, e.g. q_proj -> qkv_proj); empty = every supported module. Learners "
+        "may only train names in this list",
+    )
     tensor_parallel_size: int = 1
     enable_sleep_mode: bool = doc_field(
         False,
@@ -72,6 +78,10 @@ class VLLMServeConfig:
             raise ConfigError("enable_lora and max_lora_rank must support every learner rank")
         if self.enable_lora and self.max_loras < len(self.learner_ranks) + 1:
             raise ConfigError("max_loras must reserve space for learners plus a snapshot")
+        if any(type(name) is not str or not name for name in self.lora_target_modules):
+            raise ConfigError("lora_target_modules must contain non-empty module names")
+        if self.lora_target_modules and not self.enable_lora:
+            raise ConfigError("lora_target_modules requires enable_lora")
 
 
 # vLLM 0.30.x api_server / EngineArgs spellings. vLLM is pod-only; keep the
@@ -128,6 +138,8 @@ def launch_args(cfg: VLLMServeConfig) -> tuple[ModelSpec, list[str], dict[str, s
         argv.append(flag)
         if key not in _SWITCHES:
             argv.append(str(values[key]))
+    if cfg.lora_target_modules:
+        argv.extend(["--lora-target-modules", *cfg.lora_target_modules])
     argv.extend(cfg.extra_args)
     env = {"VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
     if cfg.enable_sleep_mode:
@@ -154,6 +166,7 @@ class Server(Handle):
     enable_lora: bool = True
     max_loras: int = 4
     max_lora_rank: int = 32
+    lora_target_modules: list[str] = field(default_factory=list)  # empty = unrestricted
     tensor_parallel_size: int = 1
     enable_sleep_mode: bool = False
 
@@ -199,6 +212,7 @@ async def vllm(cfg: VLLMServeConfig, run: RunDir) -> Server:
             enable_lora=cfg.enable_lora,
             max_loras=cfg.max_loras,
             max_lora_rank=cfg.max_lora_rank,
+            lora_target_modules=list(cfg.lora_target_modules),
             tensor_parallel_size=cfg.tensor_parallel_size,
             enable_sleep_mode=cfg.enable_sleep_mode,
         )
