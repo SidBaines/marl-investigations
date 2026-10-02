@@ -57,11 +57,11 @@ Manifest produced: `dashboard.json`.
 | watch_s | float | 0.0 | false | true | false | > 0: keep refreshing every watch_s s until SIGINT |
 | max_refreshes | int \| None | null | false | true | false | stop watching after N refreshes |
 | grouped | dict[str, str] | {} | false | true | false | train rl: grade component -> chart title; one chart per component with a line per agent plus the average, in mapping order (empty: no such charts) |
-| agent_labels | dict[str, str] | {} | false | true | false | legend label per agent id in grouped charts (default: the id; _system is 'average') |
-| smooth_steps | int | 5 | false | true | false | grouped charts: trailing rolling-mean window in steps (1 = no smoothing) |
-| split_by | str \| None | null | false | true | false | train rl: a 0/1 grade component; adds a chart per other grouped component with one line for agents where it is 1 and one where it is 0, from the rollouts |
+| agent_labels | dict[str, str] | {} | false | true | false | legend label per agent id in the charts (default: the id; _system is 'average') |
+| smooth_steps | int | 5 | false | true | false | charts: trailing smoothing window in steps (1 = no smoothing) |
+| split_by | str \| None | null | false | true | false | train rl: a 0/1 grade component that splits each agent's turns by its own value: per other grouped component a pair of charts (where 1, where 0) with a line per split agent plus all of them pooled |
 | split_labels | list[str] | [] | false | true | false | split_by legend labels: [label where it is 1, label where it is 0] |
-| split_agents | list[str] | [] | false | true | false | agent ids pooled in the split charts (empty: every agent) |
+| split_agents | list[str] | [] | false | true | false | agent ids in the split charts (empty: every agent) |
 | serve_port | int \| None | null | false | true | false | serve the live page on this port (0 = any free port) and keep refreshing every watch_s (default refresh_s) until SIGINT; the URL is logged and written to serve.json |
 | serve_host | str | 127.0.0.1 | false | true | false | bind address for serve_port; off loopback (e.g. 0.0.0.0 behind a pod's HTTPS proxy) every request needs the access key ($MARLI_DASHBOARD_KEY, else random per start) |
 

@@ -293,99 +293,95 @@ def _grade_means(state: dict[str, Any]) -> dict[str, dict[str, float]]:
     }
 
 
-def _split_init() -> dict[str, Any]:
-    return {"1": {}, "0": {}}
+CUBE_SIDES = ("1", "0", "none")  # split_by >= 0.5, < 0.5, missing (or no split_by)
 
 
-def _split_fold(
-    split_by: str, agents: frozenset[str]
+def _cube_init() -> dict[str, Any]:
+    return {}
+
+
+def _cube_fold(
+    components: tuple[str, ...], split_by: str | None
 ) -> Callable[[dict[str, Any], dict[str, Any]], None]:
-    """Sum every grade component per side of ``split_by`` (1 or 0) over ok episodes' agents."""
+    """Per agent and side of ``split_by``: the agent's turns in ok episodes and, per wanted
+    component, ``[sum, n]``. ``_system`` (already a mean over agents) is left out."""
 
     def fold(state: dict[str, Any], row: dict[str, Any]) -> None:
         if not row.get("ok", True):
             return
-        for agent, components in (row.get("grades") or {}).items():
-            if agent == SYSTEM_AGENT or not isinstance(components, dict):
+        for agent, grades in (row.get("grades") or {}).items():
+            if agent == SYSTEM_AGENT or not isinstance(agent, str) or not isinstance(grades, dict):
                 continue
-            if agents and agent not in agents:
-                continue
-            side = _num(components.get(split_by))
-            if side is None:
-                continue
-            sums = state["1" if side >= 0.5 else "0"]
-            for name, value in components.items():
-                number = _num(value)
-                if isinstance(name, str) and number is not None:
-                    total = sums.setdefault(name, [0.0, 0])
+            value = _num(grades.get(split_by)) if split_by else None
+            side = "none" if value is None else "1" if value >= 0.5 else "0"
+            cell = state.setdefault(agent, {}).setdefault(side, {"turns": 0, "sums": {}})
+            cell["turns"] += 1
+            for name in components:
+                number = _num(grades.get(name))
+                if number is not None:
+                    total = cell["sums"].setdefault(name, [0.0, 0])
                     total[0] += number
                     total[1] += 1
 
     return fold
 
 
-def pooled_mean(points: list[list[float]], window: int) -> list[list[float]]:
-    """Per point ``[step, sum, n]``: the pooled mean over it and up to ``window - 1`` before."""
-    out = []
-    for i, (step, _, _) in enumerate(points):
-        recent = points[max(0, i - window + 1) : i + 1]
-        out.append([step, sum(p[1] for p in recent) / sum(p[2] for p in recent)])
-    return out
+def _compact(value: float) -> float | int:
+    """A sum for the snapshot: an int when whole (most grades are 0/1), else 6 decimals."""
+    return int(value) if float(value).is_integer() else round(value, 6)
 
 
-def split_groups(
-    steps: list[tuple[float, dict[str, Any]]],
-    grouped: Mapping[str, str],
-    split_by: str,
-    labels: list[str],
-    smooth_steps: int,
+def explore_cube(
+    steps: list[tuple[int, dict[str, Any]]], components: Iterable[str]
 ) -> dict[str, Any]:
-    """Grouped components split by ``split_by``: per component a line where it is 1 and one
-    where it is 0, plus how many agents each line has per step.
+    """Per-step sums and counts by agent, side and component, for the browser to pool.
 
-    Solid lines pool the last ``smooth_steps`` steps' agents (sum over sum), so a step with few
-    agents on one side weighs less than a full one.
+    ``cells[agent][side]`` (side "1"/"0" by ``split_by``, "none" where it is missing or unset)
+    holds ``n``, the agent's turns per step, and ``sum[component]``, aligned to ``steps``; a
+    component graded on fewer turns than ``n`` also has its own counts in ``n_by[component]``.
+    Any selection's mean is then sum over sum, so a step with few turns weighs less.
     """
-    yes, no = labels or [f"{split_by} = 1", f"{split_by} = 0"]
-    sides = (("1", yes, 4), ("0", no, 5))
-
-    def group(component: str, title: str, count: bool) -> dict[str, Any] | None:
-        series = []
-        for side, label, slot in sides:
-            raw = []
-            for step, state in steps:
-                total = state[side].get(split_by if count else component)
-                if total and total[1]:
-                    raw.append([step, float(total[1]) if count else total[0], total[1]])
-            if not raw:
+    components = list(components)
+    agents = sorted(
+        {
+            agent
+            for _, state in steps
+            for agent, sides in state.items()
+            if any(cell["sums"] for cell in sides.values())
+        },
+        key=_natural,
+    )
+    cells: dict[str, dict[str, Any]] = {}
+    for agent in agents:
+        for side in CUBE_SIDES:
+            column = [state.get(agent, {}).get(side) for _, state in steps]
+            if not any(column):
                 continue
-            points = [[step, value if count else value / n] for step, value, n in raw]
-            smooth = (
-                trailing_mean(points, smooth_steps) if count else pooled_mean(raw, smooth_steps)
-            )
-            series.append(
-                {
-                    "agent": f"split:{side}",
-                    "label": label,
-                    "slot": slot,
-                    "points": points,
-                    "smooth": smooth,
-                }
-            )
-        return {"component": component, "title": title, "series": series} if series else None
-
-    # A trailing "(...)" in a grouped title describes its per-agent chart (e.g. its average line).
-    groups = [
-        group(component, re.sub(r"\s*\([^()]*\)$", "", title), False)
-        for component, title in grouped.items()
-        if component != split_by
-    ]
-    groups.append(group(split_by, "Agents in each group per step", True))
+            turns = [cell["turns"] if cell else 0 for cell in column]
+            sums: dict[str, list[float | int]] = {}
+            counts: dict[str, list[int]] = {}
+            for name in components:
+                totals = [(cell["sums"].get(name) if cell else None) or (0.0, 0) for cell in column]
+                if not any(n for _, n in totals):
+                    continue
+                sums[name] = [_compact(total) for total, _ in totals]
+                if [n for _, n in totals] != turns:
+                    counts[name] = [n for _, n in totals]
+            entry: dict[str, Any] = {"n": turns, "sum": sums}
+            if counts:
+                entry["n_by"] = counts
+            cells.setdefault(agent, {})[side] = entry
     return {
-        "by": split_by,
-        "title": grouped.get(split_by, split_by),
-        "groups": [g for g in groups if g is not None],
+        "steps": [step for step, _ in steps],
+        "components": components,  # an ordered list: the snapshot's JSON sorts mapping keys
+        "agents": agents,
+        "cells": cells,
     }
+
+
+def short_title(title: str) -> str:
+    """A grouped title without a trailing "(...)", which describes its per-agent chart."""
+    return re.sub(r"\s*\([^()]*\)$", "", title) or title
 
 
 def _rate_per_min(ends: list[float], now: float, window_s: float = 1800.0) -> float | None:
@@ -543,19 +539,22 @@ def _train_rl(
     step_files = sorted((path / "rollouts").glob("step_*/episodes.jsonl"))
     rollout_points = []
     current = None
-    split_steps: list[tuple[float, dict[str, Any]]] = []
-    split_agent_set = frozenset(split_agents)
-    split_tag = f"split:{split_by}:{','.join(sorted(split_agent_set))}" if split_by else ""
+    # The explorer's cube: completed steps' rollouts, per agent and side of split_by.
+    components = tuple(grouped or {})
+    if split_by and split_by not in components:
+        components += (split_by,)
+    cube_tag = json.dumps(["cube", split_by, components])
+    cube_steps: list[tuple[int, dict[str, Any]]] = []
     for file in step_files:
         try:
             step = int(file.parent.name.removeprefix("step_"))
         except ValueError:
             continue
-        if split_by and step <= completed:
-            fold = _split_fold(split_by, split_agent_set)
-            split = fold_jsonl(file, cache, _split_init, fold, tag=split_tag)
-            if split is not None:
-                split_steps.append((float(step), split["state"]))
+        if grouped and step <= completed:
+            fold = _cube_fold(components, split_by)
+            sides = fold_jsonl(file, cache, _cube_init, fold, tag=cube_tag)
+            if sides is not None:
+                cube_steps.append((step, sides["state"]))
         folded = fold_jsonl(file, cache, _episode_init, _episode_fold)
         if folded is None:
             continue
@@ -606,11 +605,27 @@ def _train_rl(
         "mean_step_s": mean_step,
     }
     if grouped:
-        run["train"]["groups"] = grade_groups(curves, grouped, agent_labels or {}, smooth_steps)
-    if grouped and split_by:
-        split = split_groups(split_steps, grouped, split_by, list(split_labels or []), smooth_steps)
-        split["agents"] = [agent_labels.get(a, a) if agent_labels else a for a in split_agents]
-        run["train"]["split"] = split
+        labels = agent_labels or {}
+        cube = explore_cube(cube_steps, components)
+        # One colour slot per agent across the grouped charts, the split charts and the explorer.
+        charted = {a for series in _grouped_curves(curves, grouped).values() for a in series}
+        slots = agent_slots(charted | set(cube["agents"]))
+        run["train"]["groups"] = grade_groups(curves, grouped, labels, smooth_steps, slots=slots)
+        cube["agents"] = [
+            {"id": agent, "label": labels.get(agent, agent), "slot": slots[agent]}
+            for agent in cube["agents"]
+        ]
+        cube["titles"] = {c: short_title(grouped.get(c, c)) for c in components}
+        run["train"]["explore"] = cube
+        if split_by:
+            wanted = set(split_agents)
+            yes, no = split_labels or [f"{split_by} = 1", f"{split_by} = 0"]
+            run["train"]["split"] = {
+                "by": split_by,
+                "title": grouped.get(split_by, split_by),
+                "labels": [yes, no],
+                "agents": [a["id"] for a in cube["agents"] if not wanted or a["id"] in wanted],
+            }
     run["facts"] = _config_facts(
         config,
         (
@@ -659,20 +674,10 @@ def trailing_mean(points: list[list[float]], window: int) -> list[list[float]]:
     ]
 
 
-def grade_groups(
-    curves: Mapping[str, list[list[float]]],
-    grouped: Mapping[str, str],
-    agent_labels: Mapping[str, str],
-    smooth_steps: int,
-) -> list[dict[str, Any]]:
-    """One chart per grade component: a series per agent, then the average.
-
-    ``slot`` is the agent's index among every agent charted for this run, so an
-    agent keeps its colour in charts where another agent has no data. Components
-    without any ``grades/<agent>/<component>`` curve are left out.
-    """
-    if smooth_steps < 1:
-        raise ValueError("smooth_steps must be a positive integer")
+def _grouped_curves(
+    curves: Mapping[str, list[list[float]]], grouped: Iterable[str]
+) -> dict[str, dict[str, list[list[float]]]]:
+    """Per grouped component, each agent's ``grades/<agent>/<component>`` curve."""
     found: dict[str, dict[str, list[list[float]]]] = {}
     for component in grouped:
         suffix = "/" + component
@@ -684,11 +689,38 @@ def grade_groups(
             and len(key) > len("grades/") + len(suffix)
             and points
         }
+    return found
+
+
+def agent_slots(agents: Iterable[str]) -> dict[str, int]:
+    """Colour slot per agent: its index in natural order (``_system`` has none)."""
+    order = sorted({agent for agent in agents if agent != SYSTEM_AGENT}, key=_natural)
+    return {agent: i for i, agent in enumerate(order)}
+
+
+def grade_groups(
+    curves: Mapping[str, list[list[float]]],
+    grouped: Mapping[str, str],
+    agent_labels: Mapping[str, str],
+    smooth_steps: int,
+    *,
+    slots: Mapping[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    """One chart per grade component: a series per agent, then the average.
+
+    ``slot`` is the agent's index among every agent charted for this run (or
+    ``slots``), so an agent keeps its colour in charts where another agent has no
+    data. Components without any ``grades/<agent>/<component>`` curve are left out.
+    """
+    if smooth_steps < 1:
+        raise ValueError("smooth_steps must be a positive integer")
+    found = _grouped_curves(curves, grouped)
+    if slots is None:
+        slots = agent_slots(agent for series in found.values() for agent in series)
     agents = sorted(
         {agent for series in found.values() for agent in series if agent != SYSTEM_AGENT},
         key=_natural,
     )
-    slots = {agent: i for i, agent in enumerate(agents)}
     groups = []
     for component, title in grouped.items():
         series = found[component]
@@ -968,9 +1000,12 @@ def collect(
 
     ``grouped`` (grade component -> chart title) adds ``train.groups`` to train
     runs: per component, one series per agent (labelled from ``agent_labels``)
-    plus the average, each with a trailing ``smooth_steps``-point mean.
-    ``split_by`` (a 0/1 grade component) adds ``train.split``: the other grouped
-    components split by it, pooled over ``split_agents`` (default every agent).
+    plus the average, each with a trailing ``smooth_steps``-point mean. It also
+    adds ``train.explore``, completed steps' per-agent sums and counts of the
+    grouped components (see ``explore_cube``), from which the page draws its
+    explorer and split charts. ``split_by`` (a 0/1 grade component) sides that
+    cube by each agent's own value and adds ``train.split``: its labels and the
+    ``split_agents`` (default every agent) whose turns the split charts show.
     """
     if type(smooth_steps) is not int or smooth_steps < 1:
         raise ValueError("smooth_steps must be a positive integer")

@@ -270,8 +270,12 @@ tool output or answers.
 `experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/dashboard.yaml`:
 `grouped` maps a grade component to a chart title (one chart per component,
 a line per agent plus the average), `agent_labels` names the agents and
-`smooth_steps` sets the rolling mean. Everything is a runtime setting, so the
-same `--out` can be reused.
+`smooth_steps` sets the rolling mean. `split_by` names a 0/1 grade component
+(e.g. `rule_known_at_start`) that splits each agent's turns by its own value:
+per other grouped component, a pair of charts (where it is 1, where it is 0,
+sharing one y-range) with a line per `split_agents` agent plus all of them
+pooled, then the same pair counting turns. Everything is a runtime setting, so
+the same `--out` can be reused.
 
 **Run it where the run dirs are** (a pod, the dev box, or a laptop with
 synced copies) and leave it running; it refreshes every `watch_s` (default

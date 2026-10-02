@@ -476,15 +476,20 @@ def test_no_signal_share_is_derived_and_listed_after_rewards(tmp_path: Path) -> 
     assert "groups" not in train  # grouped is empty: the old structure
 
 
-def split_episode(grades: dict[str, dict[str, float]], ok: bool = True) -> str:
-    return json.dumps({"ok": ok, "grades": {**grades, "_system": {"score": 9, "knew": 1}}}) + "\n"
+def split_episode(grades: dict[str, dict[str, Any]], ok: bool = True) -> str:
+    row = {
+        "ok": ok,
+        "grades": {**grades, "_system": {"score": 9, "knew": 1}},
+        "transcript": f"{PROMPT_SENTINEL} {ANSWER_SENTINEL}",  # text that must stay here
+    }
+    return json.dumps(row) + "\n"
 
 
 SPLIT_GROUPED = {"knew": "Started knowing", "score": "Score (avg = team)", "probed": "Chose review"}
 
 
-async def test_split_charts_pool_agents_by_a_zero_one_grade(tmp_path: Path) -> None:
-    path = relay_run(tmp_path)  # metrics rows for steps 0-3: steps 0-3 are complete
+def split_rollouts(path: Path) -> Path:
+    """Rollouts for completed steps 0 and 1 and the sampling step 9; returns step 1's file."""
     rollouts = path / "rollouts"
     for step in (0, 1, 9):
         (rollouts / f"step_{step:05d}").mkdir(parents=True)
@@ -510,14 +515,44 @@ async def test_split_charts_pool_agents_by_a_zero_one_grade(tmp_path: Path) -> N
             {
                 "contrib1": {"knew": 1, "score": 0, "probed": 1},
                 "contrib2": {"knew": 1, "score": 0, "probed": 1, "n": 4},
-                "contrib3": {"score": 1},  # no split grade: left out
+                # No split grade ("none" side); a text grade is not a number.
+                "contrib3": {"score": 1, "probed": ANSWER_SENTINEL},
             }
         )
     )
-    # A step still sampling never enters the split charts.
+    # A step still sampling never enters the cube.
     (rollouts / "step_00009" / "episodes.jsonl").write_text(
         split_episode({"contrib1": {"knew": 1, "score": 1, "probed": 1}})
     )
+    return step1
+
+
+def pool(
+    cube: dict[str, Any], agents: list[str], sides: list[str], component: str, window: int
+) -> tuple[list[list[float]], list[list[float]]]:
+    """What the page draws from the cube: per-step means and the window's sum over sum."""
+    rows = []
+    for i, step in enumerate(cube["steps"]):
+        total = n = 0
+        for agent in agents:
+            for side in sides:
+                cell = cube["cells"].get(agent, {}).get(side)
+                if cell and component in cell["sum"]:
+                    total += cell["sum"][component][i]
+                    n += cell.get("n_by", {}).get(component, cell["n"])[i]
+        if n:
+            rows.append((step, total, n))
+    raw = [[step, total / n] for step, total, n in rows]
+    smooth = []
+    for i, (step, _, _) in enumerate(rows):
+        recent = rows[max(0, i - window + 1) : i + 1]
+        smooth.append([step, sum(r[1] for r in recent) / sum(r[2] for r in recent)])
+    return raw, smooth
+
+
+async def test_explore_cube_splits_each_agent_and_pools_sum_over_sum(tmp_path: Path) -> None:
+    path = relay_run(tmp_path)  # metrics rows for steps 0-3: steps 0-3 are complete
+    step1 = split_rollouts(path)
     cfg = dash(
         tmp_path,
         grouped=SPLIT_GROUPED,
@@ -525,56 +560,103 @@ async def test_split_charts_pool_agents_by_a_zero_one_grade(tmp_path: Path) -> N
         smooth_steps=2,
         split_by="knew",
         split_labels=["Knew", "Did not"],
-        split_agents=["contrib1", "contrib2"],
+        split_agents=["contrib1", "contrib2", "contrib9"],
     )
     await run_verb("dashboard", cfg, out=tmp_path / "dash")
     snapshot = json.loads((tmp_path / "dash" / "snapshot.json").read_text())
     train = by_name(snapshot)["relay"]["train"]
-    split = train["split"]
-    assert (split["by"], split["title"], split["agents"]) == (
-        "knew",
-        "Started knowing",
-        ["2nd", "contrib2"],
-    )
-    # The split component itself becomes the count chart, last; titles drop a trailing "(...)".
-    assert [(g["component"], g["title"]) for g in split["groups"]] == [
-        ("score", "Score"),
-        ("probed", "Chose review"),
-        ("knew", "Agents in each group per step"),
+    # Split agents that have no turns are dropped; ids, not labels (the cube is keyed by id).
+    assert train["split"] == {
+        "by": "knew",
+        "title": "Started knowing",
+        "labels": ["Knew", "Did not"],
+        "agents": ["contrib1", "contrib2"],
+    }
+    cube = train["explore"]
+    assert cube["steps"] == [0, 1]  # step 9 is still sampling
+    assert cube["components"] == ["knew", "score", "probed"]  # grouped order
+    assert cube["titles"] == {"knew": "Started knowing", "score": "Score", "probed": "Chose review"}
+    # One colour slot per agent over the grouped charts' agents (contrib10) and the cube's.
+    assert cube["agents"] == [
+        {"id": "contrib0", "label": "contrib0", "slot": 0},
+        {"id": "contrib1", "label": "2nd", "slot": 1},
+        {"id": "contrib2", "label": "contrib2", "slot": 2},
+        {"id": "contrib3", "label": "contrib3", "slot": 3},
     ]
-    score, probed, counts = ({s["agent"]: s for s in g["series"]} for g in split["groups"])
-    assert [(s["label"], s["slot"]) for s in score.values()] == [("Knew", 4), ("Did not", 5)]
-    assert score["split:1"]["points"] == [[0, 1.0], [1, pytest.approx(1 / 3)]]
-    # Solid lines pool the window's agents: (1 + 1) / (1 + 3), not the mean of 1 and 1/3.
-    assert score["split:1"]["smooth"] == [[0, 1.0], [1, 0.5]]
-    assert probed["split:1"]["smooth"] == [[0, 0.0], [1, 0.75]]
-    assert score["split:0"]["points"] == [[0, 0.0], [1, 0.0]]
-    assert probed["split:0"]["points"] == [[0, 1.0], [1, 0.0]]
-    assert counts["split:1"]["points"] == [[0, 1.0], [1, 3.0]]
-    assert counts["split:1"]["smooth"] == [[0, 1.0], [1, 2.0]]
-    assert counts["split:0"]["points"] == [[0, 1.0], [1, 1.0]]
+    slots = {s["agent"]: s["slot"] for g in train["groups"] for s in g["series"]}
+    assert slots == {"contrib0": 0, "contrib2": 2, "contrib10": 4, "_system": None}
+    # Every agent's ok turns, by its own side; _system and the failed episode are left out.
+    cells = cube["cells"]
+    assert cells["contrib0"] == {
+        "0": {"n": [1, 0], "sum": {"knew": [0, 0], "score": [0, 0], "probed": [1, 0]}}
+    }
+    assert cells["contrib1"] == {
+        "1": {"n": [1, 1], "sum": {"knew": [1, 1], "score": [1, 0], "probed": [0, 1]}},
+        "0": {"n": [0, 1], "sum": {"knew": [0, 0], "score": [0, 0], "probed": [0, 0]}},
+    }
+    assert cells["contrib2"]["1"] == {
+        "n": [0, 2],
+        "sum": {"knew": [0, 2], "score": [0, 1], "probed": [0, 2]},
+    }
+    # No split grade: the "none" side; the text grade is not counted, so probed has no sums.
+    assert cells["contrib3"] == {"none": {"n": [0, 1], "sum": {"score": [0, 1]}}}
+    # Pooling the split agents reproduces sum over sum: (1 + 1) / (1 + 3), not mean(1, 1/3).
+    split_agents = train["split"]["agents"]
+    raw, smooth = pool(cube, split_agents, ["1"], "score", 2)
+    assert raw == [[0, 1.0], [1, pytest.approx(1 / 3)]] and smooth == [[0, 1.0], [1, 0.5]]
+    assert pool(cube, split_agents, ["1"], "probed", 2)[1] == [[0, 0.0], [1, 0.75]]
+    assert pool(cube, split_agents, ["0"], "probed", 2)[0] == [[0, 1.0], [1, 0.0]]
+    # "All rollouts" pools every side: contrib3's "none" turn counts there.
+    assert pool(cube, ["contrib2", "contrib3"], ["1", "0", "none"], "score", 1)[0] == [
+        [0, 0.0],
+        [1, pytest.approx(2 / 3)],
+    ]
     assert train["current_step"]["episodes_done"] == 1  # the main fold is untouched
-    assert "Split by" in (tmp_path / "dash" / "standalone.html").read_text()
+    for name in ("snapshot.json", "index.html", "standalone.html", "cache.json"):
+        text = (tmp_path / "dash" / name).read_text()
+        assert PROMPT_SENTINEL not in text and ANSWER_SENTINEL not in text, name
 
     # Rows appended later are folded on the next pass from the cached offset.
     with step1.open("a") as stream:
         stream.write(split_episode({"contrib2": {"knew": 0, "score": 1, "probed": 1}}))
     await run_verb("dashboard", cfg, out=tmp_path / "dash")
     snapshot = json.loads((tmp_path / "dash" / "snapshot.json").read_text())
-    score, _, counts = (
-        {s["agent"]: s for s in g["series"]}
-        for g in by_name(snapshot)["relay"]["train"]["split"]["groups"]
-    )
-    assert counts["split:0"]["points"] == [[0, 1.0], [1, 2.0]]
-    assert score["split:0"]["points"][-1] == [1, 0.5]
+    cube = by_name(snapshot)["relay"]["train"]["explore"]
+    assert cube["cells"]["contrib2"]["0"]["n"] == [1, 1]
+    assert pool(cube, split_agents, ["0"], "score", 1)[0] == [[0, 0.0], [1, 0.5]]
 
 
-def test_no_split_without_split_by(tmp_path: Path) -> None:
-    relay_run(tmp_path)
+def test_cube_counts_a_component_graded_on_fewer_turns() -> None:
+    fold = collect_module._cube_fold(("score", "probed"), None)
+    state: dict[str, Any] = {}
+    rows = [
+        {"grades": {"a": {"score": 0.25, "probed": 1}, "b": {"score": 1}}},
+        {"grades": {"a": {"score": 0.5, "probed": True}, "_system": {"score": 3}}},  # bool: no
+        {"ok": False, "grades": {"a": {"score": 1, "probed": 1}}},
+        {"grades": {"a": "not a dict", "b": {"other": 2}}},
+    ]
+    for row in rows:
+        fold(state, row)
+    cube = collect_module.explore_cube([(4, state)], ["score", "probed"])
+    assert cube["steps"] == [4] and cube["agents"] == ["a", "b"]
+    # Without split_by every turn is on the "none" side; probed was graded on 1 of a's 2 turns.
+    assert cube["cells"]["a"] == {
+        "none": {"n": [2], "sum": {"score": [0.75], "probed": [1]}, "n_by": {"probed": [1]}}
+    }
+    assert cube["cells"]["b"] == {"none": {"n": [2], "sum": {"score": [1]}, "n_by": {"score": [1]}}}
+
+
+def test_grouped_without_split_by_has_a_cube_but_no_split(tmp_path: Path) -> None:
+    split_rollouts(relay_run(tmp_path))
     snapshot = collect(
         [str(tmp_path / "experiments")], probe_servers=False, gpus=False, grouped=SPLIT_GROUPED
     )
-    assert "split" not in by_name(snapshot)["relay"]["train"]
+    train = by_name(snapshot)["relay"]["train"]
+    assert "split" not in train
+    cube = train["explore"]
+    assert cube["components"] == ["knew", "score", "probed"] and cube["steps"] == [0, 1]
+    assert {side for sides in cube["cells"].values() for side in sides} == {"none"}
+    assert cube["cells"]["contrib1"]["none"]["n"] == [1, 2]
 
 
 def test_no_signal_share_skipped_without_group_counts(tmp_path: Path) -> None:
@@ -632,3 +714,4 @@ def test_render_draws_grouped_charts_and_raw_toggle(tmp_path: Path) -> None:
             assert page.count(f"--series-{slot}:") == 3
     plain = collect([str(tmp_path / "experiments")], probe_servers=False, gpus=False)
     assert "groups" not in by_name(plain)["relay"]["train"]
+    assert "explore" not in by_name(plain)["relay"]["train"]

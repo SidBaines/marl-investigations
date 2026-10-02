@@ -63,22 +63,23 @@ class DashboardConfig:
     )
     agent_labels: dict[str, str] = runtime_field(
         default_factory=dict,
-        help="legend label per agent id in grouped charts (default: the id; _system is 'average')",
+        help="legend label per agent id in the charts (default: the id; _system is 'average')",
     )
     smooth_steps: int = runtime_field(
-        5, help="grouped charts: trailing rolling-mean window in steps (1 = no smoothing)"
+        5, help="charts: trailing smoothing window in steps (1 = no smoothing)"
     )
     split_by: str | None = runtime_field(
         None,
-        help="train rl: a 0/1 grade component; adds a chart per other grouped component with one"
-        " line for agents where it is 1 and one where it is 0, from the rollouts",
+        help="train rl: a 0/1 grade component that splits each agent's turns by its own value:"
+        " per other grouped component a pair of charts (where 1, where 0) with a line per split"
+        " agent plus all of them pooled",
     )
     split_labels: list[str] = runtime_field(
         default_factory=list,
         help="split_by legend labels: [label where it is 1, label where it is 0]",
     )
     split_agents: list[str] = runtime_field(
-        default_factory=list, help="agent ids pooled in the split charts (empty: every agent)"
+        default_factory=list, help="agent ids in the split charts (empty: every agent)"
     )
     serve_port: int | None = runtime_field(
         None,

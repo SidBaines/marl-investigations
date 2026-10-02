@@ -160,6 +160,13 @@ details.run > summary:focus-visible { outline: 2px solid var(--accent); outline-
 .gplot .hit { fill: transparent; }
 .gplot .hit:hover { fill: var(--ink); fill-opacity: 0.06; }
 .hide-raw .g-raw { display: none; }
+.gplot.dual { grid-template-columns: auto minmax(0, 1fr) auto; }
+.gplot .yax.right { text-align: left; }
+.legend .lhead { font: 600 11.5px var(--cond); color: var(--ink-3); letter-spacing: 0.03em; white-space: normal; }
+.pairs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr)); gap: 10px; min-width: 0; }
+.pair-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; min-width: 0; }
+.pair-side { display: grid; gap: 4px; align-content: start; min-width: 0; }
+.side-name { font: 600 12px var(--cond); color: var(--ink-2); letter-spacing: 0.02em; }
 .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; margin-left: auto; }
 .toggle input { accent-color: var(--accent); margin: 0; }
 .scroll { overflow-x: auto; }
@@ -180,6 +187,9 @@ details.more > summary:focus-visible { outline: 2px solid var(--accent); outline
   .cell { text-align: left; }
   .gpu { grid-template-columns: 56px 1fr; }
   .gpu .vals { grid-column: 1 / -1; text-align: left; }
+}
+@media (max-width: 520px) {
+  .pair-grid { grid-template-columns: minmax(0, 1fr); }
 }
 @media (prefers-reduced-motion: no-preference) {
   .meter i { transition: width 0.4s ease; }
@@ -218,7 +228,7 @@ SCRIPT = r"""
   }
   function s(tag, attrs) {
     var node = document.createElementNS(SVGNS, tag);
-    for (var k in attrs) node.setAttribute(k, attrs[k]);
+    for (var k in attrs) if (attrs[k] != null) node.setAttribute(k, attrs[k]);
     return node;
   }
   function fmt(v) {
@@ -299,81 +309,172 @@ SCRIPT = r"""
         h("span", { text: pts.length > 1 ? "steps " + x0 + "–" + x1 : "step " + x0 })));
   }
 
-  function groupChart(group, smoothN) {
-    var W = 300, H = 150, P = 6;
-    var series = group.series || [];
-    var all = [], steps = {};
-    series.forEach(function (sr) {
-      sr.points.forEach(function (p) { all.push(p[1]); steps[p[0]] = 1; });
-      sr.smooth.forEach(function (p) { all.push(p[1]); });
+  function slotColor(slot) { return "var(--series-" + ((slot || 0) % 6 + 1) + ")"; }
+  function extent(values) {
+    if (!values.length) return [0, 1];
+    var lo = Math.min.apply(null, values), hi = Math.max.apply(null, values);
+    if (hi === lo) { var pad = Math.abs(hi) * 0.1 || 1; lo -= pad; hi += pad; }
+    return [lo, hi];
+  }
+  function lineValues(series) {
+    var vals = [];
+    series.forEach(function (sr) { sr.main.concat(sr.faint || []).forEach(function (p) { vals.push(p[1]); }); });
+    return vals;
+  }
+  function trailing(pts, win) {
+    return pts.map(function (p, i) {
+      var lo = Math.max(0, i - win + 1), sum = 0;
+      for (var j = lo; j <= i; j++) sum += pts[j][1];
+      return [p[0], sum / (i - lo + 1)];
     });
+  }
+  // From per-step [step, sum, n]: each step's mean, and the pooled mean (sum over sum) of the
+  // last `win` steps that have any turns, so a step with few turns weighs less.
+  function meanLines(totals, win) {
+    var pts = totals.filter(function (t) { return t[2] > 0; });
+    return {
+      raw: pts.map(function (t) { return [t[0], t[1] / t[2]]; }),
+      smooth: pts.map(function (t, i) {
+        var sum = 0, n = 0;
+        for (var j = Math.max(0, i - win + 1); j <= i; j++) { sum += pts[j][1]; n += pts[j][2]; }
+        return [t[0], sum / n];
+      })
+    };
+  }
+  function countLines(totals, win) {
+    var raw = totals.map(function (t) { return [t[0], t[2]]; });
+    return { raw: raw, smooth: trailing(raw, win) };
+  }
+  // The explore cube summed over agents `ids` and `sides` per step: [step, sum, n]. A null
+  // component counts the agents' turns instead.
+  function cubeTotals(ex, ids, sides, comp) {
+    return ex.steps.map(function (step, i) {
+      var sum = 0, n = 0;
+      ids.forEach(function (id) {
+        var bySide = ex.cells[id] || {};
+        sides.forEach(function (side) {
+          var cell = bySide[side];
+          if (!cell) return;
+          if (comp == null) { n += cell.n[i]; return; }
+          var sums = cell.sum[comp];
+          if (!sums) return;
+          sum += sums[i];
+          n += ((cell.n_by && cell.n_by[comp]) || cell.n)[i];
+        });
+      });
+      return [step, sum, n];
+    });
+  }
+  // A series to plot from {raw, smooth}. Mode "smooth": the smoothed line; "both": plus faint
+  // per-step lines; "toggle": those faint lines follow the page's raw toggle; "raw": per step only.
+  function lineSeries(lines, mode, props) {
+    var sr = Object.assign({ axis: 0, main: lines.smooth, faint: null, raw: lines.raw }, props);
+    if (mode === "raw") { sr.main = lines.raw; sr.raw = null; }
+    else if (mode === "both" || mode === "toggle") { sr.faint = lines.raw; sr.faintCls = mode === "toggle" ? "g-raw" : null; }
+    return sr;
+  }
+
+  // A line chart over steps with one or two y-axes. Each series has label, color, dash, thick,
+  // axis (0 left, 1 right) and main/faint/raw lines as [[step, value]]; spec.ranges[axis] fixes
+  // an axis's [lo, hi], else it fits that axis's lines. spec.onStep(step, rows) follows the
+  // pointer (and is first called for the last step).
+  function plot(spec) {
+    var W = 300, H = 150, P = 6;
+    var series = spec.series.filter(function (sr) { return sr.main.length; });
+    if (!series.length) return h("div", { cls: "muted", text: spec.empty || "No data yet." });
+    var steps = {};
+    series.forEach(function (sr) { sr.main.forEach(function (p) { steps[p[0]] = 1; }); });
     var xs = Object.keys(steps).map(Number).sort(function (a, b) { return a - b; });
-    var lo = Math.min.apply(null, all), hi = Math.max.apply(null, all);
-    var ylo = lo, yhi = hi;
-    if (yhi === ylo) { var pad = Math.abs(yhi) * 0.1 || 1; ylo -= pad; yhi += pad; }
+    var axes = [0, 1].map(function (axis) {
+      var mine = series.filter(function (sr) { return sr.axis === axis; });
+      if (!mine.length) return null;
+      return (spec.ranges && spec.ranges[axis]) || extent(lineValues(mine));
+    });
     var x0 = xs[0], x1 = xs[xs.length - 1];
     function X(x) { return x1 === x0 ? W / 2 : ((x - x0) / (x1 - x0)) * (W - 2 * P) + P; }
-    function Y(y) { return H - P - ((y - ylo) / (yhi - ylo)) * (H - 2 * P); }
-    function path(pts) { return pts.map(function (p, i) { return (i ? "L" : "M") + X(p[0]).toFixed(1) + " " + Y(p[1]).toFixed(1); }).join(" "); }
-    function color(sr) { return sr.agent === "_system" ? "var(--ink)" : "var(--series-" + ((sr.slot || 0) % 6 + 1) + ")"; }
-    function dash(sr) { return sr.agent !== "_system" && sr.slot >= 6 ? "5 3" : null; }
+    function Y(axis, y) { var r = axes[axis]; return H - P - ((y - r[0]) / (r[1] - r[0])) * (H - 2 * P); }
+    function path(sr, pts) { return pts.map(function (p, i) { return (i ? "L" : "M") + X(p[0]).toFixed(1) + " " + Y(sr.axis, p[1]).toFixed(1); }).join(" "); }
     var svg = s("svg", { viewBox: "0 0 " + W + " " + H, preserveAspectRatio: "none", role: "img",
-      "aria-label": group.title + ": " + series.map(function (sr) { return sr.label; }).join(", ") + " over " + xs.length + " steps" });
+      "aria-label": spec.label + " over " + xs.length + " steps" });
     [0, 0.5, 1].forEach(function (f) {
       var y = P + f * (H - 2 * P);
       svg.appendChild(s("line", { x1: 0, x2: W, y1: y, y2: y, stroke: "var(--grid)", "stroke-width": 1, "vector-effect": "non-scaling-stroke" }));
     });
     var base = { fill: "none", "vector-effect": "non-scaling-stroke", "stroke-linejoin": "round", "stroke-linecap": "round" };
     function line(sr, pts, extra) {
-      var attrs = Object.assign({ d: path(pts), stroke: color(sr) }, base, extra);
-      if (dash(sr)) attrs["stroke-dasharray"] = dash(sr);
-      return s("path", attrs);
+      return s("path", Object.assign({ d: path(sr, pts), stroke: sr.color, "stroke-dasharray": sr.dash || null }, base, extra));
     }
-    if (smoothN > 1) series.forEach(function (sr) {
-      if (sr.points.length > 1) svg.appendChild(line(sr, sr.points, { "stroke-width": 1, "stroke-opacity": 0.4, "class": "g-raw" }));
+    series.forEach(function (sr) {
+      if (sr.faint && sr.faint.length > 1) svg.appendChild(line(sr, sr.faint, { "stroke-width": 1, "stroke-opacity": 0.4, "class": sr.faintCls || null }));
     });
     series.forEach(function (sr) {
-      var avg = sr.agent === "_system";
-      if (sr.smooth.length > 1) svg.appendChild(line(sr, sr.smooth, { "stroke-width": avg ? 3 : 2 }));
-      var last = sr.smooth[sr.smooth.length - 1];
-      var dx = X(last[0]).toFixed(1), dy = Y(last[1]).toFixed(1);
-      svg.appendChild(s("path", { d: "M" + dx + " " + dy + " L" + dx + " " + dy, stroke: color(sr), "stroke-width": avg ? 7 : 6, "stroke-linecap": "round", "vector-effect": "non-scaling-stroke" }));
+      if (sr.main.length > 1) svg.appendChild(line(sr, sr.main, { "stroke-width": sr.thick ? 3 : 2 }));
+      var last = sr.main[sr.main.length - 1];
+      var dx = X(last[0]).toFixed(1), dy = Y(sr.axis, last[1]).toFixed(1);
+      svg.appendChild(s("path", { d: "M" + dx + " " + dy + " L" + dx + " " + dy, stroke: sr.color, "stroke-width": sr.thick ? 7 : 6, "stroke-linecap": "round", "vector-effect": "non-scaling-stroke" }));
     });
     // One invisible column per step; its tooltip lists every line's value there.
     var lookup = series.map(function (sr) {
-      var raw = {}, sm = {};
-      sr.points.forEach(function (p) { raw[p[0]] = p[1]; });
-      sr.smooth.forEach(function (p) { sm[p[0]] = p[1]; });
-      return { label: sr.label, raw: raw, sm: sm };
+      var main = {}, raw = {};
+      sr.main.forEach(function (p) { main[p[0]] = p[1]; });
+      (sr.raw || []).forEach(function (p) { raw[p[0]] = p[1]; });
+      return { sr: sr, main: main, raw: sr.raw ? raw : null };
     });
+    function at(x) {
+      return lookup.filter(function (row) { return x in row.main; }).map(function (row) {
+        return { sr: row.sr, value: row.main[x], raw: row.raw && x in row.raw ? row.raw[x] : null };
+      });
+    }
     xs.forEach(function (x, i) {
       var left = i ? (X(xs[i - 1]) + X(x)) / 2 : 0, right = i < xs.length - 1 ? (X(x) + X(xs[i + 1])) / 2 : W;
       var rect = s("rect", { x: left.toFixed(1), y: 0, width: Math.max(0.5, right - left).toFixed(1), height: H, "class": "hit" });
-      var lines = ["step " + x];
-      lookup.forEach(function (row) {
-        if (!(x in row.raw)) return;
-        lines.push(row.label + ": " + fmt(row.sm[x]) + (smoothN > 1 ? " (this step " + fmt(row.raw[x]) + ")" : ""));
-      });
+      var rows = at(x);
       var title = s("title", {});
-      title.textContent = lines.join("\n");
+      title.textContent = ["step " + x].concat(rows.map(function (r) {
+        return (r.sr.tip || r.sr.label) + ": " + fmt(r.value) + (r.raw != null ? " (this step " + fmt(r.raw) + ")" : "");
+      })).join("\n");
       rect.appendChild(title);
+      if (spec.onStep) {
+        rect.addEventListener("mouseenter", function () { spec.onStep(x, rows); });
+        rect.addEventListener("click", function () { spec.onStep(x, rows); });
+      }
       svg.appendChild(rect);
     });
-    var legend = h("ul", { cls: "legend" });
+    if (spec.onStep) spec.onStep(x1, at(x1));
+    function yax(r, cls) { return h("div", { cls: "yax" + (cls ? " " + cls : ""), "aria-hidden": "true" }, h("span", { text: fmt(r[1]) }), h("span", { text: fmt(r[0]) })); }
+    return h("div", { cls: "gplot" + (axes[1] ? " dual" : "") },
+      axes[0] ? yax(axes[0]) : h("div", { "aria-hidden": "true" }),
+      svg,
+      axes[1] ? yax(axes[1], "right") : null,
+      h("div", { cls: "xax" }, h("span", { text: "step " + x0 }), h("span", { text: xs.length > 1 ? "step " + x1 : "" })));
+  }
+
+  // Legend: a line key per series and its latest plotted value (head: an optional first item).
+  function legend(series, head) {
+    var ul = h("ul", { cls: "legend" });
+    if (head) ul.appendChild(h("li", { cls: "lhead", text: head }));
     series.forEach(function (sr) {
+      if (!sr.main.length) return;
       var sw = h("i");
-      sw.style.borderTopColor = color(sr);
-      if (dash(sr)) sw.style.borderTopStyle = "dashed";
-      legend.appendChild(h("li", { cls: sr.agent === "_system" ? "avg" : null }, sw, sr.label + " ",
-        h("span", { cls: "num", text: fmt(sr.smooth[sr.smooth.length - 1][1]) })));
+      sw.style.borderTopColor = sr.color;
+      if (sr.dash) sw.style.borderTopStyle = "dashed";
+      ul.appendChild(h("li", { cls: sr.thick ? "avg" : null }, sw, sr.label + " ",
+        h("span", { cls: "num", text: fmt(sr.main[sr.main.length - 1][1]) })));
+    });
+    return ul;
+  }
+
+  function groupChart(group, smoothN) {
+    var series = (group.series || []).map(function (sr) {
+      var avg = sr.agent === "_system";
+      return lineSeries({ raw: sr.points, smooth: sr.smooth }, smoothN > 1 ? "toggle" : "raw", {
+        label: sr.label, color: avg ? "var(--ink)" : slotColor(sr.slot),
+        dash: !avg && sr.slot >= 6 ? "5 3" : null, thick: avg });
     });
     return h("div", { cls: "gchart" },
       h("div", { cls: "t" }, h("b", { text: group.title }), h("span", { text: group.component })),
-      legend,
-      h("div", { cls: "gplot" },
-        h("div", { cls: "yax", "aria-hidden": "true" }, h("span", { text: fmt(yhi) }), h("span", { text: fmt(ylo) })),
-        svg,
-        h("div", { cls: "xax" }, h("span", { text: "step " + x0 }), h("span", { text: xs.length > 1 ? "step " + x1 : "" }))));
+      legend(series),
+      plot({ label: group.title + ": " + series.map(function (sr) { return sr.label; }).join(", "), series: series }));
   }
 
   function groupCharts(train) {
@@ -388,16 +489,48 @@ SCRIPT = r"""
     return h("div", { style: "display:grid;gap:8px" }, h("div", { cls: "groups-cap", text: cap }), grid);
   }
 
+  // Per grouped component a pair of charts, one per side of split_by, sharing one y-range: a
+  // line per split agent plus all of them pooled; then the same pair counting turns.
   function splitCharts(train) {
-    var split = train && train.split;
-    if (!split || !(split.groups || []).length) return null;
-    var n = snap.smooth_steps || 1;
-    var grid = h("div", { cls: "groups" });
-    split.groups.forEach(function (g) { grid.appendChild(groupChart(g, n)); });
-    var who = split.agents && split.agents.length ? split.agents.join(", ") : "every agent";
-    var cap = "Split by “" + split.title + "” (" + who + "). " + (n > 1
-      ? "Solid lines pool the agents of the last " + n + " steps; faint lines are each step on its own. "
-      : "") + "The last chart counts the agents on each side per step: a side with few agents is noisy.";
+    var split = train && train.split, ex = train && train.explore;
+    if (!split || !ex || !ex.steps.length) return null;
+    var n = snap.smooth_steps || 1, mode = n > 1 ? "toggle" : "raw";
+    var agents = (ex.agents || []).filter(function (a) { return (split.agents || []).indexOf(a.id) >= 0; });
+    var ids = agents.map(function (a) { return a.id; });
+    if (!ids.length) return null;
+    var sides = [["1", split.labels[0]], ["0", split.labels[1]]];
+    var grid = h("div", { cls: "pairs" });
+    ex.components.filter(function (c) { return c !== split.by; }).concat([null]).forEach(function (comp) {
+      var count = comp == null;
+      function lines(totals) { return count ? countLines(totals, n) : meanLines(totals, n); }
+      var panels = sides.map(function (side) {
+        var series = agents.map(function (a) {
+          return lineSeries(lines(cubeTotals(ex, [a.id], [side[0]], comp)), mode,
+            { label: a.label, color: slotColor(a.slot), dash: a.slot >= 6 ? "5 3" : null });
+        });
+        series.push(lineSeries(lines(cubeTotals(ex, ids, [side[0]], comp)), mode,
+          { label: count ? "total" : "pooled", color: "var(--ink)", thick: true }));
+        return { name: side[1], series: series.filter(function (sr) { return sr.main.length; }) };
+      });
+      var vals = lineValues(panels[0].series.concat(panels[1].series));
+      if (!vals.length) return;
+      var range = extent(vals);
+      var title = count ? "Agents in each group per step" : (ex.titles || {})[comp] || comp;
+      var row = h("div", { cls: "pair-grid" });
+      panels.forEach(function (p) {
+        row.appendChild(h("div", { cls: "pair-side" }, h("div", { cls: "side-name", text: p.name }),
+          p.series.length ? legend(p.series) : null,
+          plot({ label: title + ", " + p.name + ": " + p.series.map(function (sr) { return sr.label; }).join(", "),
+            series: p.series, ranges: [range, null], empty: "No turns on this side yet." })));
+      });
+      grid.appendChild(h("div", { cls: "gchart" },
+        h("div", { cls: "t" }, h("b", { text: title }), h("span", { text: count ? split.by + " (turns)" : comp })), row));
+    });
+    var who = agents.map(function (a) { return a.label; }).join(", ");
+    var cap = "Split by “" + split.title + "” for " + who + ": each agent's turn counts on the side of its own value. " +
+      "Both charts in a pair share one y-range. Coloured lines are each agent; the thick line pools all of them. " + (n > 1
+      ? "Solid lines pool the turns of the last " + n + " steps (sum over sum); faint lines are each step on its own. "
+      : "") + "The last pair counts the turns on each side per step: a side with few turns is noisy.";
     return h("div", { style: "display:grid;gap:8px" }, h("div", { cls: "subhead", text: "Split by " + split.title.toLowerCase() }),
       h("div", { cls: "groups-cap", text: cap }), grid);
   }
