@@ -163,7 +163,16 @@ average, smoothed and raw. The measures are:
 It also shows the share of groups with no learning signal. New numbers arrive once per training
 step (about 14 min), and the current step's progress shows in between.
 
-## Cost (2×H200 SXM SECURE, $9.18/hr)
+## Actual spend
+
+About $92 in total:
+- `n7gq0g825l2s5v`, the pod with the hot GPU: about 1.5 h, about $14;
+- `su24myzficgx5o`, the replacement: about 8.5 h, about $78.5. That covers the variant test, 30 training steps and
+  the upload of all 30 adapters.
+
+Both pods are deleted. The receipts are in `/workspace/marli-orchestration/2026-10-01/`.
+
+## Cost estimate before the run (2×H200 SXM SECURE, $9.18/hr)
 
 | Phase | Time | Cost |
 |---|---|---|
