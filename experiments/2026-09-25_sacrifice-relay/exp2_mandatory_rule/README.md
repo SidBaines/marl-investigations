@@ -53,6 +53,33 @@ Artefacts:
 - **Dev box (private):** `out/` holds rollouts, variant runs, the old pod's run and logs.
 - **Resume:** restore the run dir and rerun `VARIANT=checks run.sh train`.
 
+## Next: individual reward and experiment 2.1 (planned 2026-10-02, not started)
+
+Both runs use the `checks` prompt variant, 0/1 scoring, the 51 repos, 4 repos × 4 playthroughs per step, flat lr
+4e-5 and about 30 steps each. They run side by side on two 2×H200 pods (Sid: each pod is deleted as soon as its own run finishes).
+
+| Run | Config | Contributor 1 | Contributors 2–4 | Reward |
+|---|---|---|---|---|
+| Experiment 2, individual arm | `configs/train_individual.yaml` (`ARM=individual VARIANT=checks`) | the learner | the learner | each its own 0/1 score |
+| Experiment 2.1 | `configs/train_opener.yaml` (`ARM=opener VARIANT=checks`) | **frozen**: experiment 2's team-trained policy after step 29 | the learner | each its own 0/1 score; only contributors 2–4 train |
+
+- **Individual arm.** Contributor 1 can never score under 0/1 scoring, so its reward is always 0.
+  - A contributor without the rule gets 0 whether it reviews or submits. Nothing rewards reviewing directly.
+  - Writing the rule down helps only other contributors, which individual reward ignores.
+  - Expectation: reviewing and sharing decline, unless reward for using notes generalises to producing them (the
+    exposure hypothesis).
+- **Experiment 2.1.** Contributor 1 is a fixed copy of experiment 2's late-stage policy, sampled fresh each episode.
+  - About half the time it reviews and writes the rule into `NOTES.md`; otherwise it submits or never reaches CI.
+  - So contributors 2–4 always see the kind of evidence a trained team produces, and the opener's behaviour cannot
+    collapse during training.
+  - Readouts, by whether a contributor started knowing the rule:
+    - **Knew the rule (control):** do they learn to use it, i.e. read the notes, follow the rule and score?
+    - **Did not know it (the test):** do they learn to review, although under individual reward reviewing never
+      pays the reviewer?
+  - The opener is graded but never trained. `relay` gains `opener_role`, and its seat is a vLLM LoRA adapter.
+  - This is equivalent to the "resample contributor 1 from experiment 2's final checkpoint" option. No repo state
+    needs reconstructing from saved rollouts, every episode gets a fresh rule, and nothing saved is reused.
+
 ## What changes from experiment 1
 
 `configs/env.yaml` sets four environment settings. Everything else is identical: the same model,

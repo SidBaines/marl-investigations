@@ -1,0 +1,17 @@
+# Experiment 2.1: contributor 1 is a FROZEN copy of experiment 2's team-trained policy after step 29 (the
+# "opener"); contributors 2-4 train with individual reward. Each episode therefore starts from a fresh
+# late-stage experiment-2 opener: about half the time it reviews and writes the rule into NOTES.md, otherwise it
+# submits or never reaches CI. The opener adapter is loaded into this pod's server as `exp2-team-s29`
+# (run.sh opener); frozen seats never produce training data.
+run_name: sacrifice-relay-exp2.1-opener
+protocol: relay_n4
+protocol_config: {opener_role: opener}
+seating:
+  opener: "vllm:@experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/out/serve/server.json#exp2-team-s29"
+  contributor: "learner:policy"
+batch_tasks: 4
+group_size: 4
+credit: {reward_target: {contributor: individual}}
+learners:
+  policy: {base_model: qwen3_8_27b, backend: local, rank: 32, learning_rate: 4.0e-5}
+checkpoint_every: 1

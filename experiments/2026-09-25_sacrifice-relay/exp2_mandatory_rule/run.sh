@@ -11,6 +11,10 @@
 #   ./run.sh variants       # untrained model under each prompt variant (configs/variants/), GO/STOP each
 #   ./run.sh stop           # stop vLLM and the dashboard
 # VARIANT=<name> ./run.sh train adds configs/variants/<name>.yaml and trains into out/train_team_<name>.
+# ARM=<team|individual|opener> picks configs/train_<arm>.yaml (default team); out dir train_<arm>[_<variant>].
+# SLOT=<a|b> picks a GPU pair on a 4-GPU pod: a = GPUs 0,1, port 8000, out/serve (default);
+#   b = GPUs 2,3, port 8002, out/serve_b. `serve`, `train` and `stop` follow SLOT.
+#   ARM=opener ./run.sh opener loads experiment 2's step-29 adapter into this slot's server as exp2-team-s29.
 # Inputs from experiment 1 (copied in from the dev box): ../out/repos_n4 (51 relay repos).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" >/dev/null && pwd)"; STUDY="$(dirname "$HERE")"
@@ -20,15 +24,34 @@ REPOS="$STUDY/out/repos_n4/taskset.json"
 # --no-sync: a plain `uv run` would re-sync .venv to uv.lock and drop the pod-train torch pins.
 M="uv run --no-sync marli"
 export HF_HOME=/workspace/hf HF_HUB_OFFLINE=1
-SERVER="$OUT/serve/server.json"
+SLOT=${SLOT:-a}; ARM=${ARM:-team}
+case "$SLOT" in
+  a) GPUS=0,1; PORT=8000; SERVE_DIR="$OUT/serve"; DEVICES='local_devices=[cuda:0,cuda:1]'; LORAS=4 ;;
+  b) GPUS=2,3; PORT=8002; SERVE_DIR="$OUT/serve_b"; DEVICES='local_devices=[cuda:2,cuda:3]'; LORAS=6 ;;
+  *) echo "SLOT must be a or b" >&2; exit 2 ;;
+esac
+[ "$ARM" = opener ] && LORAS=6  # the frozen opener adapter needs a slot beside the learner's
+SERVER="$SERVE_DIR/server.json"
 EVAL_SERVER="$OUT/serve_eval/server.json"
-VARIANT_ARGS=(); RUN=train_team
-if [ -n "${VARIANT:-}" ]; then VARIANT_ARGS=("$C/variants/$VARIANT.yaml"); RUN="train_team_$VARIANT"; fi
+VARIANT_ARGS=(); RUN="train_$ARM"
+if [ -n "${VARIANT:-}" ]; then VARIANT_ARGS=("$C/variants/$VARIANT.yaml"); RUN="train_${ARM}_$VARIANT"; fi
+OPENER_DIR=/workspace/opener/sacrifice-relay-exp2-team-policy-s29-d81d6d
 
 case "${1:?phase}" in
 serve)
-  HF_HUB_OFFLINE=0 $M serve vllm "$STUDY/bench/serve/tp2_mtp2_sleep.yaml" detach=true "${@:2}" \
-    --out "$OUT/serve" ;;
+  HF_HUB_OFFLINE=0 $M serve vllm "$STUDY/bench/serve/tp2_mtp2_sleep.yaml" detach=true \
+    cuda_visible_devices="$GPUS" port="$PORT" max_loras="$LORAS" "${@:2}" --out "$SERVE_DIR" ;;
+opener)
+  # Experiment 2's team-trained step-29 adapter (HF sidbaines/amber-baton) as a frozen seat on this slot.
+  [ -f "$OPENER_DIR/adapter_config.json" ] || HF_HUB_OFFLINE=0 uv run --no-sync hf download \
+    sidbaines/amber-baton --include "exp2/train_team_checks/adapters/$(basename "$OPENER_DIR")/*" \
+    --local-dir /workspace/opener-hf
+  [ -f "$OPENER_DIR/adapter_config.json" ] || { mkdir -p /workspace/opener; cp -r \
+    "/workspace/opener-hf/exp2/train_team_checks/adapters/$(basename "$OPENER_DIR")" /workspace/opener/; }
+  curl -sf -X POST "http://127.0.0.1:$PORT/v1/load_lora_adapter" -H 'Content-Type: application/json' \
+    -d "{\"lora_name\": \"exp2-team-s29\", \"lora_path\": \"$OPENER_DIR\"}" && echo
+  curl -s "http://127.0.0.1:$PORT/v1/models" | python3 -c \
+    "import json,sys; print([m['id'] for m in json.load(sys.stdin)['data']])" ;;
 gate)
   $M eval rollout "$SC/eval_common.yaml" "$SC/eval_gate_n4.yaml" "$C/env.yaml" "$C/gate.yaml" \
     tasks="$REPOS" "policies.q.ref=vllm:@$SERVER#qwen3_8_27b" max_usd=1 "${@:2}" --out "$OUT/gate"
@@ -36,8 +59,8 @@ gate)
 train)
   # No CUDA_VISIBLE_DEVICES: the server and both learner ranks see both GPUs.
   TRITON_CACHE_DIR=/workspace/.triton/cache \
-    $M train rl "$SC/base.yaml" "$C/env.yaml" "${VARIANT_ARGS[@]}" "$C/train_team.yaml" tasks="$REPOS" \
-    max_usd=1 local_server_json="$SERVER" 'local_devices=[cuda:0,cuda:1]' local_sleep_sampler=true \
+    $M train rl "$SC/base.yaml" "$C/env.yaml" "${VARIANT_ARGS[@]}" "$C/train_$ARM.yaml" tasks="$REPOS" \
+    max_usd=1 local_server_json="$SERVER" "$DEVICES" local_sleep_sampler=true \
     concurrency=64 "${@:2}" --out "$OUT/$RUN" ;;
 serve_eval)
   HF_HUB_OFFLINE=0 $M serve vllm "$STUDY/bench/serve/dp2_mtp2.yaml" detach=true "${@:2}" \
@@ -67,7 +90,7 @@ dashboard)
 check)
   python3 "$HERE/check.py" "${2:-$OUT/train_team}" "${@:3}" ;;
 stop)
-  $M serve stop server_json="$SERVER" --out "$OUT/serve-stop" --force
+  $M serve stop server_json="$SERVER" --out "$SERVE_DIR-stop" --force
   # One SIGINT to uv, which passes it on once; the dashboard then records its manifest and exits.
   [ -f "$OUT/dashboard.pid" ] && kill -INT "$(cat "$OUT/dashboard.pid")" 2>/dev/null || true ;;
 *) echo "unknown phase $1" >&2; exit 2 ;;
