@@ -399,6 +399,7 @@ Manifest produced: `checkpoint.json`.
 | local_adapters_dir | str \| None | null | false | true | false | adapter snapshots dir |
 | local_devices | list[str] \| None | null | false | true | false | learner devices, e.g. [cuda:0, cuda:1] for a data-parallel learner |
 | local_sleep_sampler | bool | false | false | true | false | put vLLM to sleep while the learner trains (server needs enable_sleep_mode) |
+| local_adapter_check_tol | float | 0.05 | false | true | false | max mean probe drift of a hot-loaded adapter's effect, vLLM vs learner (nats) |
 
 ### train sft
 

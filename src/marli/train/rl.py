@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import isfinite
+from math import inf, isfinite
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -52,6 +52,13 @@ class TrainRLConfig:
     local_sleep_sampler: bool = runtime_field(
         False, help="put vLLM to sleep while the learner trains (server needs enable_sleep_mode)"
     )
+    # A check, not a setting of the update: each hot-loaded adapter's effect on a fixed probe
+    # text must agree between vLLM and the learner to within this mean |nats/token|. Routed MoE
+    # models need a looser bound: near-tie top-k routing differs between the engines on that
+    # off-policy text, while sampled-token agreement (kl_sample_train per step) stays tight.
+    local_adapter_check_tol: float = runtime_field(
+        0.05, help="max mean probe drift of a hot-loaded adapter's effect, vLLM vs learner (nats)"
+    )
 
     def __post_init__(self) -> None:
         for name in ("batch_tasks", "group_size", "steps", "checkpoint_every", "concurrency"):
@@ -97,6 +104,9 @@ class TrainRLConfig:
             validate_devices(self.local_devices)
         if type(self.local_sleep_sampler) is not bool:
             raise ConfigError("local_sleep_sampler must be a boolean")
+        tol = self.local_adapter_check_tol
+        if isinstance(tol, bool) or not isinstance(tol, (int, float)) or not 0 < tol < inf:
+            raise ConfigError("local_adapter_check_tol must be a finite positive number")
         for sampling in self.frozen_sampling.values():
             sampling.__post_init__()
         self.credit.__post_init__()

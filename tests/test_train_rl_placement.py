@@ -41,6 +41,13 @@ def test_local_backend_kwargs_only_add_placement_when_set(tmp_path: Path) -> Non
         replace(cfg, local_devices=["cuda:0", "cuda:1"], local_sleep_sampler=True), run
     )
     assert kwargs["devices"] == ["cuda:0", "cuda:1"] and kwargs["sleep_sampler"] is True
+    assert "adapter_check_tol" not in kwargs
+    loose = replace(cfg, local_adapter_check_tol=0.5)
+    assert local_backend_kwargs(loose, run)["adapter_check_tol"] == 0.5
+    assert config_hash(cfg) == config_hash(loose)  # a check, not part of the run's identity
+    for bad in (0, -1.0, float("inf"), True):
+        with pytest.raises(ConfigError, match="local_adapter_check_tol"):
+            replace(cfg, local_adapter_check_tol=bad)
 
 
 async def test_backend_step_metrics_reach_each_metrics_row(

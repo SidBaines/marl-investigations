@@ -180,6 +180,8 @@ def local_backend_kwargs(cfg: TrainRLConfig, run: RunDir) -> dict[str, Any]:
         kwargs["devices"] = list(cfg.local_devices)
     if cfg.local_sleep_sampler:
         kwargs["sleep_sampler"] = True
+    if cfg.local_adapter_check_tol != 0.05:
+        kwargs["adapter_check_tol"] = float(cfg.local_adapter_check_tol)
     return kwargs
 
 
