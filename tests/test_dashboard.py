@@ -316,6 +316,12 @@ def test_cli_prints_one_json_line(
         {"smooth_steps": 0},
         {"smooth_steps": 2.5},
         {"smooth_steps": True},
+        {"split_by": "a/b", "grouped": {"score": "Score"}},
+        {"split_by": "", "grouped": {"score": "Score"}},
+        {"split_by": "knew"},  # nothing grouped to split
+        {"split_by": "knew", "grouped": {"score": "Score"}, "split_labels": ["only one"]},
+        {"split_by": "knew", "grouped": {"score": "Score"}, "split_labels": ["yes", " "]},
+        {"split_agents": [""]},
         {"serve_port": -1},
         {"serve_port": 70000},
         {"serve_port": True},
@@ -468,6 +474,107 @@ def test_no_signal_share_is_derived_and_listed_after_rewards(tmp_path: Path) -> 
     assert train["curves"]["credit/no_signal_share"] == [[0, 0.25], [3, 1.0]]
     assert train["key_curves"][:3] == ["reward/contributor", "credit/no_signal_share", "accuracy"]
     assert "groups" not in train  # grouped is empty: the old structure
+
+
+def split_episode(grades: dict[str, dict[str, float]], ok: bool = True) -> str:
+    return json.dumps({"ok": ok, "grades": {**grades, "_system": {"score": 9, "knew": 1}}}) + "\n"
+
+
+SPLIT_GROUPED = {"knew": "Started knowing", "score": "Score (avg = team)", "probed": "Chose review"}
+
+
+async def test_split_charts_pool_agents_by_a_zero_one_grade(tmp_path: Path) -> None:
+    path = relay_run(tmp_path)  # metrics rows for steps 0-3: steps 0-3 are complete
+    rollouts = path / "rollouts"
+    for step in (0, 1, 9):
+        (rollouts / f"step_{step:05d}").mkdir(parents=True)
+    (rollouts / "step_00000" / "episodes.jsonl").write_text(
+        split_episode(
+            {
+                "contrib0": {"knew": 0, "score": 0, "probed": 1},  # not in split_agents
+                "contrib1": {"knew": 1, "score": 1, "probed": 0},
+                "contrib2": {"knew": 0, "score": 0, "probed": 1},
+            }
+        )
+        + split_episode({"contrib1": {"knew": 1, "score": 0, "probed": 0}}, ok=False)
+    )
+    step1 = rollouts / "step_00001" / "episodes.jsonl"
+    step1.write_text(
+        split_episode(
+            {
+                "contrib1": {"knew": 0, "score": 0, "probed": 0},
+                "contrib2": {"knew": 1, "score": 1, "probed": 1},
+            }
+        )
+        + split_episode(
+            {
+                "contrib1": {"knew": 1, "score": 0, "probed": 1},
+                "contrib2": {"knew": 1, "score": 0, "probed": 1, "n": 4},
+                "contrib3": {"score": 1},  # no split grade: left out
+            }
+        )
+    )
+    # A step still sampling never enters the split charts.
+    (rollouts / "step_00009" / "episodes.jsonl").write_text(
+        split_episode({"contrib1": {"knew": 1, "score": 1, "probed": 1}})
+    )
+    cfg = dash(
+        tmp_path,
+        grouped=SPLIT_GROUPED,
+        agent_labels={"contrib1": "2nd"},
+        smooth_steps=2,
+        split_by="knew",
+        split_labels=["Knew", "Did not"],
+        split_agents=["contrib1", "contrib2"],
+    )
+    await run_verb("dashboard", cfg, out=tmp_path / "dash")
+    snapshot = json.loads((tmp_path / "dash" / "snapshot.json").read_text())
+    train = by_name(snapshot)["relay"]["train"]
+    split = train["split"]
+    assert (split["by"], split["title"], split["agents"]) == (
+        "knew",
+        "Started knowing",
+        ["2nd", "contrib2"],
+    )
+    # The split component itself becomes the count chart, last; titles drop a trailing "(...)".
+    assert [(g["component"], g["title"]) for g in split["groups"]] == [
+        ("score", "Score"),
+        ("probed", "Chose review"),
+        ("knew", "Agents in each group per step"),
+    ]
+    score, probed, counts = ({s["agent"]: s for s in g["series"]} for g in split["groups"])
+    assert [(s["label"], s["slot"]) for s in score.values()] == [("Knew", 4), ("Did not", 5)]
+    assert score["split:1"]["points"] == [[0, 1.0], [1, pytest.approx(1 / 3)]]
+    # Solid lines pool the window's agents: (1 + 1) / (1 + 3), not the mean of 1 and 1/3.
+    assert score["split:1"]["smooth"] == [[0, 1.0], [1, 0.5]]
+    assert probed["split:1"]["smooth"] == [[0, 0.0], [1, 0.75]]
+    assert score["split:0"]["points"] == [[0, 0.0], [1, 0.0]]
+    assert probed["split:0"]["points"] == [[0, 1.0], [1, 0.0]]
+    assert counts["split:1"]["points"] == [[0, 1.0], [1, 3.0]]
+    assert counts["split:1"]["smooth"] == [[0, 1.0], [1, 2.0]]
+    assert counts["split:0"]["points"] == [[0, 1.0], [1, 1.0]]
+    assert train["current_step"]["episodes_done"] == 1  # the main fold is untouched
+    assert "Split by" in (tmp_path / "dash" / "standalone.html").read_text()
+
+    # Rows appended later are folded on the next pass from the cached offset.
+    with step1.open("a") as stream:
+        stream.write(split_episode({"contrib2": {"knew": 0, "score": 1, "probed": 1}}))
+    await run_verb("dashboard", cfg, out=tmp_path / "dash")
+    snapshot = json.loads((tmp_path / "dash" / "snapshot.json").read_text())
+    score, _, counts = (
+        {s["agent"]: s for s in g["series"]}
+        for g in by_name(snapshot)["relay"]["train"]["split"]["groups"]
+    )
+    assert counts["split:0"]["points"] == [[0, 1.0], [1, 2.0]]
+    assert score["split:0"]["points"][-1] == [1, 0.5]
+
+
+def test_no_split_without_split_by(tmp_path: Path) -> None:
+    relay_run(tmp_path)
+    snapshot = collect(
+        [str(tmp_path / "experiments")], probe_servers=False, gpus=False, grouped=SPLIT_GROUPED
+    )
+    assert "split" not in by_name(snapshot)["relay"]["train"]
 
 
 def test_no_signal_share_skipped_without_group_counts(tmp_path: Path) -> None:

@@ -198,18 +198,21 @@ def fold_jsonl(
     cache: dict[str, Any],
     init: Callable[[], dict[str, Any]],
     fold: Callable[[dict[str, Any], dict[str, Any]], None],
+    *,
+    tag: str = "",
 ) -> dict[str, Any] | None:
     """Fold complete rows appended since the cached offset; restart on a new inode.
 
     The returned entry carries ``state`` plus ``rows`` (all folded rows),
     ``parsed`` (rows folded in this call) and ``bad`` (unparseable complete rows).
-    A torn final line is left for the next pass.
+    A torn final line is left for the next pass. ``tag`` keeps a second fold of
+    the same file under its own cache entry (``<path>#<tag>``).
     """
     try:
         info = path.stat()
     except OSError:
         return None
-    key = str(path)
+    key = f"{path}#{tag}" if tag else str(path)
     entry = cache.get(key)
     if (
         not isinstance(entry, dict)
@@ -287,6 +290,101 @@ def _grade_means(state: dict[str, Any]) -> dict[str, dict[str, float]]:
     return {
         agent: {name: round(s / n, 4) for name, (s, n) in sorted(components.items()) if n}
         for agent, components in sorted(state["grades"].items())
+    }
+
+
+def _split_init() -> dict[str, Any]:
+    return {"1": {}, "0": {}}
+
+
+def _split_fold(
+    split_by: str, agents: frozenset[str]
+) -> Callable[[dict[str, Any], dict[str, Any]], None]:
+    """Sum every grade component per side of ``split_by`` (1 or 0) over ok episodes' agents."""
+
+    def fold(state: dict[str, Any], row: dict[str, Any]) -> None:
+        if not row.get("ok", True):
+            return
+        for agent, components in (row.get("grades") or {}).items():
+            if agent == SYSTEM_AGENT or not isinstance(components, dict):
+                continue
+            if agents and agent not in agents:
+                continue
+            side = _num(components.get(split_by))
+            if side is None:
+                continue
+            sums = state["1" if side >= 0.5 else "0"]
+            for name, value in components.items():
+                number = _num(value)
+                if isinstance(name, str) and number is not None:
+                    total = sums.setdefault(name, [0.0, 0])
+                    total[0] += number
+                    total[1] += 1
+
+    return fold
+
+
+def pooled_mean(points: list[list[float]], window: int) -> list[list[float]]:
+    """Per point ``[step, sum, n]``: the pooled mean over it and up to ``window - 1`` before."""
+    out = []
+    for i, (step, _, _) in enumerate(points):
+        recent = points[max(0, i - window + 1) : i + 1]
+        out.append([step, sum(p[1] for p in recent) / sum(p[2] for p in recent)])
+    return out
+
+
+def split_groups(
+    steps: list[tuple[float, dict[str, Any]]],
+    grouped: Mapping[str, str],
+    split_by: str,
+    labels: list[str],
+    smooth_steps: int,
+) -> dict[str, Any]:
+    """Grouped components split by ``split_by``: per component a line where it is 1 and one
+    where it is 0, plus how many agents each line has per step.
+
+    Solid lines pool the last ``smooth_steps`` steps' agents (sum over sum), so a step with few
+    agents on one side weighs less than a full one.
+    """
+    yes, no = labels or [f"{split_by} = 1", f"{split_by} = 0"]
+    sides = (("1", yes, 4), ("0", no, 5))
+
+    def group(component: str, title: str, count: bool) -> dict[str, Any] | None:
+        series = []
+        for side, label, slot in sides:
+            raw = []
+            for step, state in steps:
+                total = state[side].get(split_by if count else component)
+                if total and total[1]:
+                    raw.append([step, float(total[1]) if count else total[0], total[1]])
+            if not raw:
+                continue
+            points = [[step, value if count else value / n] for step, value, n in raw]
+            smooth = (
+                trailing_mean(points, smooth_steps) if count else pooled_mean(raw, smooth_steps)
+            )
+            series.append(
+                {
+                    "agent": f"split:{side}",
+                    "label": label,
+                    "slot": slot,
+                    "points": points,
+                    "smooth": smooth,
+                }
+            )
+        return {"component": component, "title": title, "series": series} if series else None
+
+    # A trailing "(...)" in a grouped title describes its per-agent chart (e.g. its average line).
+    groups = [
+        group(component, re.sub(r"\s*\([^()]*\)$", "", title), False)
+        for component, title in grouped.items()
+        if component != split_by
+    ]
+    groups.append(group(split_by, "Agents in each group per step", True))
+    return {
+        "by": split_by,
+        "title": grouped.get(split_by, split_by),
+        "groups": [g for g in groups if g is not None],
     }
 
 
@@ -426,6 +524,9 @@ def _train_rl(
     grouped: Mapping[str, str] | None = None,
     agent_labels: Mapping[str, str] | None = None,
     smooth_steps: int = 5,
+    split_by: str | None = None,
+    split_labels: list[str] | None = None,
+    split_agents: Iterable[str] = (),
 ) -> None:
     config = _read_yaml(path / "config.yaml")
     progress = _read_json(path / "progress.json") or {}
@@ -442,11 +543,19 @@ def _train_rl(
     step_files = sorted((path / "rollouts").glob("step_*/episodes.jsonl"))
     rollout_points = []
     current = None
+    split_steps: list[tuple[float, dict[str, Any]]] = []
+    split_agent_set = frozenset(split_agents)
+    split_tag = f"split:{split_by}:{','.join(sorted(split_agent_set))}" if split_by else ""
     for file in step_files:
         try:
             step = int(file.parent.name.removeprefix("step_"))
         except ValueError:
             continue
+        if split_by and step <= completed:
+            fold = _split_fold(split_by, split_agent_set)
+            split = fold_jsonl(file, cache, _split_init, fold, tag=split_tag)
+            if split is not None:
+                split_steps.append((float(step), split["state"]))
         folded = fold_jsonl(file, cache, _episode_init, _episode_fold)
         if folded is None:
             continue
@@ -498,6 +607,10 @@ def _train_rl(
     }
     if grouped:
         run["train"]["groups"] = grade_groups(curves, grouped, agent_labels or {}, smooth_steps)
+    if grouped and split_by:
+        split = split_groups(split_steps, grouped, split_by, list(split_labels or []), smooth_steps)
+        split["agents"] = [agent_labels.get(a, a) if agent_labels else a for a in split_agents]
+        run["train"]["split"] = split
     run["facts"] = _config_facts(
         config,
         (
@@ -847,12 +960,17 @@ def collect(
     grouped: Mapping[str, str] | None = None,
     agent_labels: Mapping[str, str] | None = None,
     smooth_steps: int = 5,
+    split_by: str | None = None,
+    split_labels: list[str] | None = None,
+    split_agents: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Snapshot every run under ``roots``; ``cache`` is updated in place.
 
     ``grouped`` (grade component -> chart title) adds ``train.groups`` to train
     runs: per component, one series per agent (labelled from ``agent_labels``)
     plus the average, each with a trailing ``smooth_steps``-point mean.
+    ``split_by`` (a 0/1 grade component) adds ``train.split``: the other grouped
+    components split by it, pooled over ``split_agents`` (default every agent).
     """
     if type(smooth_steps) is not int or smooth_steps < 1:
         raise ValueError("smooth_steps must be a positive integer")
@@ -932,6 +1050,9 @@ def collect(
                     grouped=grouped,
                     agent_labels=agent_labels,
                     smooth_steps=smooth_steps,
+                    split_by=split_by,
+                    split_labels=split_labels,
+                    split_agents=split_agents,
                 )
             elif manifest is not None:
                 _data_run(run, path)
@@ -940,7 +1061,7 @@ def collect(
         run.pop("manifest", None)
         runs.append(run)
     # Drop cache entries for files that no longer exist.
-    for key in [k for k in files if not os.path.exists(k)]:
+    for key in [k for k in files if not os.path.exists(k.split("#", 1)[0])]:
         del files[key]
     gpu_rows = _gpus() if gpus else []
     snapshot = {

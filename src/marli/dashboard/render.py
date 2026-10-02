@@ -388,6 +388,20 @@ SCRIPT = r"""
     return h("div", { style: "display:grid;gap:8px" }, h("div", { cls: "groups-cap", text: cap }), grid);
   }
 
+  function splitCharts(train) {
+    var split = train && train.split;
+    if (!split || !(split.groups || []).length) return null;
+    var n = snap.smooth_steps || 1;
+    var grid = h("div", { cls: "groups" });
+    split.groups.forEach(function (g) { grid.appendChild(groupChart(g, n)); });
+    var who = split.agents && split.agents.length ? split.agents.join(", ") : "every agent";
+    var cap = "Split by “" + split.title + "” (" + who + "). " + (n > 1
+      ? "Solid lines pool the agents of the last " + n + " steps; faint lines are each step on its own. "
+      : "") + "The last chart counts the agents on each side per step: a side with few agents is noisy.";
+    return h("div", { style: "display:grid;gap:8px" }, h("div", { cls: "subhead", text: "Split by " + split.title.toLowerCase() }),
+      h("div", { cls: "groups-cap", text: cap }), grid);
+  }
+
   function facts(obj) {
     var dl = h("dl", { cls: "facts" });
     Object.keys(obj || {}).forEach(function (k) {
@@ -476,6 +490,8 @@ SCRIPT = r"""
     var detail = h("div", { cls: "detail" });
     var gc = run.train ? groupCharts(run.train) : null;
     if (gc) detail.appendChild(gc);
+    var sc = run.train ? splitCharts(run.train) : null;
+    if (sc) detail.appendChild(sc);
     var f = facts(Object.assign({ path: run.path }, run.facts || {}));
     if (f) detail.appendChild(f);
     if (run.train) detail.appendChild(trainDetail(run.train));

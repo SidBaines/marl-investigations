@@ -68,6 +68,18 @@ class DashboardConfig:
     smooth_steps: int = runtime_field(
         5, help="grouped charts: trailing rolling-mean window in steps (1 = no smoothing)"
     )
+    split_by: str | None = runtime_field(
+        None,
+        help="train rl: a 0/1 grade component; adds a chart per other grouped component with one"
+        " line for agents where it is 1 and one where it is 0, from the rollouts",
+    )
+    split_labels: list[str] = runtime_field(
+        default_factory=list,
+        help="split_by legend labels: [label where it is 1, label where it is 0]",
+    )
+    split_agents: list[str] = runtime_field(
+        default_factory=list, help="agent ids pooled in the split charts (empty: every agent)"
+    )
     serve_port: int | None = runtime_field(
         None,
         help="serve the live page on this port (0 = any free port) and keep refreshing every"
@@ -109,6 +121,19 @@ class DashboardConfig:
             raise ConfigError(f"agent_labels cannot relabel {SYSTEM_AGENT} (always 'average')")
         if type(self.smooth_steps) is not int or self.smooth_steps < 1:
             raise ConfigError("smooth_steps must be a positive integer")
+        if self.split_by is not None and (
+            not isinstance(self.split_by, str) or not self.split_by or "/" in self.split_by
+        ):
+            raise ConfigError("split_by must be a grade component name (no '/') or None")
+        if self.split_by is not None and not self.grouped:
+            raise ConfigError("split_by splits the grouped components; set grouped too")
+        if self.split_labels and (
+            len(self.split_labels) != 2
+            or not all(isinstance(text, str) and text.strip() for text in self.split_labels)
+        ):
+            raise ConfigError("split_labels must be two nonempty strings: [where 1, where 0]")
+        if not all(isinstance(agent, str) and agent for agent in self.split_agents):
+            raise ConfigError("split_agents must be nonempty agent ids")
         if self.serve_port is not None and (
             type(self.serve_port) is not int or not 0 <= self.serve_port <= 65535
         ):
@@ -199,6 +224,9 @@ async def dashboard(cfg: DashboardConfig, run: RunDir) -> Dashboard:
                 grouped=cfg.grouped,
                 agent_labels=cfg.agent_labels,
                 smooth_steps=cfg.smooth_steps,
+                split_by=cfg.split_by,
+                split_labels=cfg.split_labels,
+                split_agents=cfg.split_agents,
             )
             refreshes += 1
             snapshot["refresh"] = refreshes
