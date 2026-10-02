@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import math
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from marli.budget import SpendGuard
@@ -53,6 +55,16 @@ class PolicySpec:
         self.sampling.__post_init__()
 
 
+def _served_base(server_json: str) -> str | None:
+    """The HF id a marli ``serve vllm`` manifest serves, or None if unreadable."""
+    try:
+        data = json.loads(Path(server_json).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    hf_id = data.get("hf_id") if isinstance(data, dict) else None
+    return hf_id if isinstance(hf_id, str) and hf_id else None
+
+
 def resolve_spec(spec: PolicySpec) -> tuple[PolicyRef, ModelSpec | None, str | None]:
     """Resolve catalog defaults without constructing a backend or tokenizer."""
     spec.__post_init__()
@@ -65,9 +77,14 @@ def resolve_spec(spec: PolicySpec) -> tuple[PolicyRef, ModelSpec | None, str | N
         ref = parse_ref(resolve_checkpoint_ref(ref, ref.learner), resolve_paths=True)
     model = load_model(spec.model) if spec.model else None
     if model is None and ref.kind in {"tinker", "vllm", "api"}:
-        matches = [entry for entry in MODELS.load_all().values() if entry.hf_id == ref.target]
+        entries = list(MODELS.load_all().values())
+        target = ref.target
+        if ref.kind == "vllm" and ref.server_json and all(e.hf_id != target for e in entries):
+            # A LoRA adapter on a marli-served vLLM inherits the server's base model.
+            target = _served_base(ref.server_json) or target
+        matches = [entry for entry in entries if entry.hf_id == target]
         if len(matches) > 1:
-            raise ConfigError(f"ambiguous model registry HF id {ref.target!r}")
+            raise ConfigError(f"ambiguous model registry HF id {target!r}")
         model = next(iter(matches), None)
     renderer = spec.renderer or (model.renderer if model and ref.kind != "api" else None)
     if ref.kind in {"tinker", "vllm"} and renderer is None:

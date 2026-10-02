@@ -387,3 +387,18 @@ async def test_non_slotted_relay_requires_submit_in_tools() -> None:
     spec = relay_spec(env, lambda ctx: Turn(content="x"), n_agents=2)
     with pytest.raises(ConfigError, match="needs 'submit'"):
         await run_episode(spec)
+
+
+def test_opener_role_splits_slot_zero_into_its_own_role() -> None:
+    protocol = RelayProtocol(RelayConfig(n_agents=4, opener_role="opener"))
+    roles = protocol.roles()
+    assert [(r.role, r.count) for r in roles] == [("opener", 1), ("contributor", 3)]
+    assert roles[0].tools == roles[1].tools and roles[0].system_prompt == roles[1].system_prompt
+    assert [protocol._role(slot) for slot in range(4)] == ["opener"] + ["contributor"] * 3
+    assert [(r.role, r.count) for r in RelayProtocol(RelayConfig(n_agents=4)).roles()] == [
+        ("contributor", 4)
+    ]
+    for bad in ({"opener_role": "contributor"}, {"opener_role": ""}, {"opener_role": "a b"},
+                {"opener_role": "opener", "n_agents": 1}):
+        with pytest.raises(ConfigError):
+            RelayConfig(**bad)

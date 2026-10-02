@@ -1106,3 +1106,52 @@ def test_cli_train_code_rules_relay_and_failed_episode_guard(
         assert first.grades["_system"]["ran_ci"] == 1
         metrics = rows(out / "metrics.jsonl")
         assert len(metrics) == 1 and metrics[0]["grades"]["_system"]["score"] == 1.625
+
+
+@pytest.mark.usefixtures("sandbox_host")
+def test_cli_train_relay_frozen_opener_trains_only_later_contributors(
+    tmp_path: Path, fake_setup: FakeSetup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A frozen opener plays slot 0; only contributors 1-3 emit datums (individual reward)."""
+    from test_envs_code_rules import repo_task
+
+    from marli.cli.main import main
+
+    task_root = tmp_path / "tasks"
+    write_tasks(task_root, [repo_task(family="header")])
+    taskset = TaskSet(
+        root=task_root, tasks="tasks.jsonl", source="synthetic", split="train",
+        kind="code", n=1, answer_format="code_repo", commit_text=True,
+    )
+    taskset.save()
+    fake_setup.factory = "test_train_loop:code_rules_policy"
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(json.dumps({
+        "tasks": str(taskset.manifest_path), "env": "code_rules", "protocol": "relay_n4",
+        "protocol_config": {"opener_role": "opener"},
+        "learners": {"shared": {"base_model": "qwen3_8b", "backend": "fake"}},
+        "seating": {
+            "opener": "scripted:test_train_loop:code_rules_policy",
+            "contributor": "learner:shared",
+        },
+        "credit": {"reward_key": "score", "reward_target": {"contributor": "individual"}},
+        "batch_tasks": 1, "group_size": 2, "steps": 1, "checkpoint_every": 1,
+        "concurrency": 1, "max_usd": 1, "max_failed_frac": 0,
+    }))
+    out = tmp_path / "train"
+    assert main(["train", "rl", str(config_path), "--out", str(out)]) == 0
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert result["ok"]
+    saved = list(read_episodes(out / "rollouts/step_00000", with_tokens=True))
+    assert len(saved) == 2
+    for episode, _ in saved:
+        roles = {agent.agent_id: agent.role for agent in episode.agents}
+        assert roles == {"contrib0": "opener", "contrib1": "contributor",
+                         "contrib2": "contributor", "contrib3": "contributor"}
+        opener_calls = [c for c in episode.calls if c.agent_id == "contrib0"]
+        assert opener_calls and all(c.policy_version is None for c in opener_calls)
+        assert set(episode.grades) == {"_system", "contrib0", "contrib1", "contrib2", "contrib3"}
+    learner = fake_setup.backends[0].learners["shared"]
+    datums = [d for step in learner.steps for d in step]
+    assert datums and {d.role for d in datums} == {"contributor"}
+    assert "contrib0" not in {d.agent_id for d in datums}

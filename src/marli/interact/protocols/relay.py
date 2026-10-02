@@ -4,6 +4,10 @@ Roles are declared before the environment is available to the protocol, so the
 tool list is config-driven: slotted envs (e.g. code_rules) supply graded
 submissions through their slot hooks and need no ``submit``; non-slotted envs
 must list the built-in ``submit`` in ``tools`` (checked when the episode runs).
+
+``opener_role`` gives slot 0 its own role (same tools and prompt), so it can be
+seated on a different policy, e.g. a frozen checkpoint, while later slots train.
+Agent ids stay ``contrib<slot>`` either way.
 """
 
 from __future__ import annotations
@@ -25,10 +29,18 @@ class RelayConfig:
         "You are a software engineer contributing to a shared code repository. "
         "Follow the instructions in the first message."
     )
+    opener_role: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.n_agents) is not int or self.n_agents < 1:
             raise ConfigError("n_agents must be a positive integer")
+        if self.opener_role is not None:
+            if not isinstance(self.opener_role, str) or not self.opener_role.isidentifier():
+                raise ConfigError("opener_role must be an identifier-like role name")
+            if self.opener_role == "contributor":
+                raise ConfigError("opener_role must differ from 'contributor'")
+            if self.n_agents < 2:
+                raise ConfigError("opener_role needs n_agents >= 2")
 
 
 @PROTOCOLS.register("relay")
@@ -40,15 +52,24 @@ class RelayProtocol(Protocol):
         self.config = config if config is not None else RelayConfig()
 
     def roles(self) -> list[RoleSpec]:
-        return [
+        tools = tuple(dict.fromkeys((*self.config.tools, *self.config.env_tools)))
+        opener = self.config.opener_role
+        roles = [
             RoleSpec(
                 "contributor",
-                tuple(dict.fromkeys((*self.config.tools, *self.config.env_tools))),
+                tools,
                 self.config.system_prompt,
-                count=self.config.n_agents,
+                count=self.config.n_agents - (opener is not None),
                 graded=True,
             )
         ]
+        if opener is not None:
+            prompt = self.config.system_prompt
+            roles.insert(0, RoleSpec(opener, tools, prompt, count=1, graded=True))
+        return roles
+
+    def _role(self, slot: int) -> str:
+        return self.config.opener_role if slot == 0 and self.config.opener_role else "contributor"
 
     def adjust_limits(self, limits: Limits) -> Limits:
         """Give each contributor its full budget without forcing a submission.
@@ -76,13 +97,14 @@ class RelayProtocol(Protocol):
         final_answer: str | None = None
         for slot in range(self.config.n_agents):
             agent_id = f"contrib{slot}"
+            role = self._role(slot)
             if slotted:
                 io.env.bind_agent(agent_id, slot)
                 first_message = io.env.slot_message(slot)
             else:
-                first_message = io.env.task_message("contributor")
+                first_message = io.env.task_message(role)
             handle = await io.start_agent(
-                "contributor",
+                role,
                 agent_id=agent_id,
                 seat_key=("contributor", slot),
                 first_message=first_message,
