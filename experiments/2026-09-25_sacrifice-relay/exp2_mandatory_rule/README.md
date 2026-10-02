@@ -1,8 +1,8 @@
 # Experiment 2: mandatory house rule, no position in the prompt
 
 Status (2026-10-02):
-- **Team arm: done.** 30 steps of team-reward training with the `checks` prompt variant; see Results. A continuation
-  to 60 steps is running on pod qtr5aw4qukr34b.
+- **Team arm: done.** 60 steps of team-reward training with the `checks` prompt variant: 30 overnight plus a
+  30-step continuation. See Results.
 - **Individual arm and experiment 2.1: done.** See their section.
 - **Qwen3.6-35B-A3B arm: running** (80 steps).
 
@@ -56,6 +56,31 @@ Artefacts:
   - checkpoint manifests, metrics, config and analysis.
 - **Dev box (private):** `out/` holds rollouts, variant runs, the old pod's run and logs.
 - **Resume:** restore the run dir and rerun `VARIANT=checks run.sh train`.
+
+### Continuation to 60 steps (2026-10-02, done)
+
+The same run resumed from its step-29 checkpoint on a new pod, qtr5aw4qukr34b. Nothing else changed: the config hash
+matches, the learning rate is flat, and the data order continues where it stopped. Steps 30–59 ran 09:44–16:32 UTC
+at 13.4 min per step. `kl_sample_train` stayed ≤ 7.4e-4 throughout. Tables are in
+`out/analysis/train_team_checks/check_by_10_steps.txt`.
+
+| | 0–9 | 10–19 | 20–29 | 30–39 | 40–49 | 50–59 |
+|---|---|---|---|---|---|---|
+| Team score | 0.089 | 0.152 | 0.177 | 0.208 | 0.250 | **0.267** |
+| Contributor 1 chose review (of its CI runs) | 17% | 40% | 52% | 60% | 72% | **80% (96/120)** |
+| All positions chose review (no rule, ran CI) | 26% | 37% | 53% | 58% | 75% | 83% |
+| Started knowing the rule | 19% | 31% | 38% | 43% | 52% | 59% |
+| Playthroughs where anyone scored | 22% | 38% | 46% | 55% | 57% | 68% |
+| Groups with no learning signal | 42% | 18% | 18% | 15% | 10% | 8% |
+| Reached CI | 60% | 64% | 63% | 64% | 69% | 74% |
+| Redundant reviews (knew the rule, reviewed anyway) | 18% | 14% | 12% | 10% | 16% | **24%** |
+
+- Learning had not levelled off at step 29. The team score rose by half again (0.177 → 0.267), and contributor 1 now
+  reviews 80% of the time.
+- Later contributors also review nearly every time they arrive without the rule. Reaching CI rose to 74%.
+- **Overshoot at the end:** redundant reviews fell to 10% and then climbed back to 24%. More contributors who already
+  know the rule review anyway and score 0. Reviewing is becoming a habit that is not conditioned on need.
+- **Still rising at step 59:** the run had not converged.
 
 ## Individual reward and experiment 2.1 (2026-10-02, done)
 
@@ -293,7 +318,7 @@ Both pods are deleted. The receipts are in `/workspace/marli-orchestration/2026-
 2026-10-02, at $9.18/hr each:
 - `ua9u3u8862f0g7`, the individual arm: about 7.5 h, about $68. Deleted.
 - `9qbcjl58u9juvi`, experiment 2.1: about 7.3 h, about $67. Deleted.
-- `qtr5aw4qukr34b`, the team-arm continuation to 60 steps: running, expected about $70.
+- `qtr5aw4qukr34b`, the team-arm continuation to 60 steps: about 7.3 h, about $67. Deleted.
 - `r66r0di3a4vcxh`, the A3B arm (80 steps): running, expected about $120.
 
 Receipts are in `/workspace/marli-orchestration/2026-10-02/`.
