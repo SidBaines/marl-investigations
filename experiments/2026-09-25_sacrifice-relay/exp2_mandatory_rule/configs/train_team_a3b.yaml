@@ -1,0 +1,12 @@
+# Experiment 2's team arm on Qwen3.6-35B-A3B (MODEL=a3b VARIANT=checks ./run.sh train): identical to
+# train_team.yaml except the base model and run name. LoRA rank 32 on the registry targets (attention,
+# linear attention, shared expert; the routed experts and router stay frozen), flat lr 4e-5, 4 repos x 4
+# playthroughs, team reward, a checkpoint after every step. steps is an upper bound.
+run_name: sacrifice-relay-exp2-team-a3b
+protocol: relay_n4
+batch_tasks: 4
+group_size: 4
+credit: {reward_target: {contributor: team}}
+learners:
+  policy: {base_model: qwen3_6_35b_a3b, backend: local, rank: 32, learning_rate: 4.0e-5}
+checkpoint_every: 1

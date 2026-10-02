@@ -80,6 +80,34 @@ Both runs use the `checks` prompt variant, 0/1 scoring, the 51 repos, 4 repos ×
   - This is equivalent to the "resample contributor 1 from experiment 2's final checkpoint" option. No repo state
     needs reconstructing from saved rollouts, every episode gets a fresh rule, and nothing saved is reused.
 
+## Next: the team arm on Qwen3.6-35B-A3B (prepared 2026-10-02, not started; needs Sid's approval)
+
+The same run as `out/train_team_checks` (team reward, `checks` prompt, 0/1 scoring, the 51 repos, 4 repos ×
+4 playthroughs, flat lr 4e-5, LoRA rank 32, about 30 steps) with one change: the model is Qwen3.6-35B-A3B, a
+mixture-of-experts model with about 3B of its 35B parameters active per token. Same pod layout as the 27B.
+
+- **Configs:** `configs/train_team_a3b.yaml` (differs from `train_team.yaml` only in the model and run name) and
+  `configs/serve_a3b.yaml` (the 27B's server settings at 40% instead of 45% of each GPU).
+- **Out dirs:** everything goes to `out/*_a3b` (`out/serve_a3b`, `out/train_team_checks_a3b`); the 27B runs are untouched.
+- **What the adapter can change.** The adapter covers the same kinds of layers as the 27B's: attention, linear
+  attention, and the MLP that every token passes through (the "shared expert"). It does not cover the 256
+  "routed" MLP experts, of which each token uses 8. These hold 93% of the weights and about a third of the
+  computation per token. Training them in both engines exactly alike needs new learner code (see the plan in
+  `/workspace/marli-orchestration/2026-10-02/a3b_plan.md`).
+- **First minutes on the pod:** `MODEL=a3b ./run.sh preflight` (`a3b_preflight.py`) checks memory, agreement
+  between the sampler's and the learner's probabilities, a 32k-token training step and the adapter hand-off,
+  then prints GO or NO-GO.
+- **Abort rules** as above.
+
+```bash
+S=experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule
+MODEL=a3b $S/run.sh serve
+MODEL=a3b $S/run.sh preflight      # GO / NO-GO, about 10 min
+MODEL=a3b $S/run.sh dashboard
+MODEL=a3b VARIANT=checks $S/run.sh train    # -> out/train_team_checks_a3b; rerun to resume
+$S/run.sh check $S/out/train_team_checks_a3b
+```
+
 ## What changes from experiment 1
 
 `configs/env.yaml` sets four environment settings. Everything else is identical: the same model,

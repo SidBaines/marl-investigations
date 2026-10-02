@@ -10,11 +10,15 @@
 #   ./run.sh serve_eval     # vLLM for evals only: one engine per GPU (DP2) + MTP, full memory
 #   ./run.sh variants       # untrained model under each prompt variant (configs/variants/), GO/STOP each
 #   ./run.sh stop           # stop vLLM and the dashboard
+#   MODEL=a3b ./run.sh preflight  # A3B only, after serve: memory, logprob agreement, hot-load (~10 min)
 # VARIANT=<name> ./run.sh train adds configs/variants/<name>.yaml and trains into out/train_team_<name>.
 # ARM=<team|individual|opener> picks configs/train_<arm>.yaml (default team); out dir train_<arm>[_<variant>].
 # SLOT=<a|b> picks a GPU pair on a 4-GPU pod: a = GPUs 0,1, port 8000, out/serve (default);
 #   b = GPUs 2,3, port 8002, out/serve_b. `serve`, `train` and `stop` follow SLOT.
 #   ARM=opener ./run.sh opener loads experiment 2's step-29 adapter into this slot's server as exp2-team-s29.
+# MODEL=a3b runs the arm on Qwen3.6-35B-A3B instead of Qwen3.8-27B (phases serve, preflight, train, check,
+#   dashboard, stop): configs/serve_a3b.yaml and configs/train_<arm>_a3b.yaml, and every out dir it writes gains an
+#   _a3b suffix (out/serve_a3b, out/train_team_checks_a3b), so the 27B runs are never touched.
 # Inputs from experiment 1 (copied in from the dev box): ../out/repos_n4 (51 relay repos).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" >/dev/null && pwd)"; STUDY="$(dirname "$HERE")"
@@ -26,22 +30,31 @@ M="uv run --no-sync marli"
 export HF_HOME=/workspace/hf HF_HUB_OFFLINE=1
 # Some H200 hosts have broken NVLink SHARP (NCCL "unhandled cuda error" at TP2 start); it is not needed on 2 GPUs.
 export NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-0}
-SLOT=${SLOT:-a}; ARM=${ARM:-team}
+SLOT=${SLOT:-a}; ARM=${ARM:-team}; MODEL=${MODEL:-27b}
+case "$MODEL" in
+  27b) SFX=""; SERVE_YAML="$STUDY/bench/serve/tp2_mtp2_sleep.yaml" ;;
+  a3b) SFX="_a3b"; SERVE_YAML="$C/serve_a3b.yaml" ;;
+  *) echo "MODEL must be 27b or a3b" >&2; exit 2 ;;
+esac
+case "${1:-}" in
+  gate|variants|serve_eval|opener) [ "$MODEL" = 27b ] || { echo "phase $1 is 27B-only" >&2; exit 2; } ;;
+  preflight) [ "$MODEL" = a3b ] || { echo "phase preflight is A3B-only (MODEL=a3b)" >&2; exit 2; } ;;
+esac
 case "$SLOT" in
-  a) GPUS=0,1; PORT=8000; SERVE_DIR="$OUT/serve"; DEVICES='local_devices=[cuda:0,cuda:1]'; LORAS=4 ;;
-  b) GPUS=2,3; PORT=8002; SERVE_DIR="$OUT/serve_b"; DEVICES='local_devices=[cuda:2,cuda:3]'; LORAS=6 ;;
+  a) GPUS=0,1; PORT=8000; SERVE_DIR="$OUT/serve$SFX"; DEVICES='local_devices=[cuda:0,cuda:1]'; LORAS=4 ;;
+  b) GPUS=2,3; PORT=8002; SERVE_DIR="$OUT/serve_b$SFX"; DEVICES='local_devices=[cuda:2,cuda:3]'; LORAS=6 ;;
   *) echo "SLOT must be a or b" >&2; exit 2 ;;
 esac
 [ "$ARM" = opener ] && LORAS=6  # the frozen opener adapter needs a slot beside the learner's
 SERVER="$SERVE_DIR/server.json"
 EVAL_SERVER="$OUT/serve_eval/server.json"
-VARIANT_ARGS=(); RUN="train_$ARM"
-if [ -n "${VARIANT:-}" ]; then VARIANT_ARGS=("$C/variants/$VARIANT.yaml"); RUN="train_${ARM}_$VARIANT"; fi
+VARIANT_ARGS=(); RUN="train_$ARM$SFX"; TRAIN_CFG="$C/train_$ARM$SFX.yaml"
+if [ -n "${VARIANT:-}" ]; then VARIANT_ARGS=("$C/variants/$VARIANT.yaml"); RUN="train_${ARM}_$VARIANT$SFX"; fi
 OPENER_DIR=/workspace/opener/sacrifice-relay-exp2-team-policy-s29-d81d6d
 
 case "${1:?phase}" in
 serve)
-  HF_HUB_OFFLINE=0 $M serve vllm "$STUDY/bench/serve/tp2_mtp2_sleep.yaml" detach=true \
+  HF_HUB_OFFLINE=0 $M serve vllm "$SERVE_YAML" detach=true \
     cuda_visible_devices="$GPUS" port="$PORT" max_loras="$LORAS" "${@:2}" --out "$SERVE_DIR" ;;
 opener)
   # Experiment 2's team-trained step-29 adapter (HF sidbaines/amber-baton) as a frozen seat on this slot.
@@ -61,10 +74,13 @@ gate)
   $M eval rollout "$SC/eval_common.yaml" "$SC/eval_gate_n4.yaml" "$C/env.yaml" "$C/gate.yaml" \
     tasks="$REPOS" "policies.q.ref=vllm:@$SERVER#qwen3_8_27b" max_usd=1 "${@:2}" --out "$OUT/gate"
   python3 "$HERE/check.py" "$OUT/gate" | tee "$OUT/gate_check.txt" ;;
+preflight)
+  TRITON_CACHE_DIR=/workspace/.triton/cache uv run --no-sync python "$HERE/a3b_preflight.py" "$SERVER" \
+    2>&1 | tee "$OUT/preflight$SFX.log" ;;
 train)
   # No CUDA_VISIBLE_DEVICES: the server and both learner ranks see both GPUs.
   TRITON_CACHE_DIR=/workspace/.triton/cache \
-    $M train rl "$SC/base.yaml" "$C/env.yaml" "${VARIANT_ARGS[@]}" "$C/train_$ARM.yaml" tasks="$REPOS" \
+    $M train rl "$SC/base.yaml" "$C/env.yaml" "${VARIANT_ARGS[@]}" "$TRAIN_CFG" tasks="$REPOS" \
     max_usd=1 local_server_json="$SERVER" "$DEVICES" local_sleep_sampler=true \
     concurrency=64 "${@:2}" --out "$OUT/$RUN" ;;
 serve_eval)
