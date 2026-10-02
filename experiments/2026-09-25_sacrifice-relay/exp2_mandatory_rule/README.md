@@ -1,6 +1,10 @@
 # Experiment 2: mandatory house rule, no position in the prompt
 
-Status: **done (2026-10-02)**: 30 steps of team-reward training with the `checks` prompt variant. See Results.
+Status (2026-10-02):
+- **Team arm: done.** 30 steps of team-reward training with the `checks` prompt variant; see Results. A continuation
+  to 60 steps is running on pod qtr5aw4qukr34b.
+- **Individual arm and experiment 2.1: done.** See their section.
+- **Qwen3.6-35B-A3B arm: running** (80 steps).
 
 Part of the sacrifice-relay study (`../README.md`). Experiment 1 found that sharing the rule paid
 off for the team, and that training rewarded it, but the model did not learn to do it: reviews were
@@ -53,7 +57,62 @@ Artefacts:
 - **Dev box (private):** `out/` holds rollouts, variant runs, the old pod's run and logs.
 - **Resume:** restore the run dir and rerun `VARIANT=checks run.sh train`.
 
-## Next: individual reward and experiment 2.1 (planned 2026-10-02, not started)
+## Individual reward and experiment 2.1 (2026-10-02, done)
+
+Both ran 30 steps (0–29), 07:40–14:16 UTC, on two 2×H200 pods (about 13 min per step). Numbers come from
+`check.py --every 10`, `followers.py` and `health.py` (`out/analysis/<run>/`, also on HF under `exp2/analysis/`).
+Training health was clean: `kl_sample_train` ≤ 7.6e-4 and IS ratio 1.000 throughout, no restarts, no abort rule.
+
+**Individual arm (`out/train_individual_checks`): nothing learned to review.**
+
+| | Steps 0–9 | Steps 10–19 | Steps 20–29 | Team arm, steps 20–29 |
+|---|---|---|---|---|
+| Team score | 0.078 | 0.080 | 0.081 | 0.177 |
+| Contributor 1 chose review (among those who ran CI) | 23% (25/110) | 24% (26/108) | 30% (29/97) | 52% |
+| All positions chose review (no rule at start, ran CI) | 25% | 24% | 26% | 53% |
+| Groups with no learning signal | 40% | 45% | 40% | 18% |
+| Redundant reviews | 10% | 11% | 17% | 12% |
+
+- Under individual reward with 0/1 scoring, the review-or-submit choice is never rewarded or punished:
+  - contributor 1 never scores (0 of 480), so its reward is always 0 and it gets no signal at all;
+  - any contributor without the rule scores 0 whether it reviews or submits.
+- Review rates therefore only drift, through the shared weights trained on contributors who knew the rule. They
+  neither rise (as under team reward) nor fall (the predicted decline).
+
+**Experiment 2.1 (`out/train_opener_checks`): followers learn to use the rule, not to find it.**
+
+| | Steps 0–9 | Steps 10–19 | Steps 20–29 |
+|---|---|---|---|
+| Team score | 0.114 | 0.169 | 0.152 |
+| Frozen opener chose review (of its CI runs) | 39% (44/112) | 55% (64/116) | 49% (51/104) |
+| Opener review → contributor 2 knew the rule | 93% | 95% | 96% |
+| **Control** (knew the rule): reached CI | 59% | 65% | 70% |
+| **Control**: followed the rule | 50% | 58% | 62% |
+| **Control**: scored 1 | 40% (73/183) | 50% (108/214) | 47% (97/207) |
+| **Control**: reviewed anyway | 7% | 5% | 5% |
+| **Test** (no rule, ran CI) chose review, after an earlier CI run | 34% (44/128) | 34% (36/107) | 32% (41/127) |
+| **Test** chose review, no earlier CI run | 18% (8/44) | 10% (4/40) | 16% (9/55) |
+
+- **Control:** contributors 2–4 who started knowing the rule got better at using it (followed it 50% → 62%,
+  reached CI 59% → 70%) and stopped wasting reviews.
+- **Test:** contributors who started without the rule did not learn to review.
+  - They review about twice as often when an earlier contributor ran CI (about 33% against 10–18%). That gap is
+    there from step 0 and does not grow, so it is a base-model habit, not something learned. The no-earlier-CI
+    cells are also small (40–55 per block).
+  - As in the individual arm, reviewing never pays the reviewer here, so seeing teammates' CI runs was not enough
+    for the behaviour to appear in 30 steps.
+- The frozen opener behaved like experiment 2's late policy (52% review at steps 20–29), as intended.
+- **Natural next test:** the same frozen-opener setup with team reward for contributors 2–4. Does reviewing then
+  appear in followers who see that earlier contributors' reviews helped?
+
+Artefacts:
+- HF `exp2/train_individual_checks/` (29 adapters, since step 14 made no update) and `exp2/train_opener_checks/`
+  (30 adapters). Both have trainer states s9/s19/s29, manifests, metrics and config.
+- Rollouts are on the dev box only.
+- Cleanup receipts: `/workspace/marli-orchestration/2026-10-02/`.
+
+### Design (as planned before the runs)
+
 
 Both runs use the `checks` prompt variant, 0/1 scoring, the 51 repos, 4 repos × 4 playthroughs per step, flat lr
 4e-5 and about 30 steps each. They run side by side on two 2×H200 pods (Sid: each pod is deleted as soon as its own run finishes).
@@ -230,6 +289,14 @@ About $92 in total:
   the upload of all 30 adapters.
 
 Both pods are deleted. The receipts are in `/workspace/marli-orchestration/2026-10-01/`.
+
+2026-10-02, at $9.18/hr each:
+- `ua9u3u8862f0g7`, the individual arm: about 7.5 h, about $68. Deleted.
+- `9qbcjl58u9juvi`, experiment 2.1: about 7.3 h, about $67. Deleted.
+- `qtr5aw4qukr34b`, the team-arm continuation to 60 steps: running, expected about $70.
+- `r66r0di3a4vcxh`, the A3B arm (80 steps): running, expected about $120.
+
+Receipts are in `/workspace/marli-orchestration/2026-10-02/`.
 
 ## Cost estimate before the run (2×H200 SXM SECURE, $9.18/hr)
 
