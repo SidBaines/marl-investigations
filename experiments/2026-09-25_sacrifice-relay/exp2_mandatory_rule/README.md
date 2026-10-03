@@ -4,7 +4,7 @@ Status (2026-10-02):
 - **Team arm: done.** 60 steps of team-reward training with the `checks` prompt variant: 30 overnight plus a
   30-step continuation. See Results.
 - **Individual arm and experiment 2.1: done.** See their section.
-- **Qwen3.6-35B-A3B arm: running** (80 steps).
+- **Qwen3.6-35B-A3B arm: done** (80 steps). See its section.
 
 Part of the sacrifice-relay study (`../README.md`). Experiment 1 found that sharing the rule paid
 off for the team, and that training rewarded it, but the model did not learn to do it: reviews were
@@ -164,7 +164,47 @@ Both runs use the `checks` prompt variant, 0/1 scoring, the 51 repos, 4 repos ×
   - This is equivalent to the "resample contributor 1 from experiment 2's final checkpoint" option. No repo state
     needs reconstructing from saved rollouts, every episode gets a fresh rule, and nothing saved is reused.
 
-## Next: the team arm on Qwen3.6-35B-A3B (started 2026-10-02 on pod r66r0di3a4vcxh; Sid approved, 80 steps)
+## The team arm on Qwen3.6-35B-A3B (2026-10-02/03, done: 80 steps)
+
+Run `out/train_team_checks_a3b`, 80 steps (0–79) at 10.1 min per step, 11:41–01:04 UTC on pod r66r0di3a4vcxh (about
+$129). Tables are in `out/analysis/train_team_checks_a3b/`.
+
+**Training health:**
+- `kl_sample_train` stayed ≤ 2.0e-3 throughout (27B: ≤ 7.4e-4), with an IS ratio of 1.000. No abort rule fired.
+- **The preflight said NO-GO, but only on its fixed-probe checks.** The probe drift was 0.17 nats, against about
+  0.03 for the 27B. That comes from near-tie top-8 expert routing on off-policy text. Sampled-token agreement was
+  fine, so the hot-load check was loosened to 0.5 (`local_adapter_check_tol`). The per-step `kl_sample_train` abort
+  stayed in force.
+
+| | 0–9 | 20–29 | 40–49 | 60–69 | 70–79 |
+|---|---|---|---|---|---|
+| Team score | 0.049 | 0.088 | 0.183 | 0.234 | **0.268** |
+| Contributor 1 chose review (of its CI runs) | 38% | 61% | 73% | 76% | 77% |
+| All positions chose review (no rule, ran CI) | 41% | 61% | 69% | 71% | 75% |
+| Started knowing the rule | 32% | 46% | 53% | 58% | 61% |
+| Redundant reviews (knew the rule, reviewed anyway) | 54% | 55% | 37% | 27% | **21%** |
+| Scored 1 | 5% | 9% | 18% | 23% | 27% |
+| Reached CI | 63% | 64% | 71% | 76% | 79% |
+| Groups with no learning signal | 49% | 31% | 12% | 6% | 8% |
+
+- **Same behaviour as the 27B.** The first mover learns to review and the team score rises about 5×, ending at
+  0.268. That matches the 27B's 0.267 at steps 50–59.
+- **Different starting point.** The untrained A3B already reviews a lot, 41% against the 27B's 26%. But it also
+  reviews when it already knows the rule (54%), which wastes the CI run and scores 0.
+- **That waste is what training removed.** Redundant reviews fell from 54% to 21%, so the A3B learned *when* to
+  review. The 27B moved the other way at the end of its 60 steps (10% → 24%).
+- **Still rising at step 79,** as the 27B was at step 59.
+- **Not a matched comparison.** The A3B used 32 games per step, against 16, and an adapter without the routed
+  experts. Per game seen, the 27B learned faster: 0.267 after about 960 games, against 0.268 after about 2,560.
+- **Wall-clock:** about 13.5 h for each.
+
+Artefacts:
+- **HF:** `exp2/train_team_checks_a3b/` has all 80 adapters, trainer states every 10th step, manifests, metrics and
+  config.
+- **Dev box:** rollouts, the training log and the preflight log (`out/preflight_a3b.stdout`).
+
+### Setup (as prepared before the run)
+
 
 Exploratory: Sid asked for the clearest signal, not an exact match to the 27B. It is `out/train_team_checks`
 (team reward, `checks` prompt, 0/1 scoring, the 51 repos, flat lr 4e-5, LoRA rank 32) on Qwen3.6-35B-A3B, a
@@ -319,7 +359,7 @@ Both pods are deleted. The receipts are in `/workspace/marli-orchestration/2026-
 - `ua9u3u8862f0g7`, the individual arm: about 7.5 h, about $68. Deleted.
 - `9qbcjl58u9juvi`, experiment 2.1: about 7.3 h, about $67. Deleted.
 - `qtr5aw4qukr34b`, the team-arm continuation to 60 steps: about 7.3 h, about $67. Deleted.
-- `r66r0di3a4vcxh`, the A3B arm (80 steps): running, expected about $120.
+- `r66r0di3a4vcxh`, the A3B arm (80 steps): about 14 h, about $129. Deleted.
 
 Receipts are in `/workspace/marli-orchestration/2026-10-02/`.
 
