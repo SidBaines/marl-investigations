@@ -67,7 +67,7 @@ from marli.registry import Registry, catalog_kinds, catalog_names
             "Qwen3_5MoeForConditionalGeneration",
             65536,
             (0.54, 1.34, 1.18),
-            "unverified",
+            "yes",
             True,
             "qwen3_5_xml",
         ),
