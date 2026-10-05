@@ -1,0 +1,7 @@
+protocol: relay
+config:
+  n_agents: 5
+  env_tools: [bash, ci_submit, ci_review]
+notes: >-
+  5 sequential contributors for code_rules (a contributor-count transfer condition); see
+  experiments/2026-09-25_sacrifice-relay/exp2_eval/README.md.
