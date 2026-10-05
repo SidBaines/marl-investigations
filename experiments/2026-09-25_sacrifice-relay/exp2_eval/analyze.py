@@ -49,6 +49,13 @@ CONDITIONS = {
     "far": ("held4", "heldout"),
     "n3": ("held3", "heldout"),
     "n5": ("held5", "heldout"),
+    # Help request (help.py has its own measures; here, the cost to the contributors' own task).
+    "help_a_notes": ("held4", "heldout"),
+    "help_b_notes": ("held4", "heldout"),
+    "help_a_file": ("held4", "heldout"),
+    "help_b_file": ("held4", "heldout"),
+    "help_control_told": ("held4", "heldout"),
+    "help_a_notes_told": ("held4", "help_control_told"),
 }
 BASELINES = {"27b": "27b_base", "a3b": "a3b_base"}
 GRADE_KEYS = (

@@ -11,6 +11,8 @@
 #   ./run.sh grid                  # GRID=minimal|core|full cells for this MODEL, PARALLEL at a time
 #   ./run.sh plan                  # list the cells `grid` would run (no GPU needed)
 #   ./run.sh report                # analyze.py over out/eval -> out/report.txt, out/report.json
+#   ./run.sh help_report           # help.py: the planted help-request measures -> out/help_report.txt
+#   ./run.sh help_audit [args]     # help.py audit: sampled cases with agent text, printed only (private)
 #   ./run.sh extract [dest]        # grades-only copy of out/eval (no problem text) -> out/grades, for syncing
 #   ./run.sh stop                  # stop this MODEL's server
 # MODEL=27b (default) or a3b; SERVE=<serve yaml> overrides the server layout.
@@ -72,13 +74,21 @@ cell() {  # cell <policy> <condition> [key=value ...]
 
 grid_cells() {  # "<policy> <condition> [key=value]" lines for GRID and MODEL
   local core=(train_repos heldout new_rules far) surface=(reworded tools notes replies n3 n5)
+  local help=(heldout help_a_notes help_b_notes help_a_file) told=(help_control_told help_a_notes_told)
   local base="${MODEL}_base" team; team=$([ "$MODEL" = 27b ] && echo 27b_team_s59 || echo a3b_team_s79)
   case "$GRID" in
     # First 24 held-out repos (48 games per cell); `core` later resumes the same cells to all repos.
     minimal) for p in "$base" "$team"; do for c in heldout new_rules far; do echo "$p $c stop_after_tasks=24"; done; done ;;
     core) for p in "${POLICIES[@]}"; do for c in "${core[@]}"; do echo "$p $c"; done; done ;;
     full) GRID=core grid_cells; for p in "$base" "$team"; do for c in "${surface[@]}"; do echo "$p $c"; done; done ;;
-    *) echo "GRID must be minimal, core or full" >&2; return 2 ;;
+    # Help request: heldout is its control (shared with core, so a no-op there if already run).
+    help_minimal) for p in "$base" "$team"; do for c in heldout help_a_notes help_a_file; do
+      echo "$p $c stop_after_tasks=24"; done; done ;;
+    help) for p in "${POLICIES[@]}"; do for c in "${help[@]}"; do echo "$p $c"; done; done ;;
+    help_told) for p in "${POLICIES[@]}"; do for c in "${told[@]}"; do echo "$p $c"; done; done ;;
+    help_full) GRID=help grid_cells; GRID=help_told grid_cells
+      for p in "${POLICIES[@]}"; do echo "$p help_b_file"; done ;;
+    *) echo "GRID must be minimal, core, full, help_minimal, help, help_told or help_full" >&2; return 2 ;;
   esac
 }
 
@@ -168,6 +178,12 @@ plan)
   grid_cells; echo "GRID=$GRID MODEL=$MODEL: $(grid_cells | wc -l) cells" ;;
 report)
   $PY "$HERE/analyze.py" "${2:-$OUT/eval}" --json "$OUT/report.json" "${@:3}" | tee "$OUT/report.txt" ;;
+help_report)
+  $PY "$HERE/help.py" report "${2:-$OUT/eval}" --json "$OUT/help_report.json" "${@:3}" \
+    | tee "$OUT/help_report.txt" ;;
+help_audit)
+  # PRIVATE: prints agent text. Read it on the dev box; never save or commit it.
+  $PY "$HERE/help.py" audit "${2:-$OUT/eval}" "${@:3}" ;;
 extract)
   $PY "$HERE/analyze.py" --extract "$OUT/eval" "${2:-$OUT/grades}" ;;
 stop)

@@ -1,3 +1,7 @@
 # Layer 1, new repos in the same format: held-out DeepCoder problems that passed the same difficulty
 # filter, grouped 4 per repo, training rule forms (header, constant, docstring). Reference for layers 2-3.
+# It is also the help-request control (README "Help request"): help_note control plants nothing and leaves
+# the prompt, tools and workspace exactly as in training; it only records logs/agent_runs.log around each
+# contributor, the baseline for writing that log unprompted.
 tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4/taskset.json
+env_config: {help_note: control}

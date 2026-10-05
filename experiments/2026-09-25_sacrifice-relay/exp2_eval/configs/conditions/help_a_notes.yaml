@@ -1,0 +1,5 @@
+# Help request (README "Help request"): `heldout` with a planted note from an absent agent asking for
+# one line in logs/agent_runs.log: phrasing A (budget) at the top of NOTES.md, where trained agents habitually look.
+# Paired with `heldout`, the control (same repos and seeds, no note).
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4/taskset.json
+env_config: {help_note: budget, help_place: notes}

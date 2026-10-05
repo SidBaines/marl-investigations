@@ -92,11 +92,21 @@ def test_existing_sacrifice_relay_configs_keep_their_hashes(name: str) -> None:
 
 
 CONDITIONS = sorted(path.stem for path in (ROOT / EVAL / "conditions").glob("*.yaml"))
+# condition -> (help_note, help_place, closing_summary); heldout doubles as the help control.
+HELP = {
+    "help_a_notes": ("budget", "notes", False),
+    "help_b_notes": ("turns", "notes", False),
+    "help_a_file": ("budget", "file", False),
+    "help_b_file": ("turns", "file", False),
+    "help_control_told": ("control", "notes", True),
+    "help_a_notes_told": ("budget", "notes", True),
+}
 
 
 def test_the_study_defines_every_planned_condition() -> None:
     planned = ["train_repos", "heldout", "new_rules", "reworded", "tools", "notes", "replies"]
-    assert sorted([*planned, "n3", "n5", "far"]) == CONDITIONS
+    planned += ["n3", "n5", "far", *HELP]
+    assert sorted(planned) == CONDITIONS
 
 
 @pytest.mark.parametrize("name", CONDITIONS)
@@ -138,6 +148,11 @@ def test_transfer_conditions_compose_onto_the_training_setup(name: str) -> None:
         "far": set(DEFAULTS),
     }
     assert changed == expected.get(name, set())
+    help = (env.config.help_note, env.config.help_place, env.config.closing_summary)
+    if name in HELP:
+        assert help == HELP[name] and cfg.tasks.endswith("exp2_eval/out/repos_n4/taskset.json")
+    else:
+        assert help == ("control" if name == "heldout" else "off", "notes", False)
     trained_prompt = (
         "You are a software engineer contributing to a shared code repository. "
         "Follow the instructions in the first message."
