@@ -1,10 +1,10 @@
 ---
 type: entity
 title: Qwen3.8-27B
-description: "Qwen/Qwen3.8-27B, a 27B thinking model (Qwen3.5 architecture, renderer qwen3_8_medium in the sacrifice relay) with its own MTP draft head; LoRA r=32 trained on the local backend (PEFT + vLLM) on 2×H200 in the sacrifice-relay study; not on Tinker."
+description: "Qwen/Qwen3.8-27B, a 27B thinking model (Qwen3.5 architecture, renderer qwen3_8_medium in the sacrifice relay; its chat template defaults to xhigh effort) with its own MTP draft head; LoRA r=32 trained on the local backend on 2×H200 for up to 60 steps; team training taught its first contributor to review (17% → 80%) and transferred to new problems and a changed format, but not to standard cooperation evals; not on Tinker."
 resource: src/marli/models/qwen3_8_27b.yaml
 tags: [model, qwen, thinking, local-backend, vllm, lora]
-timestamp: 2026-10-01
+timestamp: 2026-10-05
 ---
 
 # Qwen3.8-27B
@@ -57,11 +57,56 @@ numbers are bf16, vLLM, single-agent code rollouts, T=1, each measured once.
   contributors never ran CI. About 8% (3/38) of those with a real choice
   revealed the rule. [pilot]
 
-## Under RL (sacrifice relay, team reward, 30 steps, one seed) [partial]
+## Under RL (sacrifice relay, one seed per run) [partial]
 
-- Team score rose +0.086 (z=2.3), mostly through reaching CI more often.
-- The sacrifice rate fell from 10.6% to 7.2% (z=−1.7).
+- **Experiment 1** (0/1/3 scoring, team reward, 30 steps):
+  - team score rose +0.086 (z=2.3), mostly through reaching CI more often;
+  - the sacrifice rate fell from 10.6% to 7.2% (z=−1.7).
+- **Experiment 2** (0/1 scoring, no position in the prompt, team reward, 60
+  steps):
+  - contributor 1's review rate rose from 17% to 80%;
+  - team score rose from 0.089 to 0.267, still rising at step 59;
+  - redundant reviews fell to 10%, then rose to 24% by steps 50–59.
+- **Individual reward** (30 steps): flat. **Experiment 2.1** (frozen trained
+  contributor 1, individual reward for the rest): followers learned to apply
+  the rule (50% → 62%), not to find it.
+- Sampler/trainer agreement held throughout (`kl_sample_train` ≤ 7.6e-4),
+  including after resuming on a new pod.
 - See [the synthesis](../syntheses/does-rl-teach-sacrifice.md).
+
+## Evals of the trained policy (2026-10-05) [partial]
+
+Experiment 2's team policy after step 59, against the untrained model.
+
+- **Transfer in the relay.**
+  - Held-out problems: team score 0.085 → 0.300; contributor 1 reviews 93%.
+  - Fully changed surface: 0.115 → 0.275, almost all of the gain kept.
+  - No format-matching habits.
+  - Its followers did not get better at applying the rule (57% → 51%, n.s.).
+  - See [behaviour vs format](../concepts/behaviour-transfers-across-format.md).
+- **Standard cooperation evals:** no change in one-shot giving games, the
+  volunteer's dilemma, HiddenBench (19.1% vs 19.2%) or a planted help request
+  ([standard cooperation evals](standard-coop-evals.md)). Untrained, it is
+  more generous than the A3B (dictator share 0.31; prisoner's-dilemma
+  cooperation 23%).
+- **Helping another agent.**
+  - Inside the relay, it appended a requested line for 19–20% of
+    contributors (36–38% of first contributors), the same before and after
+    training.
+  - In a stock Inspect agent it never did (0/120). There it read the note
+    60–90% of the time and usually told the user about it
+    ([harness-dependent helpfulness](../concepts/harness-dependent-helpfulness.md)).
+
+## Serving notes (2026-10-05)
+
+- **Chat template effort.** The chat template defaults to reasoning effort
+  `xhigh`, and adds an instruction saying so to the system prompt. Training
+  rendered `medium`, so chat-endpoint evals must send
+  `chat_template_kwargs: {reasoning_effort: medium}`. With that set, the
+  template's prompt token ids equal the training renderer's on the game
+  prompts.
+- **Earlier thinking.** In multi-turn chat, the template keeps earlier
+  thinking, as the training buffers did.
 
 ## Tensions
 
@@ -70,5 +115,11 @@ numbers are bf16, vLLM, single-agent code rollouts, T=1, each measured once.
   since trained LoRA r=32 locally for 30+ steps with all checks passing. The
   registry entry is stale.~~ Fixed in fe745b2: the registry now says `local: "yes"`.
 
+- **Not compared like for like with the A3B.** The A3B ran twice the batch,
+  with an adapter that leaves most of its weights frozen, so "the 27B learned
+  faster per game" (0.267 after about 960 games against about 2,560) is not
+  a model comparison ([Qwen3.6-35B-A3B](qwen3-6-35b-a3b.md)). [open]
+
 Sources: [experiment 1](../../sources/sacrifice-relay-experiment-1.md),
-[benchmark](../../sources/sacrifice-relay-throughput-bench.md).
+[benchmark](../../sources/sacrifice-relay-throughput-bench.md),
+[study report](../../sources/sacrifice-relay-experiments-1-3-and-evals.md).

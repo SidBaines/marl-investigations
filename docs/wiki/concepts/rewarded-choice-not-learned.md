@@ -1,10 +1,10 @@
 ---
 type: concept
 title: "Rewarded but not learned: a rare choice RL did not pick up"
-description: "In the sacrifice-relay trial, the costly choice (reveal the hidden rule for later contributors) paid off for the team and got a positive advantage from training, yet it became rarer over 30 steps; a real incentive and a correctly signed gradient were not enough for a rare choice whose tokens are a sliver of each update [partial]."
+description: "In sacrifice-relay experiment 1 (Qwen3.8-27B, 0/1/3 scoring), the costly choice (reveal the hidden rule for later contributors) paid off for the team and got a positive advantage, yet became rarer over 30 steps; later runs bracket it: when the review cost the reviewer nothing and was chosen often (experiment 2), team RL learned it, and when the advantage was negative (experiment 3) RL removed it, so experiment 1 is the only case where a correctly signed gradient did not move the behaviour [partial]."
 resource: experiments/2026-09-25_sacrifice-relay/payoff.py
-tags: [training, rl, credit-assignment, sparse-signal, multi-agent, relay, sacrifice, team-reward]
-timestamp: 2026-10-01
+tags: [training, rl, credit-assignment, sparse-signal, multi-agent, relay, sacrifice, team-reward, spill-over]
+timestamp: 2026-10-05
 ---
 
 # Rewarded but not learned: a rare choice RL did not pick up
@@ -124,6 +124,46 @@ These are from the source:
 - The 51 repos repeat (each drawn about 2.4 times over 30 steps). Only the rule
   is resampled.
 
+## Later regimes: when the gradient's sign did win (2026-10-05) [partial]
+
+Experiments 2 and 3 put experiment 1 between two clearer cases. All are one
+seed, on the [local backend](../entities/local-backend.md) with LoRA rank 32,
+flat lr 4e-5, the same leave-one-out baseline and the same 51 repos. Source:
+[study report §3](../../sources/sacrifice-relay-experiments-1-3-and-evals.md).
+
+| Run | Did a review pay the team? | Advantage for reviewing | Review rate, early → late |
+|---|---|---|---|
+| Exp 1: 27B, 0/1/3, team, 30 steps | yes (+0.31) | positive (contributor 1: +0.57) | 10.6% → 7.2% (all); contributor 1 3% → 2% |
+| Exp 2: 27B, 0/1, team, 60 steps | yes (the only way to score) | positive (contributor 1 can gain only through the team score) | contributor 1 17% → 80% |
+| Exp 2: A3B, 0/1, team, 80 steps | yes | positive | contributor 1 38% → 77% |
+| Exp 3: A3B, 0/1/3, team, 31 steps | no (−0.12) | negative (−0.08 vs +0.05 for submitting) | 21% → 3% (all) |
+
+- **When the advantage was negative, RL followed it** (experiment 3). That
+  is not a failure to learn: the review did not pay
+  ([pays in practice](sacrifice-pays-in-practice.md)). [partial]
+- **When the review was frequent and free for the reviewer, RL learned it**
+  (experiment 2). Experiment 2 changed four things at once, so it does not say
+  which of experiment 1's candidate explanations was right:
+  - scoring 0/1, so a contributor without the rule loses nothing by
+    reviewing;
+  - a prompt sentence saying the checks cannot be worked out. Without it,
+    the untrained 27B reviewed 2 of 82 CI runs under experiment 2's prompt.
+    With it, contributor 1 reviewed 17% from the start (experiment 1: 3%);
+  - no position in the prompt;
+  - random folder names.
+
+  The starting rate matters for explanation 1. Experiment 2 had many more
+  reviews per step than experiment 1's 3–4. [partial]
+- **Evidence for spill-over (explanation 3).** In experiment 2.1 on the A3B,
+  followers who started without the rule stopped reviewing (35% → 6%), though
+  under 0/1 scoring nothing rewarded or punished that choice directly. The
+  likely route is the shared weights: the same policy was being punished for
+  reviewing when it already knew the rule (redundant reviews 16% → 2%). A
+  gradient aimed at one situation moved behaviour in another. [partial]
+- So experiment 1 remains the one case of a positive, correctly signed
+  advantage that did not move the behaviour. Its explanation is still open.
+  [open]
+
 ## Tensions
 
 - The pre-registered readout compared steps 0–9 with steps 70–79. The trial
@@ -140,9 +180,14 @@ These are from the source:
   events per step (larger B or G). Credit the decision rather than the whole
   playthrough. Try a per-slot LoRA. The source also lists hidden-notes and
   oracle-notes ablations, m and N sweeps, and a swarm variant. [open]
-- The next experiment changes the setup (no position in the prompt, 0/1
-  scoring), so it will not be a direct replication. [open]
+- ~~The next experiment changes the setup (no position in the prompt, 0/1
+  scoring), so it will not be a direct replication. [open]~~ It did change
+  the setup, and the behaviour was learned (see "Later regimes" above). No
+  run has repeated experiment 1's regime. [open]
+- A direct test of explanation 1: experiment 1's regime with only the
+  `checks` sentence added. That would raise the base rate without making the
+  review free. [open]
 
 See also: [the synthesis](../syntheses/does-rl-teach-sacrifice.md),
 [zero-variance groups](zero-variance-groups.md) (another way a behaviour's
-gradient can vanish).
+gradient can vanish), [pays in practice](sacrifice-pays-in-practice.md).

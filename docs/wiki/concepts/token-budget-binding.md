@@ -1,10 +1,10 @@
 ---
 type: concept
 title: "When the token budget binds, reaching the scorer is the main lever"
-description: "With 12,288 tokens per contributor and a 6,144-token per-call cap, about 30–38% of Qwen3.8-27B contributors never reach CI on code_rules; RL's first gain was reaching CI more often (61% → 70%) rather than passing more tests, and the per-call cap, not the total budget, is what cuts thinking off [partial]."
+description: "With 12,288 tokens per contributor and a 6,144-token per-call cap, about 30–40% of contributors never reach CI on code_rules at the start of training; in every sacrifice-relay run (two models, team and individual reward) reaching CI rose (e.g. 60% → 74%, 63% → 79%), and under 0/1/3 scoring it was the main source of the team-score gain; the per-call cap, not the total budget, is what cuts thinking off [partial]."
 resource: experiments/2026-09-25_sacrifice-relay/configs/base.yaml
 tags: [compute, budgets, thinking-models, agentic-coding, training, rl, measurement]
-timestamp: 2026-10-01
+timestamp: 2026-10-05
 ---
 
 # When the token budget binds, reaching the scorer is the main lever
@@ -65,6 +65,35 @@ still never reach CI by steps 20–29. Other effects of the binding budget:
   writing notes.
 - Followers who knew the rule reached CI only 66% of the time (see
   [reactive information gathering](reactive-information-sharing.md)).
+
+## Later runs: reaching CI rises under every reward (2026-10-05) [partial]
+
+Same budgets in every run (12,288 tokens per contributor, 6,144 per call),
+the same 51 repos, one seed each. Source:
+[study report §3](../../sources/sacrifice-relay-experiments-1-3-and-evals.md).
+
+| Run | Reached CI, steps 0–9 → last 10 |
+|---|---|
+| Exp 2 team, 27B, 0/1 scoring, 60 steps | 60% → 74% |
+| Exp 2 team, [Qwen3.6-35B-A3B](../entities/qwen3-6-35b-a3b.md), 0/1, 80 steps | 63% → 79% |
+| Exp 2.1, 27B, followers who knew the rule | 59% → 70% |
+| Exp 3 team, A3B, 0/1/3, 31 steps | 65% → 74% |
+| Exp 3 individual, A3B, 0/1/3, 31 steps | 66% → 78% |
+
+- **Under 0/1/3 scoring it is again the main gain.** In experiment 3, both
+  arms' team scores rose only through reaching CI and submitting more often
+  (the 1-point route). Meanwhile the review rate fell to near 0. [partial]
+- **Under 0/1 scoring it limits the team.** In experiment 2's first 30 steps
+  (27B), followers who started knowing the rule scored in only 46–47% of
+  cases: about 68% reached CI, and some failed the base tests. More reviewing
+  cannot fix that. [partial]
+- **The cost of a distraction shows up as tokens.** In the transfer eval, a
+  planted help note made the 27B team policy's contributors generate about
+  850 more tokens each, and score 8.5 points less often
+  ([harness-dependent helpfulness](harness-dependent-helpfulness.md)).
+  [partial]
+- **The same confound applies to experiment 3.** Its review rate is measured
+  among contributors who ran CI, a pool that grew from 65% to 74%. [open]
 
 ## Reading
 
