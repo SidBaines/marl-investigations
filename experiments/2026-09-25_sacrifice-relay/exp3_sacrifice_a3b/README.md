@@ -1,11 +1,57 @@
 # Experiment 3: the sacrifice again, on Qwen3.6-35B-A3B, team and individual reward
 
-Status (2026-10-05): **running** (two pods, one per arm, 80 steps each).
+Status (2026-10-05): **paused after step 30** (31 of 80 steps per arm, at Sid's request; resumable). Interim results below.
 
 Part of the sacrifice-relay study (`../README.md`). Sid asked for experiment 1's game, where reviewing is a real
 sacrifice (a contributor without the rule could score 1 by submitting), on the A3B, with the setup changes made since
 experiment 1, and with both reward arms (Sid, 2026-10-05: "Run both team and individual arms, keep original tool
 text").
+
+## Interim results (steps 0-30, paused 2026-10-05)
+
+Both arms ran steps 0-30 (11.6 min per step) and were paused at Sid's request after the step-30 checkpoint. Training
+health was clean: `kl_sample_train` <= 1.8e-3, IS ratio 1.000, no restarts, no abort rule. Numbers from `check.py
+--every 10`, `../analyze.py --bonus 3` and (team arm) `../payoff.py` (`out/analysis/<run>/`, also on HF under
+`exp3/analysis/`). Step 30 alone (32 playthroughs) is left out of the table.
+
+| | Team, 0-9 | Team, 10-19 | Team, 20-29 | Individual, 0-9 | Individual, 10-19 | Individual, 20-29 |
+|---|---|---|---|---|---|---|
+| Team score (0-3 scale) | 0.481 | 0.540 | 0.597 | 0.508 | 0.603 | 0.655 |
+| Reached CI | 65% | 69% | 74% | 66% | 73% | 78% |
+| Reviewed (no rule at start, ran CI) | 21% (141/685) | 9% | 3% (30/927) | 11% (83/750) | 0% | 0% (3/998) |
+| Contributor 1 reviewed (of its CI runs) | 19% (45/238) | 7% | 2% (6/264) | 14% (33/243) | 1% | 0% (1/265) |
+| Started knowing the rule | 18% | 9% | 2% | 12% | 0% | 0% |
+| Scored 3 (base tests and the rule) | 3% | 1% | 0% | 1% | 0% | 0% |
+| Scored anything | 43% | 52% | 59% | 48% | 60% | 65% |
+
+- **Both arms learned to stop reviewing, the team arm too.** The team score rose only through reaching CI and submitting
+  more often (the 1-point route).
+- **Why team reward pushed against reviewing: on the A3B the sacrifice did not pay** (team arm, steps 0-29, `payoff.py`):
+  - playthroughs with a review scored 0.12 lower than the same repo's playthroughs without one ([-0.17, -0.07], n = 145
+    groups); a review by contributor 1: -0.08 [-0.20, +0.06];
+  - the hand-off worked (96% of reviews by contributors 1-3 reached the next one), but **informed followers scored 3
+    only 14% of the time**, although 83% of their submissions passed the base tests: mostly they knew the rule and did
+    not apply it. Their mean score was 0.66, against 0.52 for contributors 2-4 without a review earlier;
+  - so a review cost the reviewer about 0.7 points and gained each follower about 0.14, and training's advantage
+    pointed against it: reviewed -0.08 [-0.12, -0.03] vs submitted +0.05 (contributors without the rule who ran CI).
+- **Compared with experiment 2's A3B team arm** (0/1 scoring, the rule required to score; same prompt changes, model
+  and training): there reviewing rose over the same steps (contributor 1: 38% at steps 0-9, 61% at steps 20-29) and
+  the team score rose 0.049 -> 0.088. The only difference between the two team arms is the scoring.
+- **Compared with experiment 1** (27B, 0/1/3 scoring, position in the prompt, numbered folders): reviewing paid off there
+  (+0.31 team score per playthrough with a sacrifice; informed followers scored 3 about 54% of the time), but the policy
+  still did not learn to review in 30 steps (sacrifice rate 10.6% -> 7.2%).
+- **Reading:** for the A3B under 0/1/3 scoring, the bottleneck is followers applying the rule, not reviewers finding it.
+  A hypothesis to check in transcripts: when passing the tests alone earns a point, the A3B treats the rule as optional.
+  If so, more steps would not help unless followers first learn to apply the rule.
+
+**Resume recipe** (same runs, step 31 onwards; details in `/workspace/marli-orchestration/2026-10-05/CLEANUP_RECEIPT_
+{de4fp5nf08f8a7,icaerm941c78yv}.md`): on a new 2xH200 pod at commit a4858f3 (or any later commit whose composed config
+has the same hash), copy `../out/repos_n4` and the run dir from the dev box, download the run's step-30 trainer state
+(and adapter) from HF `exp3/train_<arm>/`, then `run.sh serve` and `ARM=<arm> run.sh train` (same `--out`).
+
+Artefacts: HF `exp3/train_team/`, `exp3/train_individual/` (31 adapters each, states s9/s19/s29/s30, manifests,
+metrics, config); rollouts and logs on the dev box only. Pods de4fp5nf08f8a7 (team, about 6.5 h, about $59) and
+icaerm941c78yv (individual, about 6.6 h, about $60), both deleted.
 
 ## Design (as planned before the runs)
 
