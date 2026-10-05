@@ -1,0 +1,26 @@
+kind: upstream
+description: >-
+  FAIRGAME's 3-player Volunteer's Dilemma (10 known rounds; one volunteer secures the
+  group at a personal cost: volunteer 5, others 10, nobody volunteers 0 and the game
+  stops) with neutral personalities, one model per seat. FAIRGAME's own runner at a
+  pinned commit via LiteLLM's hosted_vllm provider, run by the study's run.sh with the
+  marli patch (extra request fields; unmatched replies counted).
+citation: >-
+  Alessio Buscemi et al. FAIRGAME: a Framework for AI Agents Bias Recognition using Game
+  Theory. arXiv:2504.14325. Config: starter_library seed_cfg_volunteer.
+license: Apache-2.0. The config and template are read from the pinned checkout at run time.
+source:
+  repo: https://github.com/aira-list/FAIRGAME
+  commit: fc302a642c6f7cc0c439c2ae957a45f5954f4525
+# FAIRGAME sets no sampling parameters unless FAIRGAME_LLM_* is set.
+generation: {}
+thinking: "on"
+reader: marli.eval.external.readers:fairgame_volunteer
+metrics:
+  - {name: volunteer_rate, kind: share, pair: none, label: "share of decisions that volunteer"}
+  - {name: round1_volunteer_rate, kind: share, pair: none, label: "round 1 volunteering (no history)"}
+  - {name: safe_rate, kind: share, pair: none, label: "share of rounds with at least one volunteer"}
+  - {name: round1_volunteer, kind: binary, pair: none, label: "per seat: volunteers in round 1"}
+notes: >-
+  FAIRGAME re-asks an agent whose reply names no strategy (up to
+  FAIRGAME_STRATEGY_MAX_ATTEMPTS, default 10); parse_failures counts those re-asks.

@@ -151,6 +151,27 @@ Manifest produced: `episodes.json`.
 | concurrency | int | 8 | false | true | false | concurrent episodes |
 | max_usd | float \| None | null | false | true | false | spend guard for this run |
 
+### eval external
+
+Run a standard external eval (Inspect task or upstream harness) on served policies.
+
+Manifest produced: `external.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| suite | str |  | false | false | false | external eval registry entry (marli list external_evals) |
+| cells | list[ExternalCell] | [] | false | false | false | {label, policy} (inspect) or {label, results, seats, focal} (upstream) per cell |
+| baseline | str \| None | null | false | false | false | cell label gains are measured against |
+| model_generation | dict[str, Any] | {} | false | false | false | model-card sampling and chat_template_kwargs; the suite's own settings win |
+| generation_overrides | dict[str, Any] | {} | false | false | false | explicit deviations from the suite's settings (recorded) |
+| task_args | dict[str, Any] | {} | false | false | false | inspect suites: overrides of the suite's task_args |
+| epochs | int \| None | null | false | false | false |  |
+| limit | int \| None | null | false | false | false | inspect suites: first N samples only (smoke runs) |
+| max_connections | int | 32 | false | true | false | inspect: concurrent requests per cell |
+| max_error_rate | float | 0.05 | false | true | false | fail when a cell's harness/model error rate exceeds this |
+| timeout_s | float | 30.0 | false | true | false | server probe timeout |
+| request_timeout_s | int | 1800 | false | true | false | inspect: per-request timeout (long thinking at high concurrency) |
+
 ### eval grid
 
 Run labelled rollout/score cells and combine their compute-aware report.

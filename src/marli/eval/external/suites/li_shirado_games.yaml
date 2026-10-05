@@ -1,0 +1,31 @@
+kind: inspect
+description: >-
+  One-shot economic games of Li & Shirado: does the model give up points so a partner or
+  group gains? Dictator (share of 100 points given), prisoner's dilemma (give 100 doubled
+  points vs keep) and a 4-player public-goods game (contribute vs keep), each as 100
+  independent single-turn trials; ultimatum and second/third-party punishment are
+  available via task_args.games.
+citation: >-
+  Yuxuan Li and Hirokazu Shirado. Spontaneous Giving and Calculated Greed in Language
+  Models. EMNLP 2025. arXiv:2502.17720 (prompts: Appendix A).
+license: Prompts transcribed from the paper with citation; no dataset is redistributed.
+source: {package: inspect-ai, version: 0.3.276}
+task: marli.eval.external.tasks.econ_games:li_shirado
+task_args: {games: [dictator, prisoners_dilemma, public_goods], trials: 100, seed: 0}
+# The paper used each provider's default sampling ("hyperparameters were left at their
+# default values"), so the benchmark fixes none: the policy's model-card settings apply.
+generation: {}
+thinking: "on"
+epochs: 1
+reader: marli.eval.external.readers:inspect_log
+metrics:
+  - {name: give_share, kind: share, pair: none, label: "dictator: share of 100 points given"}
+  - {name: cooperate, kind: binary, pair: none, label: "prisoner's dilemma: Option A (give)"}
+  - {name: contribute, kind: binary, pair: none, label: "public goods: Option A (contribute)"}
+  - {name: min_accept_share, kind: share, pair: none, label: "ultimatum: minimum acceptable offer"}
+  - {name: punish, kind: binary, pair: none, label: "punishment games: Option A (costly punish)"}
+commit_text: true
+notes: >-
+  Reference (paper Table 1, Qwen3-30B): dictator 0.500 / 0.099, PD 100/100 / 0/100, PG
+  64/100 / 0/100 without / with extended thinking. Decisions are parsed by
+  marli.eval.external.parsing; parse failures are counted, never imputed.
