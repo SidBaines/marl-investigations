@@ -29,7 +29,10 @@ tinker = ["tinker==0.30.1", "tinker-cookbook==0.5.7"]
 wandb = ["wandb"]
 hub = ["huggingface_hub"]
 pods = ["bellhop-py>=0.8"]
-all = ["marli[dev,render,eval,tinker,wandb,hub,pods]"]
+# Standard external evals (`marli eval external`): UK AISI Inspect, driven through its Python
+# API against our vLLM servers' OpenAI-compatible chat endpoint. Imported lazily (contract test).
+external = ["inspect-ai==0.3.276", "openai>=1.99"]
+all = ["marli[dev,render,eval,tinker,wandb,hub,pods,external]"]
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -40,7 +43,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 # File-backed registries (one YAML per entry).
-marli = ["models/*.yaml", "tasks/*.yaml", "interact/configs/*.yaml"]
+marli = ["models/*.yaml", "tasks/*.yaml", "interact/configs/*.yaml", "eval/external/suites/*.yaml"]
 
 [tool.pytest.ini_options]
 # Prefer THIS checkout's src over any editable install (worktree safety; see
