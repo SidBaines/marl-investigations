@@ -13,19 +13,25 @@ links to them.
 
 ## 1. Summary
 
-1. **Team reward can teach an agent to give up its own CI run so later agents score more. Whether it does depends
-   on whether the sacrifice pays off for the team in practice.**
-   - **Experiment 2: yes.** Following the hidden rule was required to score, and the prompt said the checks cannot
-     be guessed. Team training on Qwen3.8-27B took contributor 1's review rate from 17% to 80% over 60 steps, and
-     the team score tripled (0.089 → 0.267).
+1. **Team reward taught the first contributor to spend its CI run finding the rule for the others, when that cost it
+   nothing. A true sacrifice, one that costs the reviewer its own expected point, has not been learned.** Training
+   followed the payoff a review actually delivered (one seed per run).
+   - **Experiment 2: learned.** Following the hidden rule was required to score, and the prompt said the checks cannot
+     be guessed. So a contributor without the rule scores 0 whether it reviews or submits: reviewing gives up the CI
+     run, not a point (experiment 2's README). Team training on Qwen3.8-27B took contributor 1's review rate from 17%
+     to 80% over 60 steps, and the team score tripled (0.089 → 0.267).
      - Qwen3.6-35B-A3B learned the same over 80 steps: review 38% → 77%, team score 0.049 → 0.268.
      - The A3B also learned *when* to review: reviews by contributors who already knew the rule fell from 54% to 21%.
-   - **Experiment 3: no.** The A3B was given experiment 1's scoring, where passing the tests alone earns a point. Both
-     team and individual reward drove reviewing to about 0% within 30 steps.
-     - The payoff check shows why. Informed followers rarely applied the rule (they scored 3 in 14% of cases), so a
-       review cost the team more than it gained. Training's signal pointed against reviewing.
-   - **Experiment 1** (27B, the same 0/1/3 scoring) was the reverse case. Reviewing paid off (+0.31 team score), yet
-     the model did not learn it in 30 steps.
+   - **Experiment 3: the opposite.** The A3B was given experiment 1's scoring, where passing the tests alone earns a
+     point, so a review costs the reviewer that point. Both team and individual reward drove reviewing to about 0%
+     within 30 steps.
+     - The payoff check shows why: informed followers mostly did not apply the rule (only 14% of them scored 3), so a
+       review cost the team more than it gained, and training's signal pointed against reviewing.
+   - **Experiment 1** (27B, the same 0/1/3 scoring) is the one case where the costly review did pay off (+0.31 team
+     score), yet the model did not learn it in 30 steps.
+   - **Confounds:** experiment 2 changed the scoring, the prompt sentence, the position and the folder names at once
+     relative to experiment 1, so which change mattered is not isolated. Only experiment 3 vs experiment 2's A3B team
+     arm isolates the scoring.
 2. **Individual reward did not teach reviewing.**
    - Experiment 2's individual arm was flat over 30 steps.
    - Experiment 2.1 used a frozen, trained first contributor, with the followers trained on individual reward.
@@ -40,7 +46,8 @@ links to them.
      93% / 76% of the time.
    - **A fully changed format** (reworded prompts, renamed tools, moved notes file, new rule kinds):
      - the 27B keeps almost all of its gain (0.115 → 0.275);
-     - the A3B keeps reviewing but its followers stumble on the new rule kinds (0.050 → 0.140).
+     - the A3B keeps reviewing but its followers apply the rule much less (0.050 → 0.140, about a third of its gain),
+       probably because of the new rule kinds (the single-change conditions that would show this were not run).
    - **No sign of format-matching habits.** No one called a renamed tool, used the old notes file or wrote the rule in
      the old form.
    - **No memorisation during training either.** The coding pass rate on repeated problems stayed flat, notes were
@@ -49,11 +56,16 @@ links to them.
    - **One-shot giving games and the volunteer's dilemma:** no change for either model.
    - **Help requests from another agent:** never acted on in a standard harness (0 of 480 episodes across both
      models and versions), and team training changed nothing.
-   - **The one exception is HiddenBench** (pooling private facts in a discussion): the team-trained A3B was right more
-     often after discussion, 17.8% → 22.7% (+4.8 points, p = 0.025 over 3 discussions per task; the replication alone
-     gave p = 0.077). The 27B showed no such effect (19.1% vs 19.2%).
-5. **Behaviour depends on the harness.** The same 27B appended a requested line for another agent in 36–38% of games
-   inside our relay (the note sat in the `NOTES.md` it is told to share), but never in a standard Inspect agent.
+   - **One lead, not a finding: HiddenBench** (pooling private facts in a discussion). The team-trained A3B was right
+     more often after discussion, 17.8% → 22.7% (+4.8 points, p = 0.025 over 3 discussions per task). But it is the
+     one positive result among many tests on two models, the extra discussions were run because the first looked
+     promising, the replication alone gave p = 0.077, and the group's majority vote moved less (p = 0.19). The 27B
+     showed no effect (19.1% vs 19.2%).
+5. **Helping another agent depends strongly on the setting.** The same 27B appended a requested line for another
+   agent in 36–38% of games inside our relay, but never in a standard Inspect agent. The two settings differ in several
+   ways at once: where the note sits (the shared `NOTES.md` the relay prompt tells it to read and write), how shared
+   files are framed, task difficulty and length, how the result is reported, and sampling settings. So which
+   difference matters is not isolated.
 
 ## 2. The game and what changed between experiments
 
@@ -160,7 +172,9 @@ each experiment's `out/analysis/<run>/` and on HF (`sidbaines/amber-baton`, `exp
 
 - **Team-arm payoff check:** games with a review scored 0.12 lower than games on the same repo without one.
   - The rule reached the next contributor 96% of the time.
-  - But informed followers scored 3 only 14% of the time, although 83% of their submissions passed the base tests.
+  - But informed followers scored 3 only 14% of the time (of 375 who started knowing the rule). Of the 178 who
+    submitted, 83% passed the base tests, yet only about a third of those (about 52 of 147) also followed the rule;
+    the rest took the 1 point without it.
   - The advantage was −0.08 for reviewing and +0.05 for submitting.
 - **Reading:** for the A3B under this scoring, the bottleneck is followers applying the rule, not reviewers finding
   it. A hypothesis to check in transcripts: the A3B treats the rule as optional when passing alone earns a point.
@@ -285,8 +299,9 @@ contributors; p from McNemar on "anyone scored", matched by game):
     training.
   - The 27B team policy's `far` minus new-problems change is −0.025 [−0.11, +0.05].
   - The A3B's is −0.18 [−0.26, −0.10]. It still reviews (contributor 1 −8.5 points, not significant), but its
-    followers apply the rule much less (−32 points), most likely because of the new rule kinds.
-- **No format-matching habits.** Across 1,200 contributors in the `far` games, none:
+    followers apply the rule much less (−32 points), probably because of the new rule kinds (not isolated: the
+    single-change conditions were not run).
+- **No format-matching habits.** Across the 800 contributors in the `far` games (4 cells × 50 games × 4), none:
   - called a tool that does not exist there;
   - touched the old `NOTES.md`;
   - wrote the rule ID in the wrong form.
@@ -301,6 +316,10 @@ contributors; p from McNemar on "anyone scored", matched by game):
 | ... of first contributors | 36% | 38% | 0% | 0% |
 | Mentioned it in visible text | 42% | 39% | 0% | 2% |
 | Did it and told / declined and told / ignored silently | 37 / 48 / 113 | 37 / 41 / 118 | 0 / 0 / 200 | 1 / 2 / 197 |
+
+- **The note had a cost for the trained 27B.** Against the same games without the note, its team score fell −0.085
+  [−0.165, 0.000], contributor 1 reviewed 19 points less [−35, −5], and contributors generated about 850 more tokens
+  each [+358, +1,351]. The untrained 27B and the A3B showed no such cost.
 
 **Standard evals** (95% intervals; differences are trained minus untrained):
 
@@ -331,10 +350,10 @@ contributors; p from McNemar on "anyone scored", matched by game):
   - The **27B noticed and reported it** to the user most of the time.
   - The **A3B mostly did not look** at it.
   - The no-note control gives the keyword measure's false-alarm rate: 7–10% "told" for the 27B, 0% for the A3B.
-- **Harness dependence:** the same 27B appended the line for 36–38% of first contributors inside the relay, where the
-  note sits in the shared `NOTES.md` it is told to read and write, but never in the standard harness (0/120).
-  Willingness to act on another agent's note depends strongly on the setting, which is the case for testing
-  generality in standard harnesses.
+- **Setting dependence:** the same 27B appended the line for 36–38% of first contributors inside the relay, but never in
+  the standard harness (0/120). The settings differ in where the note sits (the relay's shared `NOTES.md`), the framing
+  of shared files, task difficulty and length, the reporting channel and sampling, so the cause is not isolated. It is
+  still a reason to test generality in standard harnesses.
 
 ## 5. Troubleshooting and lessons (what to reuse)
 

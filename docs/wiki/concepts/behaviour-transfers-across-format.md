@@ -85,7 +85,8 @@ Team score is the mean 0/1 score of the four contributors (best possible
   So the gain was not memorised repos. [partial]
 - **A changed surface: the 27B keeps almost all of its gain.** Its `far`
   team score is within noise of `heldout`. [partial]
-- **The A3B keeps reviewing but loses about half its gain.** Contributor 1's
+- **The A3B keeps reviewing but keeps only about a third of its gain** over the
+  untrained model (+0.09 under `far` vs +0.26 on held-out problems). Contributor 1's
   review rate barely moves (−8.5 points, interval includes 0). But followers
   who start knowing the rule apply it much less: 65% → 33%, −32 points
   [−44, −21]. [partial]

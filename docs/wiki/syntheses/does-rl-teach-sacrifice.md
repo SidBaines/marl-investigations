@@ -52,8 +52,9 @@ ran 30 steps on one seed. [open]
 other cooperation tasks.**
 
 - Experiment 2's team-trained policies keep their gain on held-out problems.
-- The 27B also keeps it under a fully changed surface; the A3B keeps about
-  half ([behaviour vs format](../concepts/behaviour-transfers-across-format.md)).
+- The 27B also keeps it under a fully changed surface; the A3B keeps about a
+  third of its gain over the untrained model (+0.09 vs +0.26)
+  ([behaviour vs format](../concepts/behaviour-transfers-across-format.md)).
   [partial]
 - The policies do not become more generous or helpful in standard cooperation
   evals. The one exception is a small HiddenBench gain for the A3B

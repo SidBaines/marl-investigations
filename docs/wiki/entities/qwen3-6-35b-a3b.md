@@ -72,8 +72,10 @@ training seed, unless stated otherwise.
     extinguished reviewing (21% → 3%)
     ([pays in practice](../concepts/sacrifice-pays-in-practice.md)).
 - **Transfer.** The team policy keeps its gain on held-out problems (0.060 →
-  0.320). Under a fully changed surface it keeps about half (0.050 → 0.140):
-  its followers apply new rule kinds much less
+  0.320). Under a fully changed surface it keeps about a third of its gain over the
+  untrained model (0.050 → 0.140, +0.09 vs +0.26):
+  its followers apply the rule much less under the changed format (probably the new
+  rule kinds; not isolated)
   ([behaviour vs format](../concepts/behaviour-transfers-across-format.md)).
 - **Standard harnesses**
   ([standard cooperation evals](standard-coop-evals.md)):

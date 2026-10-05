@@ -273,3 +273,20 @@ directories. Three scimt lesson sources were seeded in `docs/sources/`:
 - [scimt RLVR throughput matrix](../sources/scimt-rlvr-throughput-matrix.md)
 
 No concept pages yet.
+
+## [2026-10-05] ingest-fix | Corrections to the sacrifice-relay study report
+
+Corrected the report (`experiments/2026-09-25_sacrifice-relay/REPORT.md`) after review and re-copied it verbatim into
+[the source page](../sources/sacrifice-relay-experiments-1-3-and-evals.md) (provenance updated):
+- experiment 2's review is information gathering at no cost to the reviewer, not a sacrifice;
+- 800 (not 1,200) contributors in the `far` games;
+- the A3B's `far` drop is probably, not certainly, the new rule kinds;
+- the bases of experiment 3's 14% and 83%;
+- the HiddenBench result framed as a lead;
+- "harness" dependence reworded as setting dependence with its confounds;
+- the help note's cost to the trained 27B.
+
+Also fixed "keeps about half" to "about a third of its gain" for the A3B under `far` in
+[the synthesis](syntheses/does-rl-teach-sacrifice.md),
+[behaviour vs format](concepts/behaviour-transfers-across-format.md) and the
+[A3B entity](entities/qwen3-6-35b-a3b.md).
