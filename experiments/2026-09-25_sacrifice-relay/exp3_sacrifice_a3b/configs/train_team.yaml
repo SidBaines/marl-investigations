@@ -1,0 +1,12 @@
+# Experiment 3, team arm on Qwen3.6-35B-A3B: every contributor gets the repo's mean score. As experiment 2's A3B
+# team arm (../exp2_mandatory_rule/configs/train_team_a3b.yaml) except the scoring (configs/env.yaml) and the name:
+# 8 repos x 4 playthroughs per step, flat lr 4e-5, LoRA rank 32 on the registry targets (attention, linear attention,
+# shared expert; routed experts and router frozen), a checkpoint after every step, 80 steps (run in full).
+run_name: sacrifice-relay-exp3-team-a3b
+protocol: relay_n4
+batch_tasks: 8
+group_size: 4
+credit: {reward_target: {contributor: team}}
+learners:
+  policy: {base_model: qwen3_6_35b_a3b, backend: local, rank: 32, learning_rate: 4.0e-5}
+checkpoint_every: 1

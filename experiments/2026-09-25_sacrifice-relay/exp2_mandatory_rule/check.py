@@ -5,10 +5,13 @@ Prints, per block of steps (or once for the gate):
 - the share of groups (same repo, same step) whose playthroughs all tied, so training learns nothing
   from them (with team reward every contributor shares the playthrough's score);
 - by position: reached CI, chose review (among contributors who started without the rule and ran
-  CI), started knowing the rule, and scored;
+  CI), started knowing the rule, scored (any points) and scored with the rule followed (the same thing
+  under experiment 2's 0/1 scoring; under experiment 1's 0/1/3 scoring, the 3s);
 - hand-off: after a review by contributors 1-3, did the next contributor start knowing the rule;
 - redundant reviews: reviews by contributors who already knew the rule.
 Then applies the pre-registered rules in README.md and prints GO / STOP / ABORT lines.
+
+Also used for experiment 3 (0/1/3 scoring), whose abort rules are the same.
 
 Usage: python3 check.py <run dir> [--every 5]
 """
@@ -53,7 +56,7 @@ def block(episodes: list[dict]) -> dict:
     for e in eps:
         groups[e.get("group_id") or e["task_id"]].append(e["grades"]["_system"]["score"])
     tied = [len(set(scores)) == 1 for scores in groups.values() if len(scores) > 1]
-    ci, review, knew, scored = ([[0, 0] for _ in range(N)] for _ in range(4))
+    ci, review, knew, scored, full = ([[0, 0] for _ in range(N)] for _ in range(5))
     hand, redundant = [0, 0], [0, 0]
     for e in eps:
         g = [e["grades"][f"contrib{k}"] for k in range(N)]
@@ -64,6 +67,8 @@ def block(episodes: list[dict]) -> dict:
             knew[k][1] += 1
             scored[k][0] += g[k]["score"] > 0
             scored[k][1] += 1
+            full[k][0] += bool(g[k]["base_pass"] and g[k]["rule_met"])
+            full[k][1] += 1
             if g[k]["ran_ci"]:
                 pair = redundant if g[k]["rule_known_at_start"] else review[k]
                 pair[0] += g[k]["probed"]
@@ -81,6 +86,7 @@ def block(episodes: list[dict]) -> dict:
         "review": review,
         "knew": knew,
         "scored": scored,
+        "full": full,
         "hand": hand,
         "redundant": redundant,
     }
@@ -98,7 +104,8 @@ def show(label: str, b: dict) -> None:
     print(row("reached CI", b["ci"]))
     print(row("reviewed (no rule, ran CI)", b["review"]))
     print(row("started knowing the rule", b["knew"]))
-    print(row("scored 1", b["scored"]))
+    print(row("scored (any points)", b["scored"]))
+    print(row("scored with the rule followed", b["full"]))
     print(f"  {'rule reached the next one':30s} {pct(*b['hand'])} of reviews by contributors 1-3")
     print(f"  {'redundant reviews':30s} {pct(*b['redundant'])} of contributors who knew and ran CI")
 
