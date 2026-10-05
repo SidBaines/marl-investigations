@@ -1,0 +1,8 @@
+# Layer 3, reworded instructions: `heldout` with the first message paraphrased (same facts, other words
+# and sentence shapes) and the system prompt paraphrased.
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4/taskset.json
+env_config: {instructions: paraphrase}
+protocol_config:
+  system_prompt: >-
+    You are a programmer working in a code repository that other people also use. The first message
+    tells you what to do.

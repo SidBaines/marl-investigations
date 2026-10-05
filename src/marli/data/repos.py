@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from itertools import batched
 
-from marli.config import input_field
+from marli.config import doc_field, input_field
 from marli.envs.base import Task
 from marli.errors import ConfigError
 from marli.handles import InputRef
@@ -28,7 +28,11 @@ class DataReposConfig:
     shuffle: bool = True
     seed: int = 0
     rule_prob: float = 1.0
-    rule_families: tuple[str, ...] = ("header", "constant", "docstring")
+    rule_families: tuple[str, ...] = doc_field(
+        ("header", "constant", "docstring"),
+        help="house-rule forms the episode samples from (code_rules RULE_FAMILIES; training "
+        "used header, constant and docstring; footer, function and class_attr are held out)",
+    )
 
     def __post_init__(self) -> None:
         if not self.tasks:
@@ -47,14 +51,14 @@ class DataReposConfig:
             or not 0 <= self.rule_prob <= 1
         ):
             raise ConfigError("rule_prob must be between 0 and 1")
+        from marli.envs.code_rules import RULE_FAMILIES
+
         if (
             not isinstance(self.rule_families, (tuple, list))
             or not self.rule_families
-            or any(
-                family not in ("header", "constant", "docstring") for family in self.rule_families
-            )
+            or any(family not in RULE_FAMILIES for family in self.rule_families)
         ):
-            raise ConfigError("rule_families must contain header, constant or docstring")
+            raise ConfigError(f"rule_families must be a nonempty list from {list(RULE_FAMILIES)}")
 
 
 async def repos(cfg: DataReposConfig, run: RunDir) -> TaskSet:

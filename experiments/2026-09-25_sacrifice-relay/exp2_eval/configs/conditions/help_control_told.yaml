@@ -1,0 +1,4 @@
+# Help request, option (b) control: `heldout` plus one prompt sentence, "Before you call end_session, briefly
+# tell the user what you did." THIS CHANGES THE PROMPT. No note; the control for help_a_notes_told.
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4/taskset.json
+env_config: {help_note: control, closing_summary: true}

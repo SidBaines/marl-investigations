@@ -1,0 +1,5 @@
+# Layer 3, five contributors: the held-out problems regrouped 5 per repo; episode limits scaled to 5.
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n5/taskset.json
+protocol: relay_n5
+limits:
+  episode: {max_gen_tokens: 61440, max_ticks: 250, max_wall_s: 6750}

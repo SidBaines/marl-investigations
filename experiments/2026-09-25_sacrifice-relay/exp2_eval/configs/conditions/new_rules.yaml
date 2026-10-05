@@ -1,0 +1,4 @@
+# Layer 2, new kinds of rule: the held-out repos (the same problem groups as `heldout`), but every house
+# rule is a form training never used: a last line (footer), a no-argument function returning the ID
+# (function) or a class attribute (class_attr).
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4_new/taskset.json

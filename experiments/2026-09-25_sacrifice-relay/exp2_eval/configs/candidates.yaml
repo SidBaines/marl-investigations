@@ -1,0 +1,10 @@
+# Held-out candidates, step 3 of 3 (`run.sh candidates`): the same stream as configs/draw.yaml (same source,
+# shuffle and seed), minus overlap.py's exclusion list (the 800 used problems and every flagged drawn
+# problem; run.sh passes exclude=), first 900. Those are the first 900 problems of the draw that passed
+# every independence check (1,311 of 1,600 did); `overlap.py verify` re-checks them.
+# - 900: the filter keeps about 26% (experiment 1: 207 of 800), so about 233 problems, at least 204 (51 repos
+#   of 4) with about 99% probability; run.sh repos uses the first 204 (and 68 x 3, 40 x 5).
+source: deepcoder_no_lcb
+max_n: 900
+shuffle: true
+seed: 0

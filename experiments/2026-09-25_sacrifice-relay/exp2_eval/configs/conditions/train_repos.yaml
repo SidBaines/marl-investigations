@@ -1,0 +1,3 @@
+# Anchor: the 51 training repos in the training format. Only the playthroughs are new (a fixed eval
+# seed instead of training's per-step seeds). Inputs: ../../out/repos_n4 (experiment 1's relay repos).
+tasks: experiments/2026-09-25_sacrifice-relay/out/repos_n4/taskset.json

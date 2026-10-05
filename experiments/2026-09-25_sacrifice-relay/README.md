@@ -10,6 +10,10 @@ doubled.
 
 **Experiment 3 running (2026-10-05)**: `exp3_sacrifice_a3b/README.md`. Experiment 1's 0/1/3 scoring (reviewing is a real sacrifice) with experiment 2's prompt changes, on Qwen3.6-35B-A3B, team and individual reward, 80 steps each.
 
+**Transfer eval prepared (2026-10-05, not run)**: `exp2_eval/README.md`. Did experiment 2's policies learn to find,
+share and use the rule, or the exact training format? New repos, new kinds of rule and a changed surface, against the
+untrained models on the same games.
+
 ## Question
 
 A shared repo is worked on by several agents in turn. Each agent can score on

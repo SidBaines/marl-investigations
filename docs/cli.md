@@ -113,7 +113,7 @@ Manifest produced: `taskset.json`.
 | shuffle | bool | true | false | false | false |  |
 | seed | int | 0 | false | false | false |  |
 | rule_prob | float | 1.0 | false | false | false |  |
-| rule_families | tuple[str, ...] | ["header", "constant", "docstring"] | false | false | false |  |
+| rule_families | tuple[str, ...] | ["header", "constant", "docstring"] | false | false | false | house-rule forms the episode samples from (code_rules RULE_FAMILIES; training used header, constant and docstring; footer, function and class_attr are held out) |
 
 ### data sft
 

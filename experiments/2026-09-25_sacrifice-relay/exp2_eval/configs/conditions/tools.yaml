@@ -1,0 +1,5 @@
+# Layer 3, renamed CI tools: `heldout` with ci_submit / ci_review renamed grade_solution / inspect_checks
+# (in the tool specs and the prompt) and both tool descriptions reworded. The relay advertises the new names.
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4/taskset.json
+env_config: {tool_names: renamed, tool_text: paraphrase}
+protocol_config: {env_tools: [bash, grade_solution, inspect_checks]}

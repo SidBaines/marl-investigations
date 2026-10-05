@@ -1,0 +1,23 @@
+name: deepcoder_no_lcb
+hf_id: agentica-org/DeepCoder-Preview-Dataset
+subsets: [primeintellect, taco]
+subset_splits: {primeintellect: train, taco: train}
+split: train
+kind: code
+fields: {prompt: problem}
+answer_format: tests
+test_format: deepcoder
+license: mit
+commit_text: false
+dedupe: true
+max_tests: 32
+max_test_bytes: null
+notes: >-
+  DeepCoder train without its LiveCodeBench subset (lcbv5): the primeintellect
+  and taco rows of `deepcoder`, with the same parsing, dedupe and 32-test cap.
+  lcbv5 is the last subset of `deepcoder`, so dropping it changes no other
+  row's dedupe outcome. Task ids carry this source's name, so a build's shuffle
+  order and hidden-test samples differ from `deepcoder`'s for the same problem.
+  Use it for problems that must not overlap LiveCodeBench, e.g. held-out
+  evaluation repos; exclude problems already used with
+  data build exclude=<used TaskSet manifest>.

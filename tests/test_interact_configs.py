@@ -84,7 +84,7 @@ async def test_code_vote_presets_fail_before_starting_agents(name: str, n_agents
     start.assert_not_awaited()
 
 
-@pytest.mark.parametrize("n_agents", [1, 4])
+@pytest.mark.parametrize("n_agents", [1, 3, 4, 5])
 def test_relay_presets_resolve_contributor_roles(n_agents: int) -> None:
     from marli.interact.protocols.relay import RelayConfig, RelayProtocol
 

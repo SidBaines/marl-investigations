@@ -1,0 +1,11 @@
+# Shared by every transfer-eval cell, composed after experiment 2's training environment:
+#   ../../configs/eval_common.yaml ../../configs/eval_gate_n4.yaml
+#   ../../exp2_mandatory_rule/configs/env.yaml ../../exp2_mandatory_rule/configs/variants/checks.yaml
+#   eval.yaml conditions/<condition>.yaml
+# i.e. the same model settings, token limits, 0/1 scoring, no position and the `checks` prompt that all
+# training used. A condition then changes one thing (or, for `far`, everything at once).
+# - 2 playthroughs per repo (README "Grid"); run_seed 0 for every cell, so the same repo and playthrough
+#   index get the same house rule and folder names under every policy (paired comparisons).
+# - Every contributor seat is the evaluated policy (seating contributor: q, from eval_gate_n4.yaml).
+episodes_per_task: 2
+run_seed: 0

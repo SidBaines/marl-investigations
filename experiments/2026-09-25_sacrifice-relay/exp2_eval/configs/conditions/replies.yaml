@@ -1,0 +1,4 @@
+# Layer 3, reworded CI replies: `heldout` with CI's reports paraphrased (the rule's requirement sentence is
+# unchanged; layer 2 changes rules).
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4/taskset.json
+env_config: {ci_replies: paraphrase}
