@@ -98,6 +98,7 @@ Manifest produced: `taskset.json`.
 | inclusive | bool | false | false | false | false |  |
 | min_episodes | int | 2 | false | false | false |  |
 | metric | str | correct | false | false | false | system grade; max_wall_s failures count as zero |
+| allow_paused | bool | false | false | true | false | accept a rollout paused by stop_after_tasks: only its first n_tasks_sampled tasks are candidates; the rest are dropped as unsampled (recorded in meta) |
 
 ### data repos
 
