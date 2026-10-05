@@ -23,6 +23,7 @@ EXPECTED = {
     "deepmath_103k": ("zwhe99/DeepMath-103K", "train", "latex", "mit"),
     "dapo_math_17k": ("BytedTsinghua-SIA/DAPO-Math-17k", "train", "integer", "apache-2.0"),
     "deepcoder": ("agentica-org/DeepCoder-Preview-Dataset", "train", "tests", "mit"),
+    "deepcoder_no_lcb": ("agentica-org/DeepCoder-Preview-Dataset", "train", "tests", "mit"),
     "lcb_v6": ("livecodebench/code_generation_lite", "test", "tests", "cc"),
 }
 
@@ -34,9 +35,21 @@ def test_catalog_entries() -> None:
     for name, spec in SOURCES.load_all().items():
         assert (spec.hf_id, spec.split, spec.answer_format, spec.license) == EXPECTED[name]
         assert spec.name == name
-        assert spec.kind == ("code" if name in {"deepcoder", "lcb_v6"} else "math")
+        code = {"deepcoder", "deepcoder_no_lcb", "lcb_v6"}
+        assert spec.kind == ("code" if name in code else "math")
         assert spec.commit_text is False
         assert spec.config is None
+
+
+def test_deepcoder_without_livecodebench_differs_only_in_subsets() -> None:
+    full, clean = SOURCES.load("deepcoder"), SOURCES.load("deepcoder_no_lcb")
+    assert full.subsets == ["primeintellect", "taco", "lcbv5"]
+    assert clean.subsets == ["primeintellect", "taco"]
+    assert clean.subset_splits == {"primeintellect": "train", "taco": "train"}
+    different = {"name", "subsets", "subset_splits", "notes"}
+    assert {
+        key: value for key, value in vars(clean).items() if key not in different
+    } == {key: value for key, value in vars(full).items() if key not in different}
 
 
 def test_nested_paths_and_filtering_are_explicit() -> None:
