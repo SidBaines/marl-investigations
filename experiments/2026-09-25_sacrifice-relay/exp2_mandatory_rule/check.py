@@ -5,8 +5,8 @@ Prints, per block of steps (or once for the gate):
 - the share of groups (same repo, same step) whose playthroughs all tied, so training learns nothing
   from them (with team reward every contributor shares the playthrough's score);
 - by position: reached CI, chose review (among contributors who started without the rule and ran
-  CI), started knowing the rule, scored (any points) and scored with the rule followed (the same thing
-  under experiment 2's 0/1 scoring; under experiment 1's 0/1/3 scoring, the 3s);
+  CI), started knowing the rule, scored (any points) and scored with the rule followed (the same
+  thing under experiment 2's 0/1 scoring; under experiment 1's 0/1/3 scoring, the 3s);
 - hand-off: after a review by contributors 1-3, did the next contributor start knowing the rule;
 - redundant reviews: reviews by contributors who already knew the rule.
 Then applies the pre-registered rules in README.md and prints GO / STOP / ABORT lines.
