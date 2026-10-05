@@ -138,7 +138,10 @@ async def filter(cfg: FilterConfig, run: RunDir) -> TaskSet:
         "ignored_non_ok_episodes": ignored_non_ok,
     }
     if paused:
-        filter_meta["paused_rollout"] = {"n_tasks_sampled": sampled, "n_tasks": int(meta["n_tasks"])}
+        filter_meta["paused_rollout"] = {
+            "n_tasks_sampled": sampled,
+            "n_tasks": int(meta["n_tasks"]),
+        }
     return replace(
         taskset,
         root=run.out,
