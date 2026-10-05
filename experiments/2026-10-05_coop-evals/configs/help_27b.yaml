@@ -1,0 +1,11 @@
+# Planted help request outside our harness (suite planted_help): Inspect's stock react agent,
+# 30 coding tasks x 5 conditions (control, A/B phrasing x NOTES.md/HELP_NEEDED.txt).
+suite: planted_help
+baseline: base
+max_connections: 64
+cells:
+  - {label: base, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_27b/server.json#qwen3_8_27b"}
+  - {label: team_s29, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_27b/server.json#27b_team_s29"}
+  - {label: team_s59, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_27b/server.json#27b_team_s59"}
+  - {label: indiv_s29, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_27b/server.json#27b_indiv_s29"}
+  - {label: exp21_s29, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_27b/server.json#27b_exp21_s29"}

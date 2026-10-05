@@ -12,6 +12,8 @@
 #   ./run.sh games              # Inspect: Li & Shirado games, every cell
 #   ./run.sh hiddenbench        # upstream harness for each cell x session, then ingest
 #   ./run.sh volunteer          # FAIRGAME runner for each cell x game, then ingest
+#   ./run.sh help               # Inspect: planted help request (stock react agent), every cell
+#   ./run.sh audit <cell> <id>  # print one planted-help sample (private; never commit the output)
 #   ./run.sh report             # print the three RESULTS.md files; copy aggregates to results/
 #   ./run.sh smoke              # dev box (CPU): all three suites against tests/_fake_openai.py
 #   ./run.sh stop               # stop this MODEL's server
@@ -170,11 +172,17 @@ preflight)
   $PY "$HERE/preflight.py" "$SERVER" "$C/models/$MODEL.yaml" "$RENDERER" "${@:2}" | tee "$OUT/preflight_$MODEL.txt" ;;
 games)
   $M eval external "$C/models/$MODEL.yaml" "$(config_for "games_$MODEL")" "${@:2}" --out "$OUT/games_$MODEL" ;;
+help)
+  # The marli sandbox needs root + Landlock (pods have both); elsewhere add task_args.sandbox=local.
+  $M eval external "$C/models/$MODEL.yaml" "$(config_for "help_$MODEL")" "${@:2}" --out "$OUT/help_$MODEL" ;;
+audit)
+  $PY "$HERE/audit_help.py" "$OUT/help_$MODEL" "${2:?cell}" "${3:?sample id, e.g. fizzbuzz/A_notes}" ;;
 hiddenbench) hiddenbench_all ;;
 volunteer) volunteer_all ;;
 report)
   mkdir -p "$HERE/results"
-  for r in "$OUT"/games_"$MODEL" "$OUT"/hiddenbench_"$MODEL"_report "$OUT"/volunteer_"$MODEL"_report; do
+  for r in "$OUT"/games_"$MODEL" "$OUT"/hiddenbench_"$MODEL"_report "$OUT"/volunteer_"$MODEL"_report \
+      "$OUT"/help_"$MODEL"; do
     [ -f "$r/RESULTS.md" ] || continue
     cat "$r/RESULTS.md"; cp "$r/RESULTS.md" "$HERE/results/$(basename "$r").md"
     cp "$r/results.jsonl" "$HERE/results/$(basename "$r").jsonl"  # aggregates only, no text
@@ -186,10 +194,11 @@ smoke)
   export PY; names=$(grep -ho 'seats: \[[^]]*\]' "$C"/hiddenbench_"$MODEL".yaml | tr -d '[] ' | sed 's/seats://' | tr ',' '\n' | sort -u | paste -sd,)
   selfish=$(echo "$names" | tr ',' '\n' | grep -v -E '_base$|qwen3' | paste -sd,)
   coop=$(echo "$names" | tr ',' '\n' | grep -E 'qwen3' | paste -sd,)
-  PYTHONPATH=tests uv run --extra external python tests/_fake_openai.py --port "${SMOKE_PORT:-8799}" \
-    --cooperative "$coop" --selfish "$selfish" > "$OUT/fake.log" 2>&1 & fake=$!
+  players="p_tells=helps_tells,p_silent=helps_silent,p_ignore=ignores"
+  PYTHONPATH=tests:src uv run --extra external python tests/_fake_openai.py --port "${SMOKE_PORT:-8799}" \
+    --cooperative "$coop" --selfish "$selfish" --players "$players" > "$OUT/fake.log" 2>&1 & fake=$!
   trap 'kill $fake 2>/dev/null' EXIT; sleep 3
-  echo "{\"base_url\": \"http://127.0.0.1:${SMOKE_PORT:-8799}\", \"models\": $(echo "$names" | $PY -c "import json,sys; print(json.dumps(sys.stdin.read().strip().split(',')))"), \"hf_id\": \"smoke\"}" > "$SERVER"
+  echo "{\"base_url\": \"http://127.0.0.1:${SMOKE_PORT:-8799}\", \"models\": $(echo "$names,p_tells,p_silent,p_ignore" | $PY -c "import json,sys; print(json.dumps(sys.stdin.read().strip().split(',')))"), \"hf_id\": \"smoke\"}" > "$SERVER"
   sed "s#$REL/out/serve_$MODEL/server.json#$REL/out/smoke/server.json#" "$C/games_$MODEL.yaml" > "$OUT/games.yaml"
   $M eval external "$C/models/$MODEL.yaml" "$OUT/games.yaml" task_args.trials=3 --out "$OUT/games_$MODEL"
   for suite in hiddenbench volunteer; do
@@ -201,7 +210,15 @@ smoke)
   $PY "$HERE/harness.py" subset "$OUT/volunteer.yaml" "$OUT/configs/volunteer_$MODEL.yaml" --only base,mixed_team1
   C="$OUT/configs"; mkdir -p "$C/models"; cp "$C_SAVE/models/$MODEL.yaml" "$C/models/"
   CELLS="" hiddenbench_all; CELLS="" volunteer_all
-  for r in games_"$MODEL" hiddenbench_"$MODEL"_report volunteer_"$MODEL"_report; do echo "== $r"; sed -n '7,40p' "$OUT/$r/RESULTS.md"; done ;;
+  # Planted help: three scripted players (helps and tells, helps silently, ignores), 3 tasks.
+  sandbox=$([ "$(id -u)" = 0 ] && echo marli || echo local)
+  { echo "suite: planted_help"; echo "baseline: ignores"
+    echo "task_args: {tasks: [rle_encode, chunk, dedupe], sandbox: $sandbox}"; echo "cells:"
+    for p in ignores:p_ignore helps_tells:p_tells helps_silent:p_silent; do
+      echo "  - {label: ${p%%:*}, policy: \"vllm:@$SERVER#${p##*:}\"}"; done; } > "$OUT/help.yaml"
+  $M eval external "$C/models/$MODEL.yaml" "$OUT/help.yaml" --out "$OUT/help_$MODEL"
+  for r in games_"$MODEL" hiddenbench_"$MODEL"_report volunteer_"$MODEL"_report; do echo "== $r"; sed -n '7,40p' "$OUT/$r/RESULTS.md"; done
+  echo "== help_$MODEL (A_notes rows)"; grep -E '^\| (Cell|---|[a-z_]+ \| A_notes \| (did_help|told_user|did_told|did_silent|ignored_silent|read_note|hidden_pass) )' "$OUT/help_$MODEL/RESULTS.md" ;;
 stop)
   $M serve stop server_json="$SERVER" --out "$SERVE_DIR-stop" --force ;;
 *) echo "unknown phase $1" >&2; exit 2 ;;

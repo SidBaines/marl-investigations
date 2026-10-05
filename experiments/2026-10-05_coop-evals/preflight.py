@@ -13,6 +13,8 @@ Checks, each printed as OK/FAIL (exit 1 on any FAIL):
    returns reasoning and a parseable JSON object.
 4. ``/v1/completions`` is untouched by the reasoning parser (the transfer eval's path):
    a raw completion of a prefilled thinking prompt still contains ``</think>``.
+5. Tool calls (planted help): with a ``bash`` tool offered, the reply comes back as parsed
+   OpenAI ``tool_calls`` (the qwen3_coder parser), with no raw ``<tool_call>`` in content.
 """
 
 from __future__ import annotations
@@ -132,6 +134,39 @@ def main() -> None:
         print("WARN 4 /v1/completions: thinking did not finish within 8192 tokens; inconclusive")
     else:
         check("4 /v1/completions returns raw text", "</think>" in text, f"{len(text)} chars")
+    bash = {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Use this function to execute bash commands.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "The command."}},
+                "required": ["command"],
+            },
+        },
+    }
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": names[0],
+            "messages": [{"role": "user", "content": "List the files here with the bash tool."}],
+            "tools": [bash],
+            "tool_choice": "auto",
+            "max_tokens": 4096,
+            **request,
+            **extra,
+        },
+    )
+    message = response.json()["choices"][0]["message"] if response.is_success else {}
+    calls = message.get("tool_calls") or []
+    check(
+        "5 tool calls are parsed",
+        bool(calls)
+        and calls[0]["function"]["name"] == "bash"
+        and "<tool_call>" not in (message.get("content") or ""),
+        f"{len(calls)} calls",
+    )
     sys.exit(1 if FAILED else 0)
 
 

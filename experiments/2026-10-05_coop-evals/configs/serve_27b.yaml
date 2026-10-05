@@ -2,8 +2,9 @@
 # (../../2026-09-25_sacrifice-relay/bench/serve/dp2_mtp2.yaml: one engine per GPU + MTP,
 # 90% memory) plus vLLM's Qwen3 reasoning parser, so chat completions return thinking in
 # reasoning_content and only the reply in content (what other agents and parsers see).
-# The parser leaves /v1/completions untouched, so the token-level transfer eval can share
-# this server. max_loras 6: four 27B adapters in flight at once plus the learner reservation.
+# The tool-call parser (qwen3_coder: the XML <tool_call><function=...> format of the Qwen3.5
+# family) turns tool calls into OpenAI tool_calls for the planted-help agent. Both parsers
+# leave /v1/completions untouched, so the token-level transfer eval can share this server. max_loras 6: four 27B adapters in flight at once plus the learner reservation.
 model: qwen3_8_27b
 python: /opt/vllm/bin/python
 cuda_visible_devices: "0,1"
@@ -12,4 +13,4 @@ max_model_len: 32768
 max_lora_rank: 32
 max_loras: 6
 learner_ranks: [32]
-extra_args: ["--data-parallel-size", "2", "--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}', "--reasoning-parser", "qwen3"]
+extra_args: ["--data-parallel-size", "2", "--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}', "--reasoning-parser", "qwen3", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder"]
