@@ -160,6 +160,13 @@ VERBS: dict[str, VerbSpec] = {
         "report.json",
         "Run labelled rollout/score cells and combine their compute-aware report.",
     ),
+    "eval external": VerbSpec(
+        "eval external",
+        "marli.eval.external.verb:external",
+        "marli.eval.external.verb:ExternalEvalConfig",
+        "external.json",
+        "Run a standard external eval (Inspect task or upstream harness) on served policies.",
+    ),
     "view": VerbSpec(
         "view",
         "marli.viewer.verb:view",

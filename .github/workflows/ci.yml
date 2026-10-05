@@ -24,7 +24,7 @@ jobs:
         with:
           enable-cache: true
       - run: uv python install
-      - run: uv sync --locked --extra dev --extra render --extra eval
+      - run: uv sync --locked --extra dev --extra render --extra eval --extra external
       - run: uv run --extra dev ruff check
       # pyproject.toml addopts already exclude the gpu/live markers.
       - run: uv run --extra dev pytest -q

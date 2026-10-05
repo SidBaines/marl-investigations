@@ -1,0 +1,8 @@
+# Planted help request on the A3B; experiment 3's arms join as extra cells once trained.
+suite: planted_help
+baseline: base
+max_connections: 64
+cells:
+  - {label: base, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_a3b/server.json#qwen3_6_35b_a3b"}
+  - {label: team_s79, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_a3b/server.json#a3b_team_s79"}
+  - {label: exp21, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_a3b/server.json#a3b_exp21"}

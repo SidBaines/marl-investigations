@@ -1,0 +1,13 @@
+# vLLM for the cooperation evals on Qwen3.6-35B-A3B: the transfer eval's A3B layout
+# (../../2026-09-25_sacrifice-relay/exp2_eval/configs/serve_eval_a3b.yaml on branch exp2-eval:
+# DP2 + MTP, the A3B LoRA module list) plus the Qwen3 reasoning parser (see serve_27b.yaml).
+model: qwen3_6_35b_a3b
+python: /opt/vllm/bin/python
+cuda_visible_devices: "0,1"
+gpu_memory_utilization: 0.9
+max_model_len: 32768
+max_lora_rank: 32
+max_loras: 6
+learner_ranks: [32]
+lora_target_modules: [q_proj, k_proj, v_proj, o_proj, in_proj_qkv, in_proj_z, in_proj_a, in_proj_b, out_proj, gate_proj, up_proj, down_proj]
+extra_args: ["--data-parallel-size", "2", "--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}', "--reasoning-parser", "qwen3", "--enable-auto-tool-choice", "--tool-call-parser", "qwen3_coder"]
