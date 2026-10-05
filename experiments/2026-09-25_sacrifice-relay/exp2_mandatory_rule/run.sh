@@ -15,8 +15,9 @@
 # ARM=<team|individual|opener> picks configs/train_<arm>.yaml (default team); out dir train_<arm>[_<variant>].
 # SLOT=<a|b> picks a GPU pair on a 4-GPU pod: a = GPUs 0,1, port 8000, out/serve (default);
 #   b = GPUs 2,3, port 8002, out/serve_b. `serve`, `train` and `stop` follow SLOT.
-#   ARM=opener ./run.sh opener loads experiment 2's step-29 adapter into this slot's server as exp2-team-s29.
-# MODEL=a3b runs the arm on Qwen3.6-35B-A3B instead of Qwen3.8-27B (phases serve, preflight, train, check,
+#   ARM=opener ./run.sh opener loads the frozen opener into this slot's server: 27B: experiment 2's step-29
+#   adapter as exp2-team-s29; MODEL=a3b: the A3B team arm's step-79 adapter as exp2-team-a3b-s79.
+# MODEL=a3b runs the arm on Qwen3.6-35B-A3B instead of Qwen3.8-27B (phases serve, opener, preflight, train, check,
 #   dashboard, stop): configs/serve_a3b.yaml and configs/train_<arm>_a3b.yaml, and every out dir it writes gains an
 #   _a3b suffix (out/serve_a3b, out/train_team_checks_a3b), so the 27B runs are never touched.
 # Inputs from experiment 1 (copied in from the dev box): ../out/repos_n4 (51 relay repos).
@@ -32,14 +33,18 @@ export HF_HOME=/workspace/hf HF_HUB_OFFLINE=1
 export NCCL_NVLS_ENABLE=${NCCL_NVLS_ENABLE:-0}
 SLOT=${SLOT:-a}; ARM=${ARM:-team}; MODEL=${MODEL:-27b}
 case "$MODEL" in
-  27b) SFX=""; SERVE_YAML="$STUDY/bench/serve/tp2_mtp2_sleep.yaml"; MODEL_ARGS=() ;;
+  27b) SFX=""; SERVE_YAML="$STUDY/bench/serve/tp2_mtp2_sleep.yaml"; MODEL_ARGS=()
+    OPENER_RUN=train_team_checks; OPENER_ADAPTER=sacrifice-relay-exp2-team-policy-s29-d81d6d; OPENER_NAME=exp2-team-s29 ;;
   # A3B: its fixed-probe drift is ~0.18 nats from MoE routing near-ties (preflight 2026-10-02), so the
   # hot-load check is loosened; sampled-token agreement (kl_sample_train, abort > 5e-3) is the real guard.
-  a3b) SFX="_a3b"; SERVE_YAML="$C/serve_a3b.yaml"; MODEL_ARGS=(local_adapter_check_tol=0.5) ;;
+  a3b) SFX="_a3b"; SERVE_YAML="$C/serve_a3b.yaml"; MODEL_ARGS=(local_adapter_check_tol=0.5)
+    # Experiment 2.1 on the A3B: the A3B team arm's final policy (after step 79) is the frozen opener.
+    OPENER_RUN=train_team_checks_a3b; OPENER_ADAPTER=sacrifice-relay-exp2-team-a3b-policy-s79-6d9c30
+    OPENER_NAME=exp2-team-a3b-s79 ;;
   *) echo "MODEL must be 27b or a3b" >&2; exit 2 ;;
 esac
 case "${1:-}" in
-  gate|variants|serve_eval|opener) [ "$MODEL" = 27b ] || { echo "phase $1 is 27B-only" >&2; exit 2; } ;;
+  gate|variants|serve_eval) [ "$MODEL" = 27b ] || { echo "phase $1 is 27B-only" >&2; exit 2; } ;;
   preflight) [ "$MODEL" = a3b ] || { echo "phase preflight is A3B-only (MODEL=a3b)" >&2; exit 2; } ;;
 esac
 case "$SLOT" in
@@ -52,26 +57,27 @@ SERVER="$SERVE_DIR/server.json"
 EVAL_SERVER="$OUT/serve_eval/server.json"
 VARIANT_ARGS=(); RUN="train_$ARM$SFX"; TRAIN_CFG="$C/train_$ARM$SFX.yaml"
 if [ -n "${VARIANT:-}" ]; then VARIANT_ARGS=("$C/variants/$VARIANT.yaml"); RUN="train_${ARM}_$VARIANT$SFX"; fi
-OPENER_DIR=/workspace/opener/sacrifice-relay-exp2-team-policy-s29-d81d6d
+OPENER_DIR=/workspace/opener/$OPENER_ADAPTER
 
 case "${1:?phase}" in
 serve)
   HF_HUB_OFFLINE=0 $M serve vllm "$SERVE_YAML" detach=true \
     cuda_visible_devices="$GPUS" port="$PORT" max_loras="$LORAS" "${@:2}" --out "$SERVE_DIR" ;;
 opener)
-  # Experiment 2's team-trained step-29 adapter (HF sidbaines/amber-baton) as a frozen seat on this slot.
+  # The frozen opener (HF sidbaines/amber-baton): 27B: experiment 2's team-trained step-29 adapter, as
+  # exp2-team-s29; A3B: the A3B team arm's step-79 adapter, as exp2-team-a3b-s79. Loaded into this slot's server.
   [ -f "$OPENER_DIR/adapter_config.json" ] || HF_HUB_OFFLINE=0 uv run --no-sync hf download \
-    sidbaines/amber-baton --include "exp2/train_team_checks/adapters/$(basename "$OPENER_DIR")/*" \
+    sidbaines/amber-baton --include "exp2/$OPENER_RUN/adapters/$OPENER_ADAPTER/*" \
     --local-dir /workspace/opener-hf
   [ -f "$OPENER_DIR/adapter_config.json" ] || { mkdir -p /workspace/opener; cp -r \
-    "/workspace/opener-hf/exp2/train_team_checks/adapters/$(basename "$OPENER_DIR")" /workspace/opener/; }
+    "/workspace/opener-hf/exp2/$OPENER_RUN/adapters/$OPENER_ADAPTER" /workspace/opener/; }
   curl -sf -X POST "http://127.0.0.1:$PORT/v1/load_lora_adapter" -H 'Content-Type: application/json' \
-    -d "{\"lora_name\": \"exp2-team-s29\", \"lora_path\": \"$OPENER_DIR\"}" && echo
+    -d "{\"lora_name\": \"$OPENER_NAME\", \"lora_path\": \"$OPENER_DIR\"}" && echo
   # Record it in the server manifest: policies only use models the manifest lists. It is not an
   # `adapters` entry, so the learner's slot bookkeeping and stale-adapter sweep leave it alone.
   uv run --no-sync python -c "import sys; from dataclasses import replace; from marli.serve.vllm import Server
-s = Server.load(sys.argv[1]); s.models.count('exp2-team-s29') or replace(s, models=[*s.models, 'exp2-team-s29']).save()
-print(Server.load(sys.argv[1]).models)" "$SERVER" ;;
+s = Server.load(sys.argv[1]); s.models.count(sys.argv[2]) or replace(s, models=[*s.models, sys.argv[2]]).save()
+print(Server.load(sys.argv[1]).models)" "$SERVER" "$OPENER_NAME" ;;
 gate)
   $M eval rollout "$SC/eval_common.yaml" "$SC/eval_gate_n4.yaml" "$C/env.yaml" "$C/gate.yaml" \
     tasks="$REPOS" "policies.q.ref=vllm:@$SERVER#qwen3_8_27b" max_usd=1 "${@:2}" --out "$OUT/gate"

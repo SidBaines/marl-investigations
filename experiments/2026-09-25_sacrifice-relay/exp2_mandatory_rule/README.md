@@ -5,6 +5,7 @@ Status (2026-10-02):
   30-step continuation. See Results.
 - **Individual arm and experiment 2.1: done.** See their section.
 - **Qwen3.6-35B-A3B arm: done** (80 steps). See its section.
+- **Experiment 2.1 on Qwen3.6-35B-A3B: running** (from 2026-10-05, 80 steps). See its section.
 
 Part of the sacrifice-relay study (`../README.md`). Experiment 1 found that sharing the rule paid
 off for the team, and that training rewarded it, but the model did not learn to do it: reviews were
@@ -234,6 +235,28 @@ MODEL=a3b $S/run.sh preflight      # GO / NO-GO, about 10 min
 MODEL=a3b $S/run.sh dashboard
 MODEL=a3b VARIANT=checks $S/run.sh train    # -> out/train_team_checks_a3b; rerun to resume
 $S/run.sh check $S/out/train_team_checks_a3b
+```
+
+## Experiment 2.1 on Qwen3.6-35B-A3B (2026-10-05, running)
+
+Sid asked for experiment 2.1 on the A3B: the same design as the 27B's 2.1, with the A3B team arm's final policy as
+the frozen first contributor.
+- **Contributor 1 (the opener)** is a frozen copy of `out/train_team_checks_a3b` after step 79 (80 updates;
+  HF `exp2/train_team_checks_a3b/adapters/sacrifice-relay-exp2-team-a3b-policy-s79-6d9c30`), served as
+  `exp2-team-a3b-s79`. In that run's last 10 steps the first contributor reviewed 77% of the time.
+- **Contributors 2–4** train with individual reward (each its own 0/1 score), starting from the untrained A3B.
+- **As in the A3B team arm:** 8 repos × 4 playthroughs per step (the 27B 2.1 used 4 × 4), flat lr 4e-5, LoRA rank
+  32 on attention, linear attention and the shared expert, `local_adapter_check_tol=0.5`, the 80 steps in full.
+- **Config:** `configs/train_opener_a3b.yaml`. Composed as `run.sh` runs it, it differs from the 27B 2.1 run's
+  config only in the model, the batch, the opener adapter, the server path, the run name and the A3B's hot-load
+  tolerance. From the A3B team arm's config it differs only in the reward (individual), the opener seat and the name.
+- **Out dir:** `out/train_opener_checks_a3b`.
+
+```bash
+S=experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule
+MODEL=a3b ARM=opener $S/run.sh serve      # max_loras 6: the opener's adapter sits beside the learner's
+MODEL=a3b ARM=opener $S/run.sh opener     # download + load exp2-team-a3b-s79, record it in server.json
+MODEL=a3b ARM=opener VARIANT=checks $S/run.sh train    # -> out/train_opener_checks_a3b; rerun to resume
 ```
 
 ## What changes from experiment 1
