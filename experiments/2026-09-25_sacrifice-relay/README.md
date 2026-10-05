@@ -8,7 +8,7 @@ started.
 and one factual sentence about the checks. Team training taught contributor 1 to review: 17% → 52%. The team score
 doubled.
 
-**Experiment 3 running (2026-10-05)**: `exp3_sacrifice_a3b/README.md`. Experiment 1's 0/1/3 scoring (reviewing is a real sacrifice) with experiment 2's prompt changes, on Qwen3.6-35B-A3B, team and individual reward, 80 steps each.
+**Experiment 3 paused after step 30 (2026-10-05)**: `exp3_sacrifice_a3b/README.md`. Experiment 1's 0/1/3 scoring (reviewing is a real sacrifice) with experiment 2's prompt changes, on Qwen3.6-35B-A3B, team and individual reward. Both arms learned to stop reviewing: on the A3B the sacrifice did not pay, because informed followers rarely applied the rule.
 
 ## Question
 
