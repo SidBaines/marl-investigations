@@ -2,9 +2,9 @@
 # Transfer eval for experiment 2's trained policies (README.md). Phases, one at a time, from anywhere in
 # the checkout. Dev box (CPU): candidates. Pod (2xH200): serve, filter, repos, adapters, eval, grid, stop.
 # Anywhere: report, extract.
-#   ./run.sh candidates            # dev box: 800 held-out DeepCoder problems (no LCB), disjoint from exp 1's 800
+#   ./run.sh candidates            # dev box: 900 held-out DeepCoder problems (no LCB) that pass every independence check
 #   ./run.sh serve                 # vLLM for evals: one engine per GPU + MTP, full memory (MODEL picks the model)
-#   ./run.sh filter                # 27B base: pass@4 of each candidate, keep [1/4, 3/4] -> out/pool (as exp 1)
+#   ./run.sh filter                # 27B base: pass@4 of each candidate, keep [1/4, 3/4] -> out/pool (as exp 1, ~1.9 h)
 #   ./run.sh repos                 # held-out repos: 4 per repo (training rules / held-out rules), 3 and 5 per repo
 #   ./run.sh adapters              # download this MODEL's trained adapters from HF and load them into the server
 #   ./run.sh eval <policy> <cond>  # one cell -> out/eval/<cond>/<policy>; rerun to resume
@@ -84,13 +84,30 @@ grid_cells() {  # "<policy> <condition> [key=value]" lines for GRID and MODEL
 
 case "${1:?phase}" in
 candidates)
-  # Dev box: needs the HF dataset cache and experiment 1's candidates (EXCLUDE overrides the path).
-  # Writes ~120 MB; the shuffle spools the whole pool (a few GB) in the checkout root while it runs.
+  # Dev box (CPU, ~25 min). 1: draw 1,600 problems, minus experiment 1's 800 candidates by text. 2: overlap.py
+  # check flags every drawn problem that repeats a used or an earlier drawn one (text, complete test suites,
+  # PrimeIntellect source ids, two embedding models) and writes the exclusion list. 3: the first 900 that
+  # pass. 4: overlap.py verify re-checks them (exit 1 if any fails). Reports (numbers only) go to results/.
+  # Needs the DeepCoder HF cache, network for the source ids and the models, and EMBED_PY: a python with torch
+  # and transformers (default: the dev box's CPU venv); models go to /tmp/marli-embed (MARLI_EMBED_CACHE).
   EXCLUDE=${EXCLUDE:-$STUDY/out/candidates/taskset.json}
-  PYTHONPATH=src uv run --extra hub --extra eval marli data build "$C/candidates.yaml" \
-    exclude="$EXCLUDE" "${@:2}" --out "$OUT/candidates"
-  PYTHONPATH=src uv run --extra hub --extra eval python "$HERE/overlap.py" "$EXCLUDE" \
-    "$OUT/candidates/taskset.json" | tee "$OUT/candidates_overlap.txt" ;;
+  EMBED_PY=${EMBED_PY:-/workspace/marl-investigations/.venv/bin/python}
+  B="uv run --extra hub --extra eval marli"
+  CHECK=("$HERE/overlap.py" --upstream --models bge,minilm)
+  PYTHONPATH=src $B data build "$C/draw.yaml" exclude="$EXCLUDE" --out "$OUT/pool_draw"
+  HF_HUB_OFFLINE=0 PYTHONPATH=src "$EMBED_PY" "${CHECK[0]}" check "$EXCLUDE" "$OUT/pool_draw/taskset.json" \
+    "$OUT/independence" "${CHECK[@]:1}" > /dev/null
+  kept=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['meta']['kept'])" \
+    "$OUT/independence/exclusion/taskset.json")
+  [ "$kept" -ge 900 ] || { echo "only $kept drawn problems passed; raise max_n in configs/draw.yaml" >&2; exit 1; }
+  PYTHONPATH=src $B data build "$C/candidates.yaml" exclude="$OUT/independence/exclusion/taskset.json" \
+    --out "$OUT/candidates"
+  HF_HUB_OFFLINE=0 PYTHONPATH=src "$EMBED_PY" "${CHECK[0]}" verify "$EXCLUDE" "$OUT/candidates/taskset.json" \
+    "$OUT/independence" "${CHECK[@]:1}" > /dev/null
+  mkdir -p "$HERE/results"
+  cp "$OUT/independence/check.txt" "$HERE/results/independence_check.txt"
+  cp "$OUT/independence/verify.txt" "$HERE/results/independence_verify.txt"
+  cat "$HERE/results/independence_verify.txt" ;;
 serve)
   HF_HUB_OFFLINE=0 $M serve vllm "$SERVE_YAML" detach=true "${SERVE_ARGS[@]}" "${@:2}" --out "$SERVE_DIR" ;;
 filter)
@@ -101,12 +118,14 @@ filter)
   $M data filter tasks="$OUT/candidates/taskset.json" episodes="$OUT/filter_rollout" \
     metric=pass_all lo=0.25 hi=0.75 inclusive=true --out "$OUT/pool" ;;
 repos)
-  # Same seed, so repos_n4 and repos_n4_new group the same problems; only the rule forms differ.
-  $M data repos tasks="$OUT/pool/taskset.json" n_per_repo=4 seed=0 --out "$OUT/repos_n4"
-  $M data repos tasks="$OUT/pool/taskset.json" n_per_repo=4 seed=0 \
+  # Same seed, so repos_n4 and repos_n4_new group the same problems; only the rule forms differ. The shuffle
+  # is also the same for every size, so the caps keep one set of problems: the first 204 (51 x 4 = 68 x 3)
+  # and 200 of them for 40 x 5. 51 repos of 4, as training had.
+  $M data repos tasks="$OUT/pool/taskset.json" n_per_repo=4 seed=0 max_repos=51 --out "$OUT/repos_n4"
+  $M data repos tasks="$OUT/pool/taskset.json" n_per_repo=4 seed=0 max_repos=51 \
     'rule_families=[footer,function,class_attr]' --out "$OUT/repos_n4_new"
-  $M data repos tasks="$OUT/pool/taskset.json" n_per_repo=3 seed=0 --out "$OUT/repos_n3"
-  $M data repos tasks="$OUT/pool/taskset.json" n_per_repo=5 seed=0 --out "$OUT/repos_n5" ;;
+  $M data repos tasks="$OUT/pool/taskset.json" n_per_repo=3 seed=0 max_repos=68 --out "$OUT/repos_n3"
+  $M data repos tasks="$OUT/pool/taskset.json" n_per_repo=5 seed=0 max_repos=40 --out "$OUT/repos_n5" ;;
 adapters)
   # Download, load into this MODEL's server as LoRA adapters named after the policy, and record them in
   # the server manifest (policies only use models it lists; not `adapters` entries, which are a learner's).

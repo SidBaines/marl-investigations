@@ -1,0 +1,32 @@
+Independence verify: 900 problems against the 800 used problems (experiment 1's candidates) and against the problems drawn before them. DeepCoder pool 21560 rows; 408 boilerplate lines removed.
+
+Thresholds:
+  boilerplate line: in >= 50 problems; rare shingle: in <= 20; dropped outright: under 20 words, or under 80% Latin letters
+  text: Jaccard >= 0.05, or containment >= 0.1 (both >= 15 rare shingles)
+  raw text: Jaccard >= 0.3 on the whole prompt, wrapper included
+  tests: a whole suite contained (>= 2 pairs), or >= 1 rare pair (in <= 3 problems) of >= 16 characters, or >= 3 rare pairs
+  source ids: same TACO URL / CodeContests problem in PrimeIntellect's upstream data
+  meaning: bge (BAAI/bge-small-en-v1.5) cosine >= 0.88; minilm (sentence-transformers/all-MiniLM-L6-v2) cosine >= 0.75
+
+Removed, by check (a problem can fail several; 'only' = no other check caught it):
+  check         all  only  vs used  vs earlier drawn
+  short           0     0       -           -
+  not_english     0     0       -           -
+  text            0     0         0       0
+  raw_text        0     0         0       0
+  tests           0     0         0       0
+  ids             0     0         0       0
+  bge             0     0         0       0
+  minilm          0     0         0       0
+  any             0
+Kept: 900 of 900
+
+Distributions over all checked problems (best match among the used problems):
+  text Jaccard       [('[0, 0.02)', 883), ('[0.02, 0.05)', 17), ('[0.05, 0.1)', 0), ('[0.1, 0.2)', 0), ('[0.2, 0.3)', 0), ('[0.3, 0.5)', 0), ('[0.5, 0.7)', 0), ('[0.7, 1]', 0)]
+  text containment   [('[0, 0.02)', 703), ('[0.02, 0.05)', 168), ('[0.05, 0.1)', 29), ('[0.1, 0.2)', 0), ('[0.2, 0.3)', 0), ('[0.3, 0.5)', 0), ('[0.5, 0.7)', 0), ('[0.7, 1]', 0)]
+  raw text Jaccard   [('[0, 0.02)', 192), ('[0.02, 0.05)', 163), ('[0.05, 0.1)', 328), ('[0.1, 0.2)', 179), ('[0.2, 0.3)', 38), ('[0.3, 0.5)', 0), ('[0.5, 0.7)', 0), ('[0.7, 1]', 0)]
+  bge    cosine      [('[0, 0.5)', 0), ('[0.5, 0.6)', 0), ('[0.6, 0.7)', 13), ('[0.7, 0.75)', 147), ('[0.75, 0.8)', 423), ('[0.8, 0.85)', 259), ('[0.85, 0.88)', 58), ('[0.88, 0.9)', 0), ('[0.9, 0.92)', 0), ('[0.92, 0.95)', 0), ('[0.95, 1]', 0)]
+  minilm cosine      [('[0, 0.5)', 188), ('[0.5, 0.6)', 405), ('[0.6, 0.7)', 269), ('[0.7, 0.75)', 38), ('[0.75, 0.8)', 0), ('[0.8, 0.85)', 0), ('[0.85, 0.88)', 0), ('[0.88, 0.9)', 0), ('[0.9, 0.92)', 0), ('[0.92, 0.95)', 0), ('[0.95, 1]', 0)]
+  rare test pairs shared with the closest used problem (5 = 5 or more): [(0, 896), (1, 4)]
+
+PrimeIntellect source ids, used and checked problems: {'exact prompt': 943, 'no id': 132, 'same statement': 625}
