@@ -1,0 +1,378 @@
+
+=== heldout
+  27b_base: 50 ok of 50 episodes; team score 0.085 [0.035,0.140] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 14% (5/35) [6%,29%]
+    reviewed without the rule (of CI runs)                                  23% (23/101) [16%,32%]
+    redundant reviews (knew the rule and ran CI)                            11% (2/19) [3%,31%]
+    next contributor knew the rule after a review                           94% (16/17) [73%,99%]
+    followers: followed the rule when the notes file had it (submitted)    100% (17/17) [82%,100%]
+    followers: followed the rule when they started knowing it               57% (17/30) [39%,73%]
+    followers: scored when they started knowing it                          57% (17/30) [39%,73%]
+    games where anyone scored                                               20% (10/50) [11%,33%]
+    contributor 1 reviewed (of all games)                                   10% (5/50) [4%,21%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/17) [0%,18%]
+    by position, reached CI                 all  60% (120/200) [53%,67%] |  70% (35/50) [56%,81%]   54% (27/50) [40%,67%]   60% (30/50) [46%,72%]   56% (28/50) [42%,69%]
+    by position, chose review               all  12% (25/200) [9%,18%] |  10% (5/50) [4%,21%]   14% (7/50) [7%,26%]   10% (5/50) [4%,21%]   16% (8/50) [8%,29%]
+    by position, chose submit               all  48% (95/200) [41%,54%] |  60% (30/50) [46%,72%]   40% (20/50) [28%,54%]   50% (25/50) [37%,63%]   40% (20/50) [28%,54%]
+    by position, scored                     all   8% (17/200) [5%,13%] |   0% (0/50) [0%,7%]    6% (3/50) [2%,16%]   14% (7/50) [7%,26%]   14% (7/50) [7%,26%]
+    by position, started knowing the rule   all  15% (30/200) [11%,21%] |   0% (0/50) [0%,7%]   10% (5/50) [4%,21%]   22% (11/50) [13%,35%]   28% (14/50) [17%,42%]
+  27b_team_s59: 50 ok of 50 episodes; team score 0.300 [0.240,0.365] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 93% (41/44) [82%,98%]
+    reviewed without the rule (of CI runs)                                  93% (50/54) [82%,97%]
+    redundant reviews (knew the rule and ran CI)                            27% (26/95) [19%,37%]
+    next contributor knew the rule after a review                          100% (63/63) [94%,100%]
+    followers: followed the rule when the notes file had it (submitted)    100% (67/67) [95%,100%]
+    followers: followed the rule when they started knowing it               51% (69/135) [43%,59%]
+    followers: scored when they started knowing it                          44% (60/135) [36%,53%]
+    games where anyone scored                                               72% (36/50) [58%,83%]
+    contributor 1 reviewed (of all games)                                   82% (41/50) [69%,90%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/69) [0%,5%]
+    by position, reached CI                 all  74% (149/200) [68%,80%] |  88% (44/50) [76%,94%]   62% (31/50) [48%,74%]   78% (39/50) [65%,87%]   70% (35/50) [56%,81%]
+    by position, chose review               all  38% (76/200) [32%,45%] |  82% (41/50) [69%,90%]   22% (11/50) [13%,35%]   22% (11/50) [13%,35%]   26% (13/50) [16%,40%]
+    by position, chose submit               all  36% (73/200) [30%,43%] |   6% (3/50) [2%,16%]   40% (20/50) [28%,54%]   56% (28/50) [42%,69%]   44% (22/50) [31%,58%]
+    by position, scored                     all  30% (60/200) [24%,37%] |   0% (0/50) [0%,7%]   36% (18/50) [24%,50%]   52% (26/50) [39%,65%]   32% (16/50) [21%,46%]
+    by position, started knowing the rule   all  68% (135/200) [61%,74%] |   0% (0/50) [0%,7%]   82% (41/50) [69%,90%]   90% (45/50) [79%,96%]   98% (49/50) [90%,100%]
+  a3b_base: 50 ok of 50 episodes; team score 0.060 [0.035,0.090] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 36% (13/36) [22%,52%]
+    reviewed without the rule (of CI runs)                                  27% (28/104) [19%,36%]
+    redundant reviews (knew the rule and ran CI)                            39% (16/41) [26%,54%]
+    next contributor knew the rule after a review                           97% (34/35) [85%,99%]
+    followers: followed the rule when the notes file had it (submitted)     59% (13/22) [39%,77%]
+    followers: followed the rule when they started knowing it               25% (13/53) [15%,38%]
+    followers: scored when they started knowing it                          23% (12/53) [13%,36%]
+    games where anyone scored                                               22% (11/50) [13%,35%]
+    contributor 1 reviewed (of all games)                                   26% (13/50) [16%,40%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/25) [0%,13%]
+    by position, reached CI                 all  72% (145/200) [66%,78%] |  72% (36/50) [58%,83%]   78% (39/50) [65%,87%]   72% (36/50) [58%,83%]   68% (34/50) [54%,79%]
+    by position, chose review               all  22% (44/200) [17%,28%] |  26% (13/50) [16%,40%]   22% (11/50) [13%,35%]   22% (11/50) [13%,35%]   18% (9/50) [10%,31%]
+    by position, chose submit               all  50% (101/200) [44%,57%] |  46% (23/50) [33%,60%]   56% (28/50) [42%,69%]   50% (25/50) [37%,63%]   50% (25/50) [37%,63%]
+    by position, scored                     all   6% (12/200) [3%,10%] |   0% (0/50) [0%,7%]    2% (1/50) [0%,10%]    6% (3/50) [2%,16%]   16% (8/50) [8%,29%]
+    by position, started knowing the rule   all  26% (53/200) [21%,33%] |   0% (0/50) [0%,7%]   24% (12/50) [14%,37%]   36% (18/50) [24%,50%]   46% (23/50) [33%,60%]
+  a3b_team_s79: 50 ok of 50 episodes; team score 0.320 [0.255,0.390] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 76% (32/42) [61%,87%]
+    reviewed without the rule (of CI runs)                                  76% (47/62) [64%,85%]
+    redundant reviews (knew the rule and ran CI)                            16% (15/95) [10%,24%]
+    next contributor knew the rule after a review                          100% (57/57) [94%,100%]
+    followers: followed the rule when the notes file had it (submitted)     99% (79/80) [93%,100%]
+    followers: followed the rule when they started knowing it               65% (79/121) [56%,73%]
+    followers: scored when they started knowing it                          53% (64/121) [44%,62%]
+    games where anyone scored                                               80% (40/50) [67%,89%]
+    contributor 1 reviewed (of all games)                                   64% (32/50) [50%,76%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         1% (1/80) [0%,7%]
+    by position, reached CI                 all  78% (157/200) [72%,84%] |  84% (42/50) [71%,92%]   80% (40/50) [67%,89%]   80% (40/50) [67%,89%]   70% (35/50) [56%,81%]
+    by position, chose review               all  31% (62/200) [25%,38%] |  64% (32/50) [50%,76%]   30% (15/50) [19%,44%]   20% (10/50) [11%,33%]   10% (5/50) [4%,21%]
+    by position, chose submit               all  48% (95/200) [41%,54%] |  20% (10/50) [11%,33%]   50% (25/50) [37%,63%]   60% (30/50) [46%,72%]   60% (30/50) [46%,72%]
+    by position, scored                     all  32% (64/200) [26%,39%] |   0% (0/50) [0%,7%]   40% (20/50) [28%,54%]   48% (24/50) [35%,61%]   40% (20/50) [28%,54%]
+    by position, started knowing the rule   all  60% (121/200) [54%,67%] |   0% (0/50) [0%,7%]   64% (32/50) [50%,76%]   86% (43/50) [74%,93%]   92% (46/50) [81%,97%]
+
+=== far
+  27b_base: 50 ok of 50 episodes; team score 0.115 [0.070,0.165] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 37% (11/30) [22%,54%]
+    reviewed without the rule (of CI runs)                                  41% (35/85) [31%,52%]
+    redundant reviews (knew the rule and ran CI)                            19% (6/31) [9%,36%]
+    next contributor knew the rule after a review                          100% (31/31) [89%,100%]
+    followers: followed the rule when the notes file had it (submitted)    100% (25/25) [87%,100%]
+    followers: followed the rule when they started knowing it               42% (25/60) [30%,54%]
+    followers: scored when they started knowing it                          38% (23/60) [27%,51%]
+    games where anyone scored                                               34% (17/50) [22%,48%]
+    contributor 1 reviewed (of all games)                                   22% (11/50) [13%,35%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/25) [0%,13%]
+    by position, reached CI                 all  58% (116/200) [51%,65%] |  60% (30/50) [46%,72%]   62% (31/50) [48%,74%]   54% (27/50) [40%,67%]   56% (28/50) [42%,69%]
+    by position, chose review               all  20% (41/200) [15%,27%] |  22% (11/50) [13%,35%]   22% (11/50) [13%,35%]   18% (9/50) [10%,31%]   20% (10/50) [11%,33%]
+    by position, chose submit               all  38% (75/200) [31%,44%] |  38% (19/50) [26%,52%]   40% (20/50) [28%,54%]   36% (18/50) [24%,50%]   36% (18/50) [24%,50%]
+    by position, scored                     all  12% (23/200) [8%,17%] |   0% (0/50) [0%,7%]   10% (5/50) [4%,21%]   14% (7/50) [7%,26%]   22% (11/50) [13%,35%]
+    by position, started knowing the rule   all  30% (60/200) [24%,37%] |   0% (0/50) [0%,7%]   22% (11/50) [13%,35%]   42% (21/50) [29%,56%]   56% (28/50) [42%,69%]
+  27b_team_s59: 50 ok of 50 episodes; team score 0.275 [0.205,0.345] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 74% (28/38) [58%,85%]
+    reviewed without the rule (of CI runs)                                  72% (47/65) [60%,82%]
+    redundant reviews (knew the rule and ran CI)                            11% (8/73) [6%,20%]
+    next contributor knew the rule after a review                           98% (50/51) [90%,100%]
+    followers: followed the rule when the notes file had it (submitted)    100% (65/65) [94%,100%]
+    followers: followed the rule when they started knowing it               60% (65/109) [50%,68%]
+    followers: scored when they started knowing it                          50% (55/109) [41%,60%]
+    games where anyone scored                                               70% (35/50) [56%,81%]
+    contributor 1 reviewed (of all games)                                   56% (28/50) [42%,69%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/65) [0%,6%]
+    by position, reached CI                 all  69% (138/200) [62%,75%] |  76% (38/50) [63%,86%]   64% (32/50) [50%,76%]   70% (35/50) [56%,81%]   66% (33/50) [52%,78%]
+    by position, chose review               all  28% (55/200) [22%,34%] |  56% (28/50) [42%,69%]   32% (16/50) [21%,46%]   14% (7/50) [7%,26%]    8% (4/50) [3%,19%]
+    by position, chose submit               all  42% (83/200) [35%,48%] |  20% (10/50) [11%,33%]   32% (16/50) [21%,46%]   56% (28/50) [42%,69%]   58% (29/50) [44%,71%]
+    by position, scored                     all  28% (55/200) [22%,34%] |   0% (0/50) [0%,7%]   24% (12/50) [14%,37%]   42% (21/50) [29%,56%]   44% (22/50) [31%,58%]
+    by position, started knowing the rule   all  55% (109/200) [48%,61%] |   0% (0/50) [0%,7%]   54% (27/50) [40%,67%]   78% (39/50) [65%,87%]   86% (43/50) [74%,93%]
+  a3b_base: 50 ok of 50 episodes; team score 0.050 [0.015,0.095] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 43% (15/35) [28%,59%]
+    reviewed without the rule (of CI runs)                                  46% (38/83) [35%,56%]
+    redundant reviews (knew the rule and ran CI)                            51% (22/43) [37%,65%]
+    next contributor knew the rule after a review                           98% (46/47) [89%,100%]
+    followers: followed the rule when the notes file had it (submitted)     69% (9/13) [42%,87%]
+    followers: followed the rule when they started knowing it               14% (11/78) [8%,24%]
+    followers: scored when they started knowing it                          13% (10/78) [7%,22%]
+    games where anyone scored                                               14% (7/50) [7%,26%]
+    contributor 1 reviewed (of all games)                                   30% (15/50) [19%,44%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/21) [0%,15%]
+    by position, reached CI                 all  63% (126/200) [56%,69%] |  70% (35/50) [56%,81%]   68% (34/50) [54%,79%]   58% (29/50) [44%,71%]   56% (28/50) [42%,69%]
+    by position, chose review               all  30% (60/200) [24%,37%] |  30% (15/50) [19%,44%]   36% (18/50) [24%,50%]   28% (14/50) [17%,42%]   26% (13/50) [16%,40%]
+    by position, chose submit               all  33% (66/200) [27%,40%] |  40% (20/50) [28%,54%]   32% (16/50) [21%,46%]   30% (15/50) [19%,44%]   30% (15/50) [19%,44%]
+    by position, scored                     all   5% (10/200) [3%,9%] |   0% (0/50) [0%,7%]    4% (2/50) [1%,13%]    6% (3/50) [2%,16%]   10% (5/50) [4%,21%]
+    by position, started knowing the rule   all  39% (78/200) [33%,46%] |   0% (0/50) [0%,7%]   30% (15/50) [19%,44%]   58% (29/50) [44%,71%]   68% (34/50) [54%,79%]
+  a3b_team_s79: 50 ok of 50 episodes; team score 0.140 [0.080,0.205] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 70% (28/40) [55%,82%]
+    reviewed without the rule (of CI runs)                                  67% (49/73) [56%,77%]
+    redundant reviews (knew the rule and ran CI)                            48% (43/90) [38%,58%]
+    next contributor knew the rule after a review                           99% (74/75) [93%,100%]
+    followers: followed the rule when the notes file had it (submitted)     85% (34/40) [71%,93%]
+    followers: followed the rule when they started knowing it               33% (37/112) [25%,42%]
+    followers: scored when they started knowing it                          25% (28/112) [18%,34%]
+    games where anyone scored                                               38% (19/50) [26%,52%]
+    contributor 1 reviewed (of all games)                                   56% (28/50) [42%,69%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/47) [0%,8%]
+    by position, reached CI                 all  82% (163/200) [76%,86%] |  80% (40/50) [67%,89%]   86% (43/50) [74%,93%]   82% (41/50) [69%,90%]   78% (39/50) [65%,87%]
+    by position, chose review               all  46% (92/200) [39%,53%] |  56% (28/50) [42%,69%]   54% (27/50) [40%,67%]   40% (20/50) [28%,54%]   34% (17/50) [22%,48%]
+    by position, chose submit               all  36% (71/200) [29%,42%] |  24% (12/50) [14%,37%]   32% (16/50) [21%,46%]   42% (21/50) [29%,56%]   44% (22/50) [31%,58%]
+    by position, scored                     all  14% (28/200) [10%,19%] |   0% (0/50) [0%,7%]    8% (4/50) [3%,19%]   22% (11/50) [13%,35%]   26% (13/50) [16%,40%]
+    by position, started knowing the rule   all  56% (112/200) [49%,63%] |   0% (0/50) [0%,7%]   56% (28/50) [42%,69%]   78% (39/50) [65%,87%]   90% (45/50) [79%,96%]
+
+=== help_a_notes
+  27b_base: 50 ok of 50 episodes; team score 0.050 [0.010,0.100] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                  9% (3/35) [3%,22%]
+    reviewed without the rule (of CI runs)                                  18% (18/102) [11%,26%]
+    redundant reviews (knew the rule and ran CI)                             8% (1/12) [1%,35%]
+    next contributor knew the rule after a review                          100% (13/13) [77%,100%]
+    followers: followed the rule when the notes file had it (submitted)     88% (7/8) [53%,98%]
+    followers: followed the rule when they started knowing it               42% (10/24) [24%,61%]
+    followers: scored when they started knowing it                          42% (10/24) [24%,61%]
+    games where anyone scored                                               12% (6/50) [6%,24%]
+    contributor 1 reviewed (of all games)                                    6% (3/50) [2%,16%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/11) [0%,26%]
+    by position, reached CI                 all  57% (114/200) [50%,64%] |  70% (35/50) [56%,81%]   46% (23/50) [33%,60%]   62% (31/50) [48%,74%]   50% (25/50) [37%,63%]
+    by position, chose review               all  10% (19/200) [6%,14%] |   6% (3/50) [2%,16%]   10% (5/50) [4%,21%]   10% (5/50) [4%,21%]   12% (6/50) [6%,24%]
+    by position, chose submit               all  48% (95/200) [41%,54%] |  64% (32/50) [50%,76%]   36% (18/50) [24%,50%]   52% (26/50) [39%,65%]   38% (19/50) [26%,52%]
+    by position, scored                     all   5% (10/200) [3%,9%] |   0% (0/50) [0%,7%]    2% (1/50) [0%,10%]   10% (5/50) [4%,21%]    8% (4/50) [3%,19%]
+    by position, started knowing the rule   all  12% (24/200) [8%,17%] |   0% (0/50) [0%,7%]    6% (3/50) [2%,16%]   16% (8/50) [8%,29%]   26% (13/50) [16%,40%]
+  27b_team_s59: 50 ok of 50 episodes; team score 0.215 [0.155,0.275] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 74% (32/43) [60%,85%]
+    reviewed without the rule (of CI runs)                                  75% (49/65) [64%,84%]
+    redundant reviews (knew the rule and ran CI)                            36% (29/80) [27%,47%]
+    next contributor knew the rule after a review                          100% (68/68) [95%,100%]
+    followers: followed the rule when the notes file had it (submitted)     98% (45/46) [89%,100%]
+    followers: followed the rule when they started knowing it               41% (49/119) [33%,50%]
+    followers: scored when they started knowing it                          36% (43/119) [28%,45%]
+    games where anyone scored                                               56% (28/50) [42%,69%]
+    contributor 1 reviewed (of all games)                                   64% (32/50) [50%,76%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/51) [0%,7%]
+    by position, reached CI                 all  72% (145/200) [66%,78%] |  86% (43/50) [74%,93%]   62% (31/50) [48%,74%]   78% (39/50) [65%,87%]   64% (32/50) [50%,76%]
+    by position, chose review               all  39% (78/200) [33%,46%] |  64% (32/50) [50%,76%]   34% (17/50) [22%,48%]   38% (19/50) [26%,52%]   20% (10/50) [11%,33%]
+    by position, chose submit               all  34% (67/200) [27%,40%] |  22% (11/50) [13%,35%]   28% (14/50) [17%,42%]   40% (20/50) [28%,54%]   44% (22/50) [31%,58%]
+    by position, scored                     all  22% (43/200) [16%,28%] |   0% (0/50) [0%,7%]   18% (9/50) [10%,31%]   32% (16/50) [21%,46%]   36% (18/50) [24%,50%]
+    by position, started knowing the rule   all  60% (119/200) [53%,66%] |   0% (0/50) [0%,7%]   64% (32/50) [50%,76%]   80% (40/50) [67%,89%]   94% (47/50) [84%,98%]
+  a3b_base: 50 ok of 50 episodes; team score 0.040 [0.015,0.070] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 42% (15/36) [27%,58%]
+    reviewed without the rule (of CI runs)                                  39% (36/93) [29%,49%]
+    redundant reviews (knew the rule and ran CI)                            53% (23/43) [39%,67%]
+    next contributor knew the rule after a review                          100% (43/43) [92%,100%]
+    followers: followed the rule when the notes file had it (submitted)     44% (8/18) [25%,66%]
+    followers: followed the rule when they started knowing it               12% (8/65) [6%,22%]
+    followers: scored when they started knowing it                          12% (8/65) [6%,22%]
+    games where anyone scored                                               14% (7/50) [7%,26%]
+    contributor 1 reviewed (of all games)                                   30% (15/50) [19%,44%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/20) [0%,16%]
+    by position, reached CI                 all  68% (136/200) [61%,74%] |  72% (36/50) [58%,83%]   68% (34/50) [54%,79%]   70% (35/50) [56%,81%]   62% (31/50) [48%,74%]
+    by position, chose review               all  30% (59/200) [24%,36%] |  30% (15/50) [19%,44%]   30% (15/50) [19%,44%]   26% (13/50) [16%,40%]   32% (16/50) [21%,46%]
+    by position, chose submit               all  38% (77/200) [32%,45%] |  42% (21/50) [29%,56%]   38% (19/50) [26%,52%]   44% (22/50) [31%,58%]   30% (15/50) [19%,44%]
+    by position, scored                     all   4% (8/200) [2%,8%] |   0% (0/50) [0%,7%]    0% (0/50) [0%,7%]    8% (4/50) [3%,19%]    8% (4/50) [3%,19%]
+    by position, started knowing the rule   all  32% (65/200) [26%,39%] |   0% (0/50) [0%,7%]   30% (15/50) [19%,44%]   44% (22/50) [31%,58%]   56% (28/50) [42%,69%]
+  a3b_team_s79: 50 ok of 50 episodes; team score 0.240 [0.175,0.315] (n=50 games, 25 repos)
+    contributor 1 reviewed (of its CI runs)                                 79% (33/42) [64%,88%]
+    reviewed without the rule (of CI runs)                                  72% (49/68) [60%,81%]
+    redundant reviews (knew the rule and ran CI)                            36% (32/89) [27%,46%]
+    next contributor knew the rule after a review                           97% (70/72) [90%,99%]
+    followers: followed the rule when the notes file had it (submitted)    100% (57/57) [94%,100%]
+    followers: followed the rule when they started knowing it               48% (57/120) [39%,56%]
+    followers: scored when they started knowing it                          40% (48/120) [32%,49%]
+    games where anyone scored                                               64% (32/50) [50%,76%]
+    contributor 1 reviewed (of all games)                                   66% (33/50) [52%,78%]
+    habit: called a tool that does not exist here                            0% (0/200) [0%,2%]
+    habit: bash mentions NOTES.md although the notes file moved              0% (0/200) [0%,2%]
+    habit: submitted the rule's ID in the wrong form (knew the rule)         0% (0/57) [0%,6%]
+    by position, reached CI                 all  78% (157/200) [72%,84%] |  84% (42/50) [71%,92%]   72% (36/50) [58%,83%]   78% (39/50) [65%,87%]   80% (40/50) [67%,89%]
+    by position, chose review               all  40% (81/200) [34%,47%] |  66% (33/50) [52%,78%]   36% (18/50) [24%,50%]   42% (21/50) [29%,56%]   18% (9/50) [10%,31%]
+    by position, chose submit               all  38% (76/200) [32%,45%] |  18% (9/50) [10%,31%]   36% (18/50) [24%,50%]   36% (18/50) [24%,50%]   62% (31/50) [48%,74%]
+    by position, scored                     all  24% (48/200) [19%,30%] |   0% (0/50) [0%,7%]   24% (12/50) [14%,37%]   20% (10/50) [11%,33%]   52% (26/50) [39%,65%]
+    by position, started knowing the rule   all  60% (120/200) [53%,67%] |   0% (0/50) [0%,7%]   62% (31/50) [48%,74%]   86% (43/50) [74%,93%]   92% (46/50) [81%,97%]
+
+=== Paired lift over the untrained model of the same family (same condition)
+  heldout: 27b_team_s59 - 27b_base
+    team score                                                             +0.215     [+0.125,+0.300] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                 +80.7 pts [+65.6,+94.6] (n 40 vs 35)
+    reviewed without the rule (of CI runs)                                  +69.8 pts [+59.6,+79.0] (n 54 vs 101)
+    redundant reviews (knew the rule and ran CI)                            +31.4 pts [+10.8,+55.1] (n 31 vs 19)
+    next contributor knew the rule after a review                            +5.9 pts [+0.0,+20.0] (n 31 vs 17)
+    followers: followed the rule when the notes file had it (submitted)      +0.0 pts [+0.0,+0.0] (n 18 vs 17)
+    followers: followed the rule when they started knowing it               -14.6 pts [-41.0,+10.5] (n 57 vs 30)
+    followers: scored when they started knowing it                          -14.6 pts [-41.0,+10.5] (n 57 vs 30)
+    games where anyone scored                                               +52.0 pts [+34.0,+68.0] (n 50 vs 50)
+    McNemar, anyone scored:        50 pairs, 29 vs 3 discordant, p=2.56e-06
+    McNemar, contributor 1 reviewed: 50 pairs, 37 vs 1 discordant, p=2.84e-10
+  heldout: a3b_team_s79 - a3b_base
+    team score                                                             +0.260     [+0.190,+0.330] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                 +39.2 pts [+18.4,+57.5] (n 38 vs 35)
+    reviewed without the rule (of CI runs)                                  +48.9 pts [+31.3,+64.9] (n 62 vs 104)
+    redundant reviews (knew the rule and ran CI)                            -26.0 pts [-39.5,-12.4] (n 69 vs 41)
+    next contributor knew the rule after a review                            +2.9 pts [+0.0,+11.1] (n 43 vs 35)
+    followers: followed the rule when the notes file had it (submitted)     +39.1 pts [+19.2,+60.0] (n 55 vs 22)
+    followers: followed the rule when they started knowing it               +40.3 pts [+23.5,+55.6] (n 91 vs 53)
+    followers: scored when they started knowing it                          +30.1 pts [+15.3,+43.6] (n 91 vs 53)
+    games where anyone scored                                               +58.0 pts [+46.0,+70.0] (n 50 vs 50)
+    McNemar, anyone scored:        50 pairs, 31 vs 2 discordant, p=1.31e-07
+    McNemar, contributor 1 reviewed: 50 pairs, 21 vs 2 discordant, p=6.6e-05
+  far: 27b_team_s59 - 27b_base
+    team score                                                             +0.160     [+0.095,+0.235] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                 +40.0 pts [+19.4,+62.1] (n 30 vs 30)
+    reviewed without the rule (of CI runs)                                  +31.1 pts [+20.0,+43.6] (n 65 vs 85)
+    redundant reviews (knew the rule and ran CI)                            -10.1 pts [-24.2,+2.4] (n 54 vs 31)
+    next contributor knew the rule after a review                            +0.0 pts [+0.0,+0.0] (n 41 vs 31)
+    followers: followed the rule when the notes file had it (submitted)      +0.0 pts [+0.0,+0.0] (n 40 vs 25)
+    followers: followed the rule when they started knowing it               +19.0 pts [+6.3,+32.0] (n 94 vs 60)
+    followers: scored when they started knowing it                          +11.7 pts [+0.4,+22.3] (n 94 vs 60)
+    games where anyone scored                                               +36.0 pts [+20.0,+54.0] (n 50 vs 50)
+    McNemar, anyone scored:        50 pairs, 19 vs 1 discordant, p=4.01e-05
+    McNemar, contributor 1 reviewed: 50 pairs, 18 vs 1 discordant, p=7.63e-05
+  far: a3b_team_s79 - a3b_base
+    team score                                                             +0.090     [+0.010,+0.175] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                 +21.6 pts [-2.8,+43.7] (n 35 vs 34)
+    reviewed without the rule (of CI runs)                                  +21.3 pts [+7.1,+35.1] (n 73 vs 83)
+    redundant reviews (knew the rule and ran CI)                             -7.0 pts [-30.3,+17.0] (n 77 vs 43)
+    next contributor knew the rule after a review                            +0.7 pts [-3.9,+6.7] (n 70 vs 47)
+    followers: followed the rule when the notes file had it (submitted)      -3.3 pts [-39.3,+38.7] (n 15 vs 10)
+    followers: followed the rule when they started knowing it               +18.9 pts [+4.3,+33.4] (n 106 vs 78)
+    followers: scored when they started knowing it                          +11.7 pts [-4.6,+28.0] (n 106 vs 78)
+    games where anyone scored                                               +24.0 pts [+4.0,+44.0] (n 50 vs 50)
+    McNemar, anyone scored:        50 pairs, 17 vs 5 discordant, p=0.0169
+    McNemar, contributor 1 reviewed: 50 pairs, 19 vs 6 discordant, p=0.0146
+  help_a_notes: 27b_team_s59 - 27b_base
+    team score                                                             +0.165     [+0.090,+0.235] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                 +70.4 pts [+50.8,+86.9] (n 38 vs 35)
+    reviewed without the rule (of CI runs)                                  +57.7 pts [+43.2,+71.7] (n 65 vs 102)
+    redundant reviews (knew the rule and ran CI)                            +21.7 pts [-11.2,+44.4] (n 20 vs 12)
+    next contributor knew the rule after a review                            +0.0 pts [+0.0,+0.0] (n 26 vs 13)
+    followers: followed the rule when the notes file had it (submitted)     +12.5 pts [+0.0,+50.0] (n 12 vs 8)
+    followers: followed the rule when they started knowing it                +6.1 pts [-22.7,+35.0] (n 44 vs 24)
+    followers: scored when they started knowing it                           -0.8 pts [-27.0,+26.4] (n 44 vs 24)
+    games where anyone scored                                               +44.0 pts [+30.0,+58.0] (n 50 vs 50)
+    McNemar, anyone scored:        50 pairs, 23 vs 1 discordant, p=2.98e-06
+    McNemar, contributor 1 reviewed: 50 pairs, 30 vs 1 discordant, p=2.98e-08
+  help_a_notes: a3b_team_s79 - a3b_base
+    team score                                                             +0.200     [+0.140,+0.270] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                 +36.1 pts [+14.6,+57.8] (n 38 vs 35)
+    reviewed without the rule (of CI runs)                                  +33.3 pts [+19.6,+47.3] (n 68 vs 93)
+    redundant reviews (knew the rule and ran CI)                            -14.9 pts [-28.8,+3.1] (n 70 vs 43)
+    next contributor knew the rule after a review                            -3.3 pts [-8.2,+0.0] (n 61 vs 43)
+    followers: followed the rule when the notes file had it (submitted)     +50.0 pts [+21.4,+76.2] (n 30 vs 16)
+    followers: followed the rule when they started knowing it               +31.6 pts [+22.4,+41.2] (n 98 vs 65)
+    followers: scored when they started knowing it                          +25.4 pts [+17.2,+34.4] (n 98 vs 65)
+    games where anyone scored                                               +50.0 pts [+36.0,+64.0] (n 50 vs 50)
+    McNemar, anyone scored:        50 pairs, 26 vs 1 discordant, p=4.17e-07
+    McNemar, contributor 1 reviewed: 50 pairs, 22 vs 4 discordant, p=0.000534
+
+=== Transfer change: condition minus its reference, same policy
+  27b_base: far - heldout (paired)
+    team score                                                             +0.030     [-0.050,+0.110] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                 +29.5 pts [+9.0,+50.0] (n 30 vs 28)
+    reviewed without the rule (of CI runs)                                  +18.4 pts [+3.6,+32.6] (n 85 vs 101)
+    redundant reviews (knew the rule and ran CI)                            +37.5 pts [+0.0,+75.0] (n 8 vs 9)
+    next contributor knew the rule after a review                           +10.0 pts [+0.0,+27.3] (n 11 vs 10)
+    followers: followed the rule when the notes file had it (submitted)      +0.0 pts [+0.0,+0.0] (n 5 vs 7)
+    followers: followed the rule when they started knowing it               -12.9 pts [-46.7,+22.9] (n 20 vs 17)
+    followers: scored when they started knowing it                          -12.9 pts [-46.7,+22.9] (n 20 vs 17)
+    games where anyone scored                                               +14.0 pts [-8.0,+34.0] (n 50 vs 50)
+  27b_team_s59: far - heldout (paired)
+    team score                                                             -0.025     [-0.110,+0.050] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                 -19.2 pts [-37.2,-3.0] (n 38 vs 42)
+    reviewed without the rule (of CI runs)                                  -20.3 pts [-33.3,-5.1] (n 65 vs 54)
+    redundant reviews (knew the rule and ran CI)                            -15.6 pts [-26.6,-5.7] (n 73 vs 94)
+    next contributor knew the rule after a review                            -2.0 pts [-6.5,+0.0] (n 51 vs 62)
+    followers: followed the rule when the notes file had it (submitted)      +0.0 pts [+0.0,+0.0] (n 65 vs 64)
+    followers: followed the rule when they started knowing it                +8.1 pts [-5.3,+21.2] (n 109 vs 134)
+    followers: scored when they started knowing it                           +5.7 pts [-6.6,+17.8] (n 109 vs 134)
+    games where anyone scored                                                -2.0 pts [-20.0,+14.0] (n 50 vs 50)
+  a3b_base: far - heldout (paired)
+    team score                                                             -0.010     [-0.055,+0.045] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                  +8.6 pts [-14.5,+30.3] (n 35 vs 35)
+    reviewed without the rule (of CI runs)                                  +18.9 pts [+5.3,+33.5] (n 83 vs 104)
+    redundant reviews (knew the rule and ran CI)                            +27.7 pts [+2.0,+49.2] (n 29 vs 32)
+    next contributor knew the rule after a review                            +0.4 pts [-7.7,+9.7] (n 37 vs 32)
+    followers: followed the rule when the notes file had it (submitted)      +2.9 pts [-45.0,+26.7] (n 5 vs 7)
+    followers: followed the rule when they started knowing it               -15.4 pts [-31.4,-3.1] (n 58 vs 50)
+    followers: scored when they started knowing it                          -15.1 pts [-28.7,-5.1] (n 58 vs 50)
+    games where anyone scored                                                -8.0 pts [-20.0,+6.0] (n 50 vs 50)
+  a3b_team_s79: far - heldout (paired)
+    team score                                                             -0.180     [-0.255,-0.095] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                  -8.5 pts [-24.4,+7.1] (n 38 vs 39)
+    reviewed without the rule (of CI runs)                                   -8.7 pts [-24.8,+8.7] (n 73 vs 62)
+    redundant reviews (knew the rule and ran CI)                            +32.0 pts [+17.3,+46.2] (n 90 vs 95)
+    next contributor knew the rule after a review                            -1.3 pts [-4.5,+0.0] (n 75 vs 57)
+    followers: followed the rule when the notes file had it (submitted)     -13.4 pts [-31.4,-1.2] (n 40 vs 61)
+    followers: followed the rule when they started knowing it               -32.3 pts [-43.5,-20.6] (n 112 vs 121)
+    followers: scored when they started knowing it                          -27.9 pts [-38.1,-16.2] (n 112 vs 121)
+    games where anyone scored                                               -42.0 pts [-58.0,-26.0] (n 50 vs 50)
+  27b_base: help_a_notes - heldout (paired)
+    team score                                                             -0.035     [-0.105,+0.035] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                  +2.6 pts [-10.4,+16.2] (n 33 vs 31)
+    reviewed without the rule (of CI runs)                                   -5.1 pts [-17.7,+6.4] (n 102 vs 101)
+    redundant reviews (knew the rule and ran CI)                             +0.0 pts [+0.0,+0.0] (n 4 vs 4)
+    next contributor knew the rule after a review                            +0.0 pts [+0.0,+0.0] (n 7 vs 9)
+    followers: followed the rule when the notes file had it (submitted)      +0.0 pts [+0.0,+0.0] (n 4 vs 4)
+    followers: followed the rule when they started knowing it               -10.1 pts [-48.4,+23.8] (n 13 vs 16)
+    followers: scored when they started knowing it                          -10.1 pts [-48.4,+23.8] (n 13 vs 16)
+    games where anyone scored                                                -8.0 pts [-26.0,+8.0] (n 50 vs 50)
+  27b_team_s59: help_a_notes - heldout (paired)
+    team score                                                             -0.085     [-0.165,+0.000] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                 -19.0 pts [-34.9,-5.1] (n 42 vs 42)
+    reviewed without the rule (of CI runs)                                  -17.2 pts [-29.1,-5.6] (n 65 vs 54)
+    redundant reviews (knew the rule and ran CI)                             +9.4 pts [-4.3,+24.0] (n 80 vs 93)
+    next contributor knew the rule after a review                            +0.0 pts [+0.0,+0.0] (n 68 vs 63)
+    followers: followed the rule when the notes file had it (submitted)      -2.2 pts [-7.0,+0.0] (n 46 vs 61)
+    followers: followed the rule when they started knowing it                -9.9 pts [-22.1,+2.8] (n 119 vs 135)
+    followers: scored when they started knowing it                           -8.3 pts [-18.5,+2.4] (n 119 vs 135)
+    games where anyone scored                                               -16.0 pts [-34.0,+2.0] (n 50 vs 50)
+  a3b_base: help_a_notes - heldout (paired)
+    team score                                                             -0.020     [-0.055,+0.015] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                  +5.7 pts [-18.0,+29.9] (n 35 vs 35)
+    reviewed without the rule (of CI runs)                                  +11.8 pts [-3.1,+25.6] (n 93 vs 104)
+    redundant reviews (knew the rule and ran CI)                             +3.6 pts [-15.0,+22.2] (n 31 vs 29)
+    next contributor knew the rule after a review                            +0.0 pts [+0.0,+0.0] (n 31 vs 27)
+    followers: followed the rule when the notes file had it (submitted)     -13.8 pts [-61.7,+31.7] (n 13 vs 10)
+    followers: followed the rule when they started knowing it                -8.8 pts [-21.5,+2.7] (n 51 vs 40)
+    followers: scored when they started knowing it                           -8.8 pts [-21.5,+2.7] (n 51 vs 40)
+    games where anyone scored                                                -8.0 pts [-20.0,+4.0] (n 50 vs 50)
+  a3b_team_s79: help_a_notes - heldout (paired)
+    team score                                                             -0.080     [-0.165,+0.010] (n 50 vs 50)
+    contributor 1 reviewed (of its CI runs)                                  +0.0 pts [-18.3,+17.4] (n 40 vs 40)
+    reviewed without the rule (of CI runs)                                   -3.7 pts [-20.2,+11.6] (n 68 vs 62)
+    redundant reviews (knew the rule and ran CI)                            +20.2 pts [+6.4,+34.1] (n 89 vs 95)
+    next contributor knew the rule after a review                            -2.8 pts [-6.7,+0.0] (n 72 vs 57)
+    followers: followed the rule when the notes file had it (submitted)      +1.4 pts [+0.0,+4.8] (n 57 vs 70)
+    followers: followed the rule when they started knowing it               -17.8 pts [-30.0,-5.1] (n 120 vs 121)
+    followers: scored when they started knowing it                          -12.9 pts [-24.9,+0.1] (n 120 vs 121)
+    games where anyone scored                                               -16.0 pts [-34.0,+2.0] (n 50 vs 50)

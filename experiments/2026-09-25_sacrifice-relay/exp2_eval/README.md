@@ -294,6 +294,28 @@ Transfer core plus help on one pod is about 24 h (~$223). On two pods, one per m
 the A3B pod about 6 h (it starts once the 27B pod's filter has built the held-out repos), for about the same total
 cost (~$229) but a shorter wall time.
 
+## Results (eval session 2026-10-05)
+
+Sid's suite: untrained vs team-trained, for the 27B (after step 59) and the A3B (after step 79). Conditions:
+`heldout`, `far` and `help_a_notes`, each on 25 held-out repos × 2 games. Full write-up and caveats:
+`../REPORT.md` section 4. Aggregates: `results/eval_session_2026-10-05_*`.
+- The filter covered the first 600 candidates and kept 156 (26%). It ran with `stop_after_tasks=600`, then
+  `data filter allow_paused=true`, and built 25 repos.
+
+| Team score (untrained → team) | 27B | A3B |
+|---|---|---|
+| heldout | 0.085 → 0.300 | 0.060 → 0.320 |
+| far | 0.115 → 0.275 | 0.050 → 0.140 |
+| help_a_notes | 0.050 → 0.215 | 0.040 → 0.240 |
+
+- **Transfer:** contributor 1 reviewed 14% → 93% (27B) and 36% → 76% (A3B) on held-out repos. Under `far`, the 27B
+  keeps almost all of its gain, while the A3B's followers apply the new rule kinds much less.
+- **No habit errors** in any `far` game.
+- **Help note inside the relay:**
+  - the 27B appended the requested line in 19-20% of contributors (36-38% of first contributors), the same before and
+    after training;
+  - the A3B essentially never did.
+
 ## Policies
 
 | Policy | Adapter on HF `sidbaines/amber-baton` | Note |

@@ -1,7 +1,6 @@
 # Sacrifice relay: report on experiments 1–3 and the evals (2026-09-25 to 2026-10-05)
 
-**Status: DRAFT (2026-10-05 ~18:10 UTC).** The training runs are finished or paused. Evals are still running on two
-pods. Sections marked *(pending)* are filled in when they finish.
+**Status: final (2026-10-05, 21:10 UTC).** Training runs finished or paused (resumable); evals done; every pod deleted.
 
 This is the study-wide write-up: what we ran, what we found, and everything we learned about running it, so later
 experiments can reuse it. The per-experiment READMEs have the full tables and logs. This report summarises them and
@@ -35,19 +34,26 @@ links to them.
      - A3B: followed it 40% → 65%, and stopped wasting reviews.
    - But followers without the rule never learned to review. On the A3B they stopped reviewing altogether
      (35% → 6%).
-3. **What was learned is not memorisation.** The 51 training repos repeated 4–13 times per run, but:
-   - the coding pass rate on repeated problems stayed flat;
-   - notes were never written from a template;
-   - reviews did not become an instant reflex.
-
-   Whether the behaviour survives a changed format is what the transfer eval measures *(pending)*.
-4. **Standard cooperation evals, so far (A3B only):**
-   - **One-shot giving games:** no change. Both versions are almost completely selfish with thinking on (1–2%
-     cooperation), as the paper's authors also found for Qwen models.
-   - **HiddenBench (pooling private facts in discussion):** after discussion the team-trained A3B was right more
-     often (18.5% → 24.1%, p = 0.10, one discussion per task). More discussions are running *(pending)*.
-   - **Planted help request:** neither version ever helped or mentioned it (0 of 120 each).
-   - The 27B results and the relay-based evals are pending.
+3. **What was learned transfers.**
+   - **New problems:** on 25 repos built from problems never used before, both team-trained models score at least as
+     well as at the end of training (27B 0.085 → 0.300; A3B 0.060 → 0.320, untrained → trained). Contributor 1 reviews
+     93% / 76% of the time.
+   - **A fully changed format** (reworded prompts, renamed tools, moved notes file, new rule kinds):
+     - the 27B keeps almost all of its gain (0.115 → 0.275);
+     - the A3B keeps reviewing but its followers stumble on the new rule kinds (0.050 → 0.140).
+   - **No sign of format-matching habits.** No one called a renamed tool, used the old notes file or wrote the rule in
+     the old form.
+   - **No memorisation during training either.** The coding pass rate on repeated problems stayed flat, notes were
+     never templated, and reviews never became an instant reflex.
+4. **But it did not make the models more cooperative in general.**
+   - **One-shot giving games and the volunteer's dilemma:** no change for either model.
+   - **Help requests from another agent:** never acted on in a standard harness (0 of 480 episodes across both
+     models and versions), and team training changed nothing.
+   - **The one exception is HiddenBench** (pooling private facts in a discussion): the team-trained A3B was right more
+     often after discussion, 17.8% → 22.7% (+4.8 points, p = 0.025 over 3 discussions per task; the replication alone
+     gave p = 0.077). The 27B showed no such effect (19.1% vs 19.2%).
+5. **Behaviour depends on the harness.** The same 27B appended a requested line for another agent in 36–38% of games
+   inside our relay (the note sat in the `NOTES.md` it is told to share), but never in a standard Inspect agent.
 
 ## 2. The game and what changed between experiments
 
@@ -210,7 +216,7 @@ each experiment's `out/analysis/<run>/` and on HF (`sidbaines/amber-baton`, `exp
   - **Research:** `/workspace/marli-orchestration/2026-10-05/coop_evals_research.md` explains why these and not others.
     No standard Inspect eval tests cooperation; others need a judge, or reward selfish play.
 
-### 4.2 The session (2026-10-05)
+### 4.2 The session (2026-10-05, 15:20–21:10 UTC)
 - **Pods:** one 2×H200 pod per model family. A single data-parallel vLLM server per pod served both the untrained model
   and the team adapter (27B: step 59; A3B: step 79) for both harnesses.
 - **Preflight passed on both servers:**
@@ -225,6 +231,14 @@ each experiment's `out/analysis/<run>/` and on HF (`sidbaines/amber-baton`, `exp
   - HiddenBench (1, then 3 discussions per task);
   - the volunteer's dilemma (50 games);
   - the planted help request (30 tasks × 5 conditions).
+- **How it ran:**
+  - The 27B pod first ran the difficulty filter (15:31–17:06); its last step needed the `allow_paused` fix.
+  - The A3B pod started at 16:00 and began its relay as soon as the repos arrived (17:17).
+  - Late fixes for idle GPUs: more relay games in flight on the A3B (36 → 60); on the 27B, the next phases ran
+    alongside one straggling HiddenBench discussion.
+  - The planned hand-over of 27B work to the A3B pod was dropped: it would have saved about 15 minutes for about
+    0.4 extra pod-hours.
+  - A3B pod: 16:00–19:37 (about $33). 27B pod: 15:20–21:10 (about $54).
 
 ### 4.3 Building an independent held-out problem set
 - **Reworded copies.** DeepCoder's subsets contain the same problem reworded:
@@ -245,38 +259,82 @@ each experiment's `out/analysis/<run>/` and on HF (`sidbaines/amber-baton`, `exp
   - 156 kept (26%, the same rate as experiment 1); 53% too easy, 21% too hard.
   - 25 repos of 4 were built, in both the training rule forms and the new rule kinds.
 
-### 4.4 Results *(partly pending)*
-**Li & Shirado one-shot games (A3B; 100 decisions per game):**
+### 4.4 Results
 
-| Game | Untrained | Team-trained s79 |
+All comparisons are untrained vs team-trained of the same model (27B: experiment 2 team arm after step 59; A3B: after
+step 79), on the same tasks and seeds where the eval allows pairing. Aggregate tables: `exp2_eval/results/` (relay) and
+`../2026-10-05_coop-evals/results/` (standard evals).
+
+**Relay transfer eval** (25 held-out repos × 2 games = 50 games per cell; team score = mean 0/1 score of the four
+contributors; p from McNemar on "anyone scored", matched by game):
+
+| | 27B untrained → team | A3B untrained → team |
 |---|---|---|
-| Dictator: share given | 0.22 | 0.24 (+0.02, p = 0.28) |
-| Prisoner's dilemma: cooperate | 1% | 2% |
-| Public goods: contribute | 2% | 0% |
+| New problems, same format: team score | 0.085 → **0.300** (+0.215 [+0.125, +0.300]) | 0.060 → **0.320** (+0.26 [+0.19, +0.33]) |
+| contributor 1 reviewed (of its CI runs) | 14% → 93% | 36% → 76% |
+| Everything changed (`far`): team score | 0.115 → **0.275** (+0.16 [+0.095, +0.235]) | 0.050 → **0.140** (+0.09 [+0.01, +0.175]) |
+| contributor 1 reviewed | 37% → 74% | 43% → 70% |
+| Help note in NOTES.md: team score | 0.050 → 0.215 | 0.040 → 0.240 |
+| p, anyone scored (new problems / far / help) | 3e-6 / 4e-5 / 3e-6 | 1e-7 / 0.017 / 4e-7 |
 
-- No effect from training. With thinking on, the A3B is almost always selfish, a floor effect that matches the
-  authors' finding for Qwen with thinking.
-- 27B: *(pending)*.
+- **Transfers to new problems, fully.** Both trained models score as well as or better than at the end of training
+  (27B 0.300 vs 0.267; A3B 0.320 vs 0.268).
+- **Survives a fully changed surface, for the 27B almost entirely.**
+  - The `far` condition rewords the instructions and system prompt, renames the CI tools and rewords their
+    descriptions, rewords the CI replies, moves the notes to `docs/handoff.txt`, and uses rule kinds never seen in
+    training.
+  - The 27B team policy's `far` minus new-problems change is −0.025 [−0.11, +0.05].
+  - The A3B's is −0.18 [−0.26, −0.10]. It still reviews (contributor 1 −8.5 points, not significant), but its
+    followers apply the rule much less (−32 points), most likely because of the new rule kinds.
+- **No format-matching habits.** Across 1,200 contributors in the `far` games, none:
+  - called a tool that does not exist there;
+  - touched the old `NOTES.md`;
+  - wrote the rule ID in the wrong form.
+- **Followers apply the rule better after training** (A3B, new problems: followed it when they started knowing it
+  25% → 65%). The 27B's followers did not change (57% → 51%, n.s.).
 
-**HiddenBench (A3B, one discussion per task; 58 of 65 tasks scored, 7 harness errors each):**
+**Help request inside the relay** (note in `NOTES.md`, 200 contributors per cell):
 
-| Share of agents right | Untrained | Team-trained | Gain |
-|---|---|---|---|
-| Before discussion | 13.4% | 12.9% | none |
-| After 15 rounds of discussion | 18.5% | 24.1% | +5.6 points [−0.4, +11.6], p = 0.10 |
-| Group majority right, after | 8.6% | 15.5% | +6.9 points, p = 0.22 |
+| | 27B untrained | 27B team | A3B untrained | A3B team |
+|---|---|---|---|---|
+| Appended the requested line | 19% (38/200) | 20% (40/200) | 0% | 0.5% (1/200) |
+| ... of first contributors | 36% | 38% | 0% | 0% |
+| Mentioned it in visible text | 42% | 39% | 0% | 2% |
+| Did it and told / declined and told / ignored silently | 37 / 48 / 113 | 37 / 41 / 118 | 0 / 0 / 200 | 1 / 2 / 197 |
 
-- Three discussions per task, and the 27B: *(pending)*.
+**Standard evals** (95% intervals; differences are trained minus untrained):
 
-**Planted help request, outside our harness (A3B, 30 tasks × 4 note conditions + control):**
-- **Helping:** 0 of 120 helped, for both untrained and team-trained.
-- **Telling the user:** 0 of 120 mentioned the request.
-- **Noticing:** they opened the note's file in 23–47% of episodes, about equally for both versions.
-- **Own task:** essentially 100% of tasks were solved.
-- 27B: *(pending)*.
+| | 27B untrained → team | A3B untrained → team |
+|---|---|---|
+| Dictator: share given (100 trials) | 0.31 → 0.32 | 0.22 → 0.24 |
+| Prisoner's dilemma: cooperate | 23% → 20% | 1% → 2% |
+| Public goods: contribute | 12% → 14% | 2% → 0% |
+| Volunteer's dilemma: volunteered (50 games × 3 players) | 17% → 14% (n.s.) | 44% → 45% |
+| Volunteer's dilemma: group safe | 39% → 31% (p = 0.2) | 57% → 58% |
+| HiddenBench, agents right after discussion (3 discussions per task) | 19.1% → 19.2% (+0.1 [−2.5, +3.1], p = 1.0) | 17.8% → **22.7%** (+4.8 [+1.0, +8.9], p = 0.025) |
+| HiddenBench, agents right before discussion | 14.2% → 15.1% | 12.5% → 12.9% |
+| Planted help (standard harness): helped | 0/120 → 0/120 | 0/120 → 0/120 |
+| Planted help: read the note / told the user | 60–83% / 53–80% → 63–90% / 63–90% | 23–43% / 0% → 23–47% / 0% |
 
-**Volunteer's dilemma; relay transfer eval (new problems, everything changed); help request inside the relay:**
-*(pending)*.
+- **One-shot giving games and the volunteer's dilemma:** no effect of team training on either model.
+  - With thinking on, the A3B is almost always selfish in the one-shot games, a floor effect matching Li & Shirado's
+    finding for Qwen with thinking.
+  - The 27B is more generous.
+- **HiddenBench (pooling private facts in a 4-agent discussion):**
+  - **A3B:** the team-trained version is right more often *after* discussion, with no difference before it. The first
+    discussion per task (+5.6, p = 0.10) motivated two more; those alone gave +4.5 [0.0, +9.3], p = 0.077.
+  - **27B:** no effect with 3 discussions per task (after: 19.1% vs 19.2%; before: 14.2% vs 15.1%). So the effect is A3B-only.
+  - **Errors:** 7–11 of 65 tasks per discussion raised errors in the upstream harness for both models; they are
+    excluded.
+- **Planted help request:** no model ever did the requested task in the standard harness, and team training changed
+  nothing.
+  - The **27B noticed and reported it** to the user most of the time.
+  - The **A3B mostly did not look** at it.
+  - The no-note control gives the keyword measure's false-alarm rate: 7–10% "told" for the 27B, 0% for the A3B.
+- **Harness dependence:** the same 27B appended the line for 36–38% of first contributors inside the relay, where the
+  note sits in the shared `NOTES.md` it is told to read and write, but never in the standard harness (0/120).
+  Willingness to act on another agent's note depends strongly on the setting, which is the case for testing
+  generality in standard harnesses.
 
 ## 5. Troubleshooting and lessons (what to reuse)
 
@@ -357,6 +415,23 @@ each experiment's `out/analysis/<run>/` and on HF (`sidbaines/amber-baton`, `exp
 - **Live estimates of the filter's band rate are biased early:** quick, easy problems finish first. Wait for
   completed problems.
 
+### Eval sessions (2026-10-05)
+- **Plan the critical path.** The held-out difficulty filter gated every relay eval, so it ran first on its own; work
+  that did not need it (the standard evals) filled the other pod.
+- **Cap long runs deliberately.** `stop_after_tasks` keeps a run resumable, but check that downstream steps accept a
+  paused run (they did not: `allow_paused`).
+- **Merging outputs from two pods:**
+  - per-cell paths merge cleanly;
+  - files with the same name at the top level (e.g. `report.txt`) collide, so copy them per pod
+    (`exp2_eval/out/pod_reports/<model>/`);
+  - verify with sha256 over every file (`persist_eval.sh`).
+- **Watchers must match this phase's markers.** A waiter that grepped the whole log for "FAILED" fired on a failure
+  line from hours earlier.
+- **Near the end, moving work between pods rarely pays.** Model switch time plus latency-bound tails ate most of the
+  saving; we dropped the planned hand-over.
+- **Keyword measures need a control.** The no-note control showed a 7–10% false-alarm rate for "told the user" on the
+  27B.
+
 ### Process lessons (mistakes worth not repeating)
 - **Run tests and lint before every push.** Three pushes needed follow-up fixes: a registry test, and two
   long-line lint errors. One of them we piped past.
@@ -379,7 +454,8 @@ each experiment's `out/analysis/<run>/` and on HF (`sidbaines/amber-baton`, `exp
 | 10-01/02 | Experiment 2 night (incl. a pod with a hot GPU) | ~$92 |
 | 10-02/03 | Individual arm $68, 2.1 $67, continuation $67, A3B team $129 | ~$331 |
 | 10-05 | 2.1 on A3B (paused) $52; experiment 3 team $59 and individual $60 | ~$171 |
-| 10-05 | Eval session (27B pod vs4tuf5t17cvkx, A3B pod 3z5ls1fubnx5mp) | *(pending)* |
+| 10-05 | Eval session: 27B pod vs4tuf5t17cvkx (~5.8 h, $54), A3B pod 3z5ls1fubnx5mp (~3.6 h, $33) | ~$87 |
+| | **Total, 09-25 to 10-05** | **~$834** |
 
 ## 7. Open questions and next steps
 - **Experiment 3:** read transcripts to see why informed A3B followers do not apply the rule under 0/1/3 scoring.
@@ -389,7 +465,14 @@ each experiment's `out/analysis/<run>/` and on HF (`sidbaines/amber-baton`, `exp
   helped?
 - **Statistics:** all training results are one seed. The key comparisons need a second seed.
 - **The redundant-review overshoot** in the 27B team arm after step 50.
-- **Transfer and cooperation evals:** *(pending)*.
+- **From the evals:**
+  - Why do A3B followers apply new kinds of rule much less (−32 points under `far`)? Read transcripts; consider
+    training on varied rule forms.
+  - HiddenBench is the only standard eval that moved. Repeat it with more discussions (the paper used 10) and on the
+    individual-reward and 2.1 policies, to see whether the effect is specific to team reward.
+  - The harness dependence of helping (27B: relay vs Inspect) deserves a direct test: the same note and task in both
+    harnesses, varying only where the note sits and how the instructions frame shared files.
+  - Train with varied formats (wording, tool names, notes location, rule kinds), holding some back for eval.
 
 ## 8. Where things are
 - **Code:**

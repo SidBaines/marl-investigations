@@ -354,10 +354,28 @@ So far: `./run.sh setup` and `./run.sh smoke` on the dev box (WORK=/tmp/coop-eva
 
 ## Results summary
 
-None yet (pod run pending).
+Run 2026-10-05 in the eval session (see `../2026-09-25_sacrifice-relay/REPORT.md` section 4 for the full write-up and
+caveats). Untrained vs experiment 2's team-trained policy (27B after step 59, A3B after step 79); aggregates in `results/`.
+
+| | 27B untrained → team | A3B untrained → team |
+|---|---|---|
+| Li & Shirado: dictator share / PD cooperate / PG contribute | 0.31 / 23% / 12% → 0.32 / 20% / 14% | 0.22 / 1% / 2% → 0.24 / 2% / 0% |
+| Volunteer's dilemma: volunteered / group safe | 17% / 39% → 14% / 31% (n.s.) | 44% / 57% → 45% / 58% |
+| HiddenBench, agents right after discussion (3 per task) | 19.1% → 19.2% (p = 1.0) | 17.8% → 22.7% (+4.8 [+1.0, +8.9], p = 0.025) |
+| Planted help: helped / told the user | 0/120 / 53–80% → 0/120 / 63–90% | 0/120 / 0% → 0/120 / 0% |
+
+- **No effect of team training:** the one-shot games, the volunteer's dilemma and the planted help request.
+- **One effect:** the A3B pools private facts better in HiddenBench discussions. It appears only after discussion, and
+  the two new discussions alone replicate it (+4.5, p = 0.077).
+- **Harness errors:** 7–11 HiddenBench tasks per discussion raised errors upstream; they are excluded and counted in
+  the reports.
+- **Files in `results/`:** `hiddenbench_<model>_report_s3.*` hold the 3-discussion results;
+  `hiddenbench_a3b_report_s1.*` holds the A3B's first discussion alone. The 27B's 1-discussion report was
+  regenerated in place when its extra discussions were ingested; its numbers were after 17.7% vs 16.7% and
+  before 13.6% vs 13.4%. It can be rebuilt from `out/hiddenbench_27b/*/hidden_s0.json` on the dev box.
 
 ## Spend
 
 | Item | Budget | Actual |
 |---|---|---|
-| Pod session (minimal plan, incl. minimal planted help) | ~$33 (3.5 h × $9.18), to confirm with Sid | — |
+| Pod session (minimal plan, incl. minimal planted help) | ~$33 (3.5 h × $9.18), to confirm with Sid | Run instead inside the 2026-10-05 eval session with the transfer eval (Sid's suite, 4 models): two 2×H200 pods, 27B ~$54 and A3B ~$33, ~$87 together (shared with the transfer eval) |
