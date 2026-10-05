@@ -5,7 +5,7 @@ Status (2026-10-02):
   30-step continuation. See Results.
 - **Individual arm and experiment 2.1: done.** See their section.
 - **Qwen3.6-35B-A3B arm: done** (80 steps). See its section.
-- **Experiment 2.1 on Qwen3.6-35B-A3B: running** (from 2026-10-05, 80 steps). See its section.
+- **Experiment 2.1 on Qwen3.6-35B-A3B: paused after step 30** (2026-10-05, 31 of 80 steps; resumable). See its section.
 
 Part of the sacrifice-relay study (`../README.md`). Experiment 1 found that sharing the rule paid
 off for the team, and that training rewarded it, but the model did not learn to do it: reviews were
@@ -237,16 +237,55 @@ MODEL=a3b VARIANT=checks $S/run.sh train    # -> out/train_team_checks_a3b; reru
 $S/run.sh check $S/out/train_team_checks_a3b
 ```
 
-## Experiment 2.1 on Qwen3.6-35B-A3B (2026-10-05, running)
+## Experiment 2.1 on Qwen3.6-35B-A3B (2026-10-05, paused after step 30)
 
 Sid asked for experiment 2.1 on the A3B: the same design as the 27B's 2.1, with the A3B team arm's final policy as
 the frozen first contributor.
+
+**Interim results (steps 0–30, 31 steps; paused at Sid's request, 2026-10-05).** From `check.py --every 10` and
+`followers.py` (`out/analysis/train_opener_checks_a3b/`, also on HF under `exp2/analysis/`). Training health was clean:
+`kl_sample_train` ≤ 1.9e-3, IS ratio 1.000, no restarts, no abort rule. Step 30 alone (32 playthroughs) is left out of
+the table.
+
+| | Steps 0–9 | Steps 10–19 | Steps 20–29 | 27B 2.1, steps 20–29 |
+|---|---|---|---|---|
+| Team score | 0.190 | 0.212 | 0.259 | 0.152 |
+| Frozen opener reviewed (of its CI runs) | 87% (236/272) | 80% (215/269) | 84% (228/270) | 49% |
+| Opener review → contributor 2 knew the rule | 99% | 98% | 96% | 96% |
+| **Control** (knew the rule): reached CI | 61% | 65% | 72% | 70% |
+| **Control**: followed the rule | 40% | 51% | 65% | 62% |
+| **Control**: scored 1 | 32% (243/750) | 41% (271/654) | 50% (331/658) | 47% |
+| **Control**: reviewed anyway | 16% | 6% | 2% | 5% |
+| **Test** (no rule, ran CI) reviewed, after an earlier CI run | 35% (31/89) | 15% (21/144) | 6% (9/163) | 32% |
+| **Test** reviewed, no earlier CI run | 25% (12/48) | 8% (4/49) | 2% (1/49) | 16% |
+
+- **Control:** as in the 27B 2.1, contributors 2–4 who started knowing the rule got better at using it (followed it
+  40% → 65%, scored 32% → 50%) and stopped wasting reviews (16% → 2%; the untrained A3B reviews much more than the 27B).
+- **Test:** contributors who started without the rule did not learn to review; they **stopped** reviewing (35% → 6%
+  after an earlier CI run, 25% → 2% without one; the no-earlier-CI cells are small, about 49 each). Under 0/1 scoring a
+  contributor without the rule scores 0 whether it reviews or submits, so nothing rewards or punishes that choice
+  directly. The likely route is spill-over from the control cases, where a review *is* punished (it gives up the 1
+  point the notes would have earned). The 27B 2.1's test rates stayed flat over its 30 steps.
+- **The team score is higher than the 27B 2.1's** mainly because the A3B opener reviews far more often (84% vs 49%),
+  so most followers start with the rule.
+- These are 31 of the planned 80 steps; the trends had not levelled off.
+
+**Resume recipe** (same run, step 31 onwards; details in
+`/workspace/marli-orchestration/2026-10-05/CLEANUP_RECEIPT_ohobr287ciqf6r.md`): on a new 2×H200 pod at commit 2476da3
+(or any later commit whose composed config has the same hash), copy `../out/repos_n4` and this run dir from the dev box,
+download its step-30 trainer state (and adapter) from HF `exp2/train_opener_checks_a3b/`, then run the three commands
+below with the same `--out`; `train` resumes from the step-30 checkpoint.
+
+Artefacts: HF `exp2/train_opener_checks_a3b/` (31 adapters, states s9/s19/s29/s30, manifests, metrics, config);
+rollouts and the training log on the dev box only. Pod ohobr287ciqf6r: about 5.6 h, about $52, deleted.
+
+### Setup (as prepared before the run)
 - **Contributor 1 (the opener)** is a frozen copy of `out/train_team_checks_a3b` after step 79 (80 updates;
   HF `exp2/train_team_checks_a3b/adapters/sacrifice-relay-exp2-team-a3b-policy-s79-6d9c30`), served as
   `exp2-team-a3b-s79`. In that run's last 10 steps the first contributor reviewed 77% of the time.
 - **Contributors 2–4** train with individual reward (each its own 0/1 score), starting from the untrained A3B.
 - **As in the A3B team arm:** 8 repos × 4 playthroughs per step (the 27B 2.1 used 4 × 4), flat lr 4e-5, LoRA rank
-  32 on attention, linear attention and the shared expert, `local_adapter_check_tol=0.5`, the 80 steps in full.
+  32 on attention, linear attention and the shared expert, `local_adapter_check_tol=0.5`, 80 steps planned.
 - **Config:** `configs/train_opener_a3b.yaml`. Composed as `run.sh` runs it, it differs from the 27B 2.1 run's
   config only in the model, the batch, the opener adapter, the server path, the run name and the A3B's hot-load
   tolerance. From the A3B team arm's config it differs only in the reward (individual), the opener seat and the name.
@@ -385,6 +424,10 @@ Both pods are deleted. The receipts are in `/workspace/marli-orchestration/2026-
 - `r66r0di3a4vcxh`, the A3B arm (80 steps): about 14 h, about $129. Deleted.
 
 Receipts are in `/workspace/marli-orchestration/2026-10-02/`.
+
+2026-10-05, at $9.18/hr:
+- `ohobr287ciqf6r`, experiment 2.1 on the A3B (paused after step 30): about 5.6 h, about $52. Deleted; receipt in
+  `/workspace/marli-orchestration/2026-10-05/`.
 
 ## Cost estimate before the run (2×H200 SXM SECURE, $9.18/hr)
 
