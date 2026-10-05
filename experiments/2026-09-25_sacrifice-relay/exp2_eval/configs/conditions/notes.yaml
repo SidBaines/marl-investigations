@@ -1,0 +1,5 @@
+# Layer 3, moved notes file: `heldout` with the shared notes in docs/handoff.txt instead of NOTES.md. The
+# prompt names the new path; "notes had the rule" checks that file (the repo-wide "knew the rule" check
+# still counts the ID in any file, including a habitual NOTES.md).
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4/taskset.json
+env_config: {notes_path: docs/handoff.txt}

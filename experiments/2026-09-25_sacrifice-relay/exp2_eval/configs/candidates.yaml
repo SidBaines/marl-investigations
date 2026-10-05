@@ -1,0 +1,15 @@
+# Held-out candidate problems (layer 1), built on the dev box: `run.sh candidates`.
+# - deepcoder_no_lcb: DeepCoder train without its LiveCodeBench subset (primeintellect + taco).
+# - exclude (run.sh passes it; EXCLUDE=... overrides): experiment 1's 800 candidates, i.e. every
+#   problem the filter or training ever saw, by normalised problem text.
+# - ngram_exclude 30 also drops near-duplicates: problems sharing any 30-word run with one of those
+#   800. A probe build without it (2026-10-05) found 51 of 800 new candidates with a 5-gram Jaccard
+#   >= 0.5 to an old one (11 to one of the 207 trained problems): the same problem reformatted in
+#   another subset. Shorter runs hit boilerplate (20 words: 571 of 800, e.g. PrimeIntellect's fixed
+#   prompt wrapper), so 30 is the shortest length that only catches real overlaps.
+# - 800 problems, shuffled with seed 0, as the original candidates; the original filter kept 26%.
+source: deepcoder_no_lcb
+max_n: 800
+shuffle: true
+seed: 0
+ngram_exclude: 30

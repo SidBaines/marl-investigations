@@ -1,0 +1,3 @@
+# Layer 1, new repos in the same format: held-out DeepCoder problems that passed the same difficulty
+# filter, grouped 4 per repo, training rule forms (header, constant, docstring). Reference for layers 2-3.
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4/taskset.json

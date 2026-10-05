@@ -1,0 +1,7 @@
+# Layer 3, three contributors: the held-out problems regrouped 3 per repo. The prompt never states the
+# count (announce_position false), so only the game changes. Same per-contributor budget, episode limits
+# scaled to 3 contributors (training's 4: 49,152 tokens, 200 ticks, 5,400 s).
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n3/taskset.json
+protocol: relay_n3
+limits:
+  episode: {max_gen_tokens: 36864, max_ticks: 150, max_wall_s: 4050}

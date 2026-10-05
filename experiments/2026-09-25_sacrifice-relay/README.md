@@ -8,6 +8,10 @@ started.
 and one factual sentence about the checks. Team training taught contributor 1 to review: 17% → 52%. The team score
 doubled.
 
+**Transfer eval prepared (2026-10-05, not run)**: `exp2_eval/README.md`. Did experiment 2's policies learn to find,
+share and use the rule, or the exact training format? New repos, new kinds of rule and a changed surface, against the
+untrained models on the same games.
+
 ## Question
 
 A shared repo is worked on by several agents in turn. Each agent can score on
