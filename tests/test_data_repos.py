@@ -193,6 +193,11 @@ def test_cli_round_trip_idempotency_and_schema(
         assert TaskSet.load(payload["manifest"]).answer_format == "code_repo"
     config = compose(DataReposConfig, overrides=[f"tasks={source.root}", "rule_families=[header]"])
     assert list(config.rule_families) == ["header"]
+    held_out = ["footer", "function", "class_attr"]
+    overrides = [f"tasks={source.root}", f"rule_families={held_out}"]
+    config = compose(DataReposConfig, overrides=overrides)
+    assert list(config.rule_families) == held_out
+    assert DataReposConfig(tasks="unused").rule_families == ("header", "constant", "docstring")
     with pytest.raises(ValueError, match="typo"):
         compose(DataReposConfig, overrides=[f"tasks={source.root}", "typo=1"])
 
@@ -214,6 +219,7 @@ def test_cli_round_trip_idempotency_and_schema(
         {"rule_prob": True},
         {"rule_families": ()},
         {"rule_families": ("typo",)},
+        {"rule_families": ("footer", "typo")},
     ],
 )
 def test_invalid_config(config: dict[str, Any]) -> None:
