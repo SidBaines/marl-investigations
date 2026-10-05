@@ -1,0 +1,6 @@
+suite: li_shirado_games
+baseline: base
+cells:
+  - {label: base, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_a3b/server.json#qwen3_6_35b_a3b"}
+  - {label: team_s79, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_a3b/server.json#a3b_team_s79"}
+  - {label: exp21, policy: "vllm:@experiments/2026-10-05_coop-evals/out/serve_a3b/server.json#a3b_exp21"}

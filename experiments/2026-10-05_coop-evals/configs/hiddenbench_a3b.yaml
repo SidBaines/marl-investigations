@@ -1,0 +1,11 @@
+# HiddenBench (upstream, pinned) on the a3b: cells are seat assignments; run.sh runs the
+# harness for each cell (results under out/), this config ingests them. Mixed cells rotate
+# the seat list by session, so every position is played; focal = the odd one out.
+suite: hiddenbench
+baseline: base
+cells:
+  - {label: base, results: experiments/2026-10-05_coop-evals/out/hiddenbench_a3b/base, seats: [qwen3_6_35b_a3b, qwen3_6_35b_a3b, qwen3_6_35b_a3b, qwen3_6_35b_a3b], focal: qwen3_6_35b_a3b}
+  - {label: team_s79, results: experiments/2026-10-05_coop-evals/out/hiddenbench_a3b/team_s79, seats: [a3b_team_s79, a3b_team_s79, a3b_team_s79, a3b_team_s79], focal: a3b_team_s79}
+  - {label: exp21, results: experiments/2026-10-05_coop-evals/out/hiddenbench_a3b/exp21, seats: [a3b_exp21, a3b_exp21, a3b_exp21, a3b_exp21], focal: a3b_exp21}
+  - {label: mixed_team1, results: experiments/2026-10-05_coop-evals/out/hiddenbench_a3b/mixed_team1, seats: [a3b_team_s79, qwen3_6_35b_a3b, qwen3_6_35b_a3b, qwen3_6_35b_a3b], focal: a3b_team_s79}
+  - {label: mixed_base1, results: experiments/2026-10-05_coop-evals/out/hiddenbench_a3b/mixed_base1, seats: [qwen3_6_35b_a3b, a3b_team_s79, a3b_team_s79, a3b_team_s79], focal: qwen3_6_35b_a3b}

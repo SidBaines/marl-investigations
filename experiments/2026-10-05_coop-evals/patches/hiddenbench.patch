@@ -1,0 +1,208 @@
+diff --git a/src/hiddenbench/cli.py b/src/hiddenbench/cli.py
+index 8507c5a..57cfbbb 100644
+--- a/src/hiddenbench/cli.py
++++ b/src/hiddenbench/cli.py
+@@ -66,15 +66,23 @@ def cmd_inspect(args: argparse.Namespace) -> int:
+ 
+ def cmd_eval(args: argparse.Namespace) -> int:
+     benchmark = _load_benchmark_from_args(args)
+-    client = build_model_client(
+-        provider=args.provider,
+-        model=args.model,
+-        api_key=args.api_key,
+-        api_key_env=args.api_key_env,
+-        base_url=args.base_url,
+-        temperature=args.temperature,
+-        max_retries=args.max_retries,
+-    )
++    request_kwargs = json.loads(args.request_kwargs)
++
++    def client_for(model: str):
++        return build_model_client(
++            provider=args.provider,
++            model=model,
++            api_key=args.api_key,
++            api_key_env=args.api_key_env,
++            base_url=args.base_url,
++            temperature=args.temperature,
++            max_retries=args.max_retries,
++            request_kwargs=request_kwargs,
++        )
++
++    client = client_for(args.model)
++    seat_models = args.seat_models.split(",") if args.seat_models else None
++    seat_clients = [client_for(model) for model in seat_models] if seat_models else None
+ 
+     def report_progress(completed: int, total: int, run: dict) -> None:
+         print(f"[{completed}/{total}] {run['scenario']} ({run['profile']})")
+@@ -90,6 +98,12 @@ def cmd_eval(args: argparse.Namespace) -> int:
+         extra_prompt=args.extra_prompt,
+         special_agent_ratio=args.special_agent_ratio,
+         progress_callback=report_progress,
++        seat_clients=seat_clients,
++    )
++    results["metadata"].update(
++        seat_models=seat_models,
++        request_kwargs=request_kwargs,
++        temperature=args.temperature,
+     )
+     output_path = Path(args.output)
+     output_path.parent.mkdir(parents=True, exist_ok=True)
+@@ -156,6 +170,9 @@ def build_parser() -> argparse.ArgumentParser:
+     eval_parser.add_argument("--extra-prompt", default="")
+     eval_parser.add_argument("--special-agent-ratio", type=float, default=1.0)
+     eval_parser.add_argument("--output", required=True)
++    # marli patch: one model name per seat (Person 1..N) and extra request fields.
++    eval_parser.add_argument("--seat-models", help="Comma-separated model names, one per seat.")
++    eval_parser.add_argument("--request-kwargs", default="{}", help="JSON object merged into every request.")
+     eval_parser.set_defaults(func=cmd_eval)
+ 
+     score_parser = subparsers.add_parser("score", help="Score an evaluation output JSON file.")
+diff --git a/src/hiddenbench/models.py b/src/hiddenbench/models.py
+index 65711b3..8f038d5 100644
+--- a/src/hiddenbench/models.py
++++ b/src/hiddenbench/models.py
+@@ -90,6 +90,7 @@ class OpenAICompatibleClient:
+         temperature: float | None = None,
+         max_retries: int = 3,
+         timeout: float | None = None,
++        request_kwargs: dict[str, Any] | None = None,
+     ) -> None:
+         load_dotenv()
+         try:
+@@ -115,12 +116,15 @@ class OpenAICompatibleClient:
+         self.provider = provider
+         self.temperature = temperature
+         self.max_retries = max_retries
++        # marli patch: extra request fields (e.g. top_p, extra_body) sent with every call.
++        self.request_kwargs = dict(request_kwargs or {})
+ 
+     def _completion(self, messages: list[Message], response_format: dict[str, Any] | None = None) -> str:
+         last_error: Exception | None = None
+         for attempt in range(self.max_retries):
+             try:
+                 kwargs: dict[str, Any] = {
++                    **self.request_kwargs,
+                     "model": self.model_name,
+                     "messages": messages,
+                 }
+@@ -157,6 +161,7 @@ def build_model_client(
+     base_url: str | None = None,
+     temperature: float | None = None,
+     max_retries: int = 3,
++    request_kwargs: dict[str, Any] | None = None,
+ ) -> ModelClient:
+     if provider == "openai-compatible":
+         if not base_url:
+@@ -169,6 +174,7 @@ def build_model_client(
+             base_url=base_url,
+             temperature=temperature,
+             max_retries=max_retries,
++            request_kwargs=request_kwargs,
+         )
+     if provider not in PROVIDER_DEFAULTS:
+         raise ValueError(f"Unsupported provider {provider!r}. Use one of {sorted(PROVIDER_DEFAULTS)} or openai-compatible.")
+@@ -180,4 +186,5 @@ def build_model_client(
+         base_url=base_url,
+         temperature=temperature,
+         max_retries=max_retries,
++        request_kwargs=request_kwargs,
+     )
+diff --git a/src/hiddenbench/simulator.py b/src/hiddenbench/simulator.py
+index a214ab4..d6deb56 100644
+--- a/src/hiddenbench/simulator.py
++++ b/src/hiddenbench/simulator.py
+@@ -83,11 +83,14 @@ def instantiate_agents(
+     *,
+     extra_prompt: str = "",
+     special_agent_ratio: float = 1.0,
++    seat_clients: list[ModelClient] | None = None,
+ ) -> tuple[list[AgentState], list[dict[str, Any]]]:
+     profile = Profile(profile)
+     hidden_info = list(task.hidden_information)
+     rng.shuffle(hidden_info)
+     num_agents = len(hidden_info)
++    if seat_clients is not None and len(seat_clients) != num_agents:
++        raise ValueError(f"{len(seat_clients)} seat models for a {num_agents}-agent task")
+     num_special_agents = min(num_agents, math.ceil(num_agents * special_agent_ratio))
+     special_indices = set(rng.sample(range(num_agents), num_special_agents)) if num_special_agents else set()
+ 
+@@ -112,7 +115,7 @@ def instantiate_agents(
+         )
+         agent = AgentState(
+             name=f"Person {index + 1}",
+-            model_client=model_client,
++            model_client=seat_clients[index] if seat_clients is not None else model_client,
+             history=[{"role": "system", "content": system_prompt}],
+             is_special=index in special_indices,
+         )
+@@ -195,6 +198,7 @@ def run_scenario(
+     extra_prompt: str = "",
+     special_agent_ratio: float = 1.0,
+     final_vote_scope: str = "last_round",
++    seat_clients: list[ModelClient] | None = None,
+ ) -> dict[str, Any]:
+     if rounds < 1:
+         raise ValueError("rounds must be at least 1")
+@@ -212,6 +216,7 @@ def run_scenario(
+         rng,
+         extra_prompt=extra_prompt,
+         special_agent_ratio=special_agent_ratio,
++        seat_clients=seat_clients,
+     )
+ 
+     run_data: dict[str, Any] = {
+@@ -231,6 +236,7 @@ def run_scenario(
+         "majority_vote": None,
+         "timestamp": datetime.now(timezone.utc).isoformat(),
+         "seed": seed,
++        "seat_models": [agent.model_client.model_name for agent in agents],
+     }
+ 
+     initial_vote_prompt = render_prompt(
+@@ -321,6 +327,7 @@ def run_evaluation(
+     extra_prompt: str = "",
+     special_agent_ratio: float = 1.0,
+     progress_callback: Callable[[int, int, dict[str, Any]], None] | None = None,
++    seat_clients: list[ModelClient] | None = None,
+ ) -> dict[str, Any]:
+     profile = Profile(profile)
+     prompt_set = prompts or load_prompts()
+@@ -343,16 +350,27 @@ def run_evaluation(
+ 
+     def run_job(job: tuple[int, int, BenchmarkTask]) -> dict[str, Any]:
+         task_index, duplication_index, task = job
+-        return run_scenario(
+-            task,
+-            model_client,
+-            profile,
+-            prompt_set,
+-            rounds=rounds,
+-            seed=_scenario_seed(seed, task_index, duplication_index),
+-            extra_prompt=extra_prompt,
+-            special_agent_ratio=special_agent_ratio,
+-        )
++        scenario_seed = _scenario_seed(seed, task_index, duplication_index)
++        try:
++            return run_scenario(
++                task,
++                model_client,
++                profile,
++                prompt_set,
++                rounds=rounds,
++                seed=scenario_seed,
++                extra_prompt=extra_prompt,
++                special_agent_ratio=special_agent_ratio,
++                seat_clients=seat_clients,
++            )
++        except Exception as exc:  # marli patch: one failed scenario must not discard the rest
++            return {
++                "task_id": task.id,
++                "scenario": task.name,
++                "profile": profile.value,
++                "seed": scenario_seed,
++                "error": f"{type(exc).__name__}: {exc}",
++            }
+ 
+     if max_workers <= 1:
+         sequential_runs = []

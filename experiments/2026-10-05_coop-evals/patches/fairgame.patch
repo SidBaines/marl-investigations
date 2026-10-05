@@ -1,0 +1,58 @@
+diff --git a/src/game/game_round.py b/src/game/game_round.py
+index 4b8b240..171260d 100644
+--- a/src/game/game_round.py
++++ b/src/game/game_round.py
+@@ -2,6 +2,7 @@
+ 
+ from __future__ import annotations
+ 
++import json
+ import os
+ import re
+ from typing import Any
+@@ -520,6 +521,21 @@ class GameRound:
+                 logger.debug("Agent %s raw response: %s", agent.name, response)
+                 strategy_key = self._match_strategy(response)
+                 if strategy_key is None:
++                    # marli patch: count unmatched replies (FAIRGAME re-asks up to
++                    # FAIRGAME_STRATEGY_MAX_ATTEMPTS times) in FAIRGAME_PARSE_FAILURE_LOG.
++                    log = os.getenv("FAIRGAME_PARSE_FAILURE_LOG")
++                    if log:
++                        with open(log, "a", encoding="utf-8") as stream:
++                            stream.write(
++                                json.dumps(
++                                    {
++                                        "agent": agent.name,
++                                        "round": self.round_number,
++                                        "reply_chars": len(response),
++                                    }
++                                )
++                                + "\n"
++                            )
+                     raise ValueError(f"No matching strategy in response from agent {agent.name!r}.")
+                 agent.add_strategy(self.game.payoff_matrix.strategies[strategy_key])
+                 return strategy_key
+diff --git a/src/llm_connectors/litellm_connector.py b/src/llm_connectors/litellm_connector.py
+index afbbebe..fa0b6a2 100644
+--- a/src/llm_connectors/litellm_connector.py
++++ b/src/llm_connectors/litellm_connector.py
+@@ -13,6 +13,9 @@ The retry / rate-limit / throttle / logging machinery lives in
+ 
+ from __future__ import annotations
+ 
++import json
++import os
++
+ from litellm import completion
+ from litellm.exceptions import (
+     APIConnectionError,
+@@ -60,6 +63,9 @@ class LiteLLMConnector(AbstractConnector):
+             kwargs["max_tokens"] = self.max_tokens
+         if self.temperature is not None:
+             kwargs["temperature"] = self.temperature
++        # marli patch: extra request fields (top_p, extra_body with top_k and
++        # chat_template_kwargs, ...) for every call, from FAIRGAME_LITELLM_KWARGS (JSON).
++        kwargs.update(json.loads(os.environ.get("FAIRGAME_LITELLM_KWARGS") or "{}"))
+         response = completion(**kwargs)
+         content = response.choices[0].message.content
+         if not content:
