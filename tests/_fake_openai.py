@@ -19,7 +19,8 @@ from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-Reply = Callable[[str, list[dict[str, Any]]], tuple[str, str | None]]
+# (content, reasoning), or a whole assistant message dict (e.g. with tool_calls).
+Reply = Callable[[str, list[dict[str, Any]]], Any]
 
 
 def scripted_reply(cooperative: bool) -> Reply:
@@ -113,10 +114,16 @@ class FakeOpenAIServer:
                 if model not in server.models:
                     self._send(404, {"error": {"message": f"model {model!r} not served"}})
                     return
-                content, reasoning = server.models[model](model, body.get("messages", []))
-                message: dict[str, Any] = {"role": "assistant", "content": content}
-                if reasoning is not None:
-                    message["reasoning_content"] = reasoning
+                reply = server.models[model](model, body.get("messages", []))
+                finish = "stop"
+                if isinstance(reply, dict):  # a full assistant message, e.g. with tool calls
+                    message: dict[str, Any] = reply
+                    finish = "tool_calls" if reply.get("tool_calls") else "stop"
+                else:
+                    content, reasoning = reply
+                    message = {"role": "assistant", "content": content}
+                    if reasoning is not None:
+                        message["reasoning_content"] = reasoning
                 self._send(
                     200,
                     {
@@ -124,7 +131,7 @@ class FakeOpenAIServer:
                         "object": "chat.completion",
                         "created": 0,
                         "model": model,
-                        "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
+                        "choices": [{"index": 0, "message": message, "finish_reason": finish}],
                         "usage": {
                             "prompt_tokens": 10,
                             "completion_tokens": 5,
@@ -156,12 +163,21 @@ if __name__ == "__main__":
     parser.add_argument("--cooperative", default="base-model,team-adapter")
     parser.add_argument("--selfish", default="selfish-adapter")
     parser.add_argument("--log", help="append every request body to this JSONL file")
+    parser.add_argument(
+        "--players", default="", help="name=style,... scripted coding agents (_scripted_agent.py)"
+    )
     args = parser.parse_args()
     served: dict[str, Reply] = {}
     for name in filter(None, args.cooperative.split(",")):
         served[name] = scripted_reply(True)
     for name in filter(None, args.selfish.split(",")):
         served[name] = scripted_reply(False)
+    if args.players:
+        from _scripted_agent import openai_player
+
+        for entry in args.players.split(","):
+            name, style = entry.split("=")
+            served[name] = openai_player(style)
     with FakeOpenAIServer(served, port=args.port, log=args.log) as fake:
         print(f"fake OpenAI server at {fake.base_url}/v1 serving {sorted(served)}", flush=True)
         threading.Event().wait()

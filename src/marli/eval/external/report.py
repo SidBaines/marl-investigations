@@ -30,12 +30,14 @@ RESAMPLES = 2000
 PERMUTATIONS = 10000
 
 
-def _by_sample(rows: list[dict[str, Any]], metric: str) -> dict[str, list[float]]:
+def _by_sample(
+    rows: list[dict[str, Any]], metric: str, key: str = "sample"
+) -> dict[str, list[float]]:
     grouped: dict[str, list[float]] = defaultdict(list)
     for item in rows:
         value = item["metrics"].get(metric)
         if value is not None:
-            grouped[item["sample"]].append(float(value))
+            grouped[item.get(key) or item["sample"]].append(float(value))
     return dict(grouped)
 
 
@@ -133,6 +135,7 @@ def summarize(
                     "ci": None,
                     "ci_method": None,
                     "gain": None,
+                    "vs_control": None,
                 }
                 if flat:
                     low, high, method = _interval(values, spec["kind"], spec["pair"])
@@ -150,6 +153,17 @@ def summarize(
                         result["gain"] = _independent_gain(
                             flat, [v for group in base_values.values() for v in group]
                         )
+                if suite.control is not None and condition != suite.control and flat:
+                    control_rows = [
+                        item
+                        for item in rows
+                        if item["condition"] == suite.control and metric in item["metrics"]
+                    ]
+                    result["vs_control"] = _paired_gain(
+                        _by_sample(present, metric, "unit"),
+                        _by_sample(control_rows, metric, "unit"),
+                        spec["kind"],
+                    )
                 results.append(result)
     return results
 
@@ -168,8 +182,10 @@ def markdown(
         f"Source: {suite.source}. Citation: {suite.citation}",
         "",
         "| Cell | Condition | Metric | n | Unparsed | Errors | Mean [95% CI] | "
-        f"Gain vs {baseline or '—'} [95% CI] | p (test) |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        f"Gain vs {baseline or '—'} [95% CI] | p (test) |"
+        + (f" vs {suite.control} [95% CI] | p |" if suite.control else ""),
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |"
+        + (" --- | --- |" if suite.control else ""),
     ]
     for item in results:
         ci = item["ci"]
@@ -179,10 +195,19 @@ def markdown(
             f"{gain['difference']:+.3f} [{gain['low']:+.3f}, {gain['high']:+.3f}]" if gain else "—"
         )
         p_text = f"{gain['p']:.3g} ({gain['test']})" if gain else "—"
-        lines.append(
+        line = (
             f"| {item['cell']} | {item['condition']} | {item['metric']} | {item['n']} | "
             f"{item['parse_failures']} | {item['errors']} | {mean} | {gain_text} | {p_text} |"
         )
+        if suite.control:
+            contrast = item["vs_control"]
+            line += (
+                f" {contrast['difference']:+.3f} [{contrast['low']:+.3f}, {contrast['high']:+.3f}]"
+                f" | {contrast['p']:.3g} |"
+                if contrast
+                else " — | — |"
+            )
+        lines.append(line)
     lines.extend(
         [
             "",
@@ -196,6 +221,15 @@ def markdown(
             "independent difference (two-sample bootstrap, permutation p).",
         ]
     )
+    if suite.control:
+        lines.extend(
+            [
+                "",
+                f"vs {suite.control}: within each cell, the condition minus the {suite.control} "
+                "condition, paired on the same tasks (bootstrap over tasks; McNemar or "
+                "sign-flip p).",
+            ]
+        )
     if notes:
         lines.extend(["", "Notes:", *(f"- {note}" for note in notes)])
     return "\n".join(lines) + "\n"

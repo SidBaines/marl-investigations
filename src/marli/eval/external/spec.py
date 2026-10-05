@@ -11,6 +11,7 @@ Rows (what readers return, one per sample x condition)::
      "condition": str,       # e.g. game name or HiddenBench profile
      "metrics": {name: float | None},   # None = the decision could not be parsed
      "parse_failures": int,  # decisions in this row that could not be parsed
+     "unit": str | None,     # pairing unit across conditions within a cell (e.g. the task)
      "error": str | None,    # harness/model error for this sample (not a parse failure)
      "detail": {...}}        # reader-specific diagnostics, kept out of the statistics
 """
@@ -24,7 +25,8 @@ from typing import Any
 from marli.registry import Registry
 
 KINDS = ("inspect", "upstream")
-METRIC_KINDS = ("binary", "share")  # binary: 0/1 decisions; share: a fraction in [0, 1]
+# binary: 0/1 decisions; share: a fraction in [0, 1]; mean: any real value (e.g. tokens)
+METRIC_KINDS = ("binary", "share", "mean")
 PAIRINGS = ("sample", "none")  # sample: same tasks across cells; none: i.i.d. trials
 THINKING = ("on", "off")
 # Request settings a suite or run may set; anything else is a typo (unknown keys raise).
@@ -69,6 +71,9 @@ class ExternalSuite:
     generation: dict[str, Any] = field(default_factory=dict)  # the benchmark's own settings
     thinking: str = "on"
     epochs: int = 1
+    # A condition every other condition is also compared with, within each cell, paired on
+    # the rows' ``unit`` (e.g. the no-note control of a planted-note eval).
+    control: str | None = None
     # Whether benchmark task text may be committed (contamination/licence); readers and
     # reports never copy prompts or transcripts into rows either way.
     commit_text: bool = False

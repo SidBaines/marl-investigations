@@ -44,7 +44,7 @@ FG_COMMIT = "fc302a642c6f7cc0c439c2ae957a45f5954f4525"
 
 def test_registry_entries_load_and_are_listed() -> None:
     suites = SUITES.load_all()
-    assert set(suites) == {"fairgame_volunteer", "hiddenbench", "li_shirado_games"}
+    assert set(suites) == {"fairgame_volunteer", "hiddenbench", "li_shirado_games", "planted_help"}
     assert suites["hiddenbench"].source["commit"] == HB_COMMIT
     assert suites["fairgame_volunteer"].source["commit"] == FG_COMMIT
     assert suites["li_shirado_games"].task_args["trials"] == 100

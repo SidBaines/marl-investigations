@@ -21,6 +21,9 @@ from marli.eval.external.spec import ExternalSuite
 from marli.registry import FnRegistry
 
 _TASKS: FnRegistry = FnRegistry("external inspect tasks")
+# Tests only: scripted mockllm players by name (``inspect:mockllm/<name>``), each an Inspect
+# ``custom_outputs`` callable. An unregistered name uses mockllm's default reply.
+MOCK_PLAYERS: dict[str, Any] = {}
 
 
 async def run_cell(
@@ -58,7 +61,12 @@ async def run_cell(
         extra_body=request.get("extra_body"),
     )
     if endpoint.provider == "mockllm":
-        model = get_model(f"mockllm/{endpoint.model}", config=config, memoize=False)
+        players = (
+            {"custom_outputs": MOCK_PLAYERS[endpoint.model]}
+            if endpoint.model in MOCK_PLAYERS
+            else {}
+        )
+        model = get_model(f"mockllm/{endpoint.model}", config=config, memoize=False, **players)
     else:
         model = get_model(
             f"openai-api/marli/{endpoint.model}",

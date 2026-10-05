@@ -38,6 +38,7 @@ def row(
     parse_failures: int = 0,
     error: str | None = None,
     detail: dict[str, Any] | None = None,
+    unit: str | None = None,
 ) -> dict[str, Any]:
     return {
         "sample": sample,
@@ -46,6 +47,7 @@ def row(
         "parse_failures": parse_failures,
         "error": error,
         "detail": detail or {},
+        "unit": unit,
     }
 
 
@@ -71,15 +73,18 @@ def _outputs(path: Path, pattern: str) -> list[Path]:
 
 
 def inspect_log(path: Path, suite: ExternalSuite) -> ReaderResult:
-    """marli Inspect tasks: score value = metric value or "unparsed"; metadata names it.
+    """marli Inspect tasks, one score per sample, its metadata naming the condition.
 
-    ``path`` is a cell's log directory (every ``*.eval`` log in it is read).
+    The value is either one decision (a number or "unparsed"; metadata names the metric)
+    or a dict of measures (None = not applicable). A suite metric named ``output_tokens``
+    is filled from the sample's model usage. ``path`` is a cell's log directory.
     """
     from inspect_ai.log import read_eval_log
 
     rows: list[dict[str, Any]] = []
     files: dict[str, str] = {}
     harness: dict[str, Any] = {}
+    wanted = {metric["name"] for metric in suite.metrics}
     for log_path in _outputs(path, "*.eval"):
         log = read_eval_log(str(log_path))
         files[str(log_path)] = sha256_file(log_path)
@@ -105,14 +110,25 @@ def inspect_log(path: Path, suite: ExternalSuite) -> ReaderResult:
                 continue
             (score,) = sample.scores.values()
             meta = score.metadata or {}
-            value = score.value if isinstance(score.value, (int, float)) else None
+            if isinstance(score.value, dict):  # several measures per sample
+                metrics = {str(k): None if v is None else float(v) for k, v in score.value.items()}
+                unparsed = 0
+            else:  # one decision, or "unparsed"
+                value = score.value if isinstance(score.value, (int, float)) else None
+                metrics = {str(meta["metric"]): None if value is None else float(value)}
+                unparsed = int(value is None)
+            if "output_tokens" in wanted:
+                metrics["output_tokens"] = float(
+                    sum(usage.output_tokens for usage in (sample.model_usage or {}).values())
+                )
             rows.append(
                 row(
                     sample_id,
                     str(meta["condition"]),
-                    {str(meta["metric"]): None if value is None else float(value)},
-                    parse_failures=int(value is None),
+                    metrics,
+                    parse_failures=unparsed,
                     detail={"reasoning_in_content": bool(meta.get("reasoning_in_content"))},
+                    unit=meta.get("unit"),
                 )
             )
     return ReaderResult(rows, harness, files)
