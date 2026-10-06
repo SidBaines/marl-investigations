@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sacrifice relay (signs of life) on one 2xH200 pod: vLLM on GPU 0, the learner on GPU 1.
-# Runs ON THE POD from the checkout root. Phases (run one at a time; see README.md):
+# Runs ON THE POD from the checkout root. Phases (run one at a time; see EXPERIMENT_1.md):
 #   ./run.sh serve [overrides] | filter [K] | repos | gate | train <solo|relay_individual|relay_team>
 # `filter K` samples only the first K candidate problems and pauses; a later `filter` (same out dir,
 # any pod) resumes the rest without re-sampling them, then runs `data filter`.
@@ -34,7 +34,7 @@ filter)  # per-problem pass@4 of the untrained model (single agent, no house rul
 repos)  # the same filtered problems, as solo (1 per repo) and relay (4 per repo) repos
   $M data repos tasks="$OUT/pool/taskset.json" n_per_repo=1 seed=0 --out "$OUT/repos_n1"
   $M data repos tasks="$OUT/pool/taskset.json" n_per_repo=4 seed=0 --out "$OUT/repos_n4" ;;
-gate)  # base rates of the untrained model (the pre-training gate in README.md)
+gate)  # base rates of the untrained model (the pre-training gate in EXPERIMENT_1.md)
   EVAL eval_gate_n4 tasks="$OUT/repos_n4/taskset.json" --out "$OUT/gate_n4"
   EVAL eval_gate_n1 tasks="$OUT/repos_n1/taskset.json" --out "$OUT/gate_n1"
   python3 "$HERE/analyze.py" "$OUT/gate_n4"; python3 "$HERE/analyze.py" "$OUT/gate_n1" ;;

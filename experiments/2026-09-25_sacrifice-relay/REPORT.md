@@ -5,7 +5,8 @@
 This is the study-wide write-up: what we ran, what we found, and everything we learned about running it, so later
 experiments can reuse it. The per-experiment READMEs have the full tables and logs. This report summarises them and
 links to them.
-- `README.md`: experiment 1.
+- `README.md`: the short summary of the study and its results, with figures.
+- `EXPERIMENT_1.md`: experiment 1.
 - `exp2_mandatory_rule/README.md`: experiment 2, 2.1 and the A3B arms.
 - `exp3_sacrifice_a3b/README.md`: experiment 3.
 - `exp2_eval/README.md`: the transfer eval.
@@ -104,7 +105,7 @@ draws a fresh rule. The prompt text is otherwise identical in every game.
 All runs are one seed. Numbers come from `check.py`, `analyze.py`, `followers.py` and `payoff.py`; full tables are in
 each experiment's `out/analysis/<run>/` and on HF (`sidbaines/amber-baton`, `exp2/analysis/`, `exp3/analysis/`).
 
-### 3.1 Experiment 1: 27B, 0/1/3 scoring, team reward, 30 steps (`README.md`)
+### 3.1 Experiment 1: 27B, 0/1/3 scoring, team reward, 30 steps (`EXPERIMENT_1.md`)
 - **Team score:** 0.545 → 0.631 (z = 2.3), mostly from reaching CI more often (61% → 70%).
 - **Sacrifice rate** (no rule at start, ran CI): 10.6% → 7.2% (z = −1.7). Contributor 1: 3% → 2%.
 - **Payoff check:** sacrificing paid off for the team (+0.31 team score; contributor 1 +0.62), and the advantage

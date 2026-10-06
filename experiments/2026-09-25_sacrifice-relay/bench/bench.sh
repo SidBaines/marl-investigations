@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Inference + learner speed benchmark for the sacrifice relay (see README.md). Runs ON THE POD.
+# Inference + learner speed benchmark for the sacrifice relay (see EXPERIMENT_1.md). Runs ON THE POD.
 #   ./bench.sh serve <variant> [overrides]   # serve/<variant>.yaml -> out/bench/serve_<variant>, + metrics watcher
 #   ./bench.sh stop <variant>
 #   ./bench.sh load <variant> <concurrency> <n_tasks>   # throwaway single-agent code rollouts
