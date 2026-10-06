@@ -118,12 +118,26 @@ VERBS: dict[str, VerbSpec] = {
         "taskset.json",
         "Filter a taskset by pass rates from saved rollouts.",
     ),
+    "data repos": VerbSpec(
+        "data repos",
+        "marli.data.repos:repos",
+        "marli.data.repos:DataReposConfig",
+        "taskset.json",
+        "Group code problems into shared repositories with episode-sampled house rules.",
+    ),
     "eval rollout": VerbSpec(
         "eval rollout",
         "marli.eval.rollout:rollout",
         "marli.eval.rollout:RolloutConfig",
         "episodes.json",
         "Sample resumable episodes with bounded concurrency and a spend guard.",
+    ),
+    "eval continue": VerbSpec(
+        "eval continue",
+        "marli.eval.continuation:continue_episodes",
+        "marli.eval.continuation:ContinueConfig",
+        "episodes.json",
+        "Extend agents that ran out of budget in saved episodes under larger limits.",
     ),
     "eval score": VerbSpec(
         "eval score",
@@ -146,12 +160,26 @@ VERBS: dict[str, VerbSpec] = {
         "report.json",
         "Run labelled rollout/score cells and combine their compute-aware report.",
     ),
+    "eval external": VerbSpec(
+        "eval external",
+        "marli.eval.external.verb:external",
+        "marli.eval.external.verb:ExternalEvalConfig",
+        "external.json",
+        "Run a standard external eval (Inspect task or upstream harness) on served policies.",
+    ),
     "view": VerbSpec(
         "view",
         "marli.viewer.verb:view",
         "marli.viewer.verb:ViewConfig",
         "view.json",
         "Render saved multi-agent episodes as one self-contained HTML page.",
+    ),
+    "dashboard": VerbSpec(
+        "dashboard",
+        "marli.dashboard.verb:dashboard",
+        "marli.dashboard.verb:DashboardConfig",
+        "dashboard.json",
+        "Snapshot run progress (evals, training, servers, GPUs) as JSON and one HTML page.",
     ),
 }
 BUILTINS: tuple[str, ...] = ("list", "describe", "inspect", "status")

@@ -8,7 +8,7 @@ from collections import defaultdict
 from dataclasses import dataclass, replace
 from statistics import fmean
 
-from marli.config import doc_field, input_field
+from marli.config import doc_field, input_field, runtime_field
 from marli.errors import ConfigError
 from marli.eval.store import read_episodes
 from marli.handles import InputRef
@@ -29,6 +29,11 @@ class FilterConfig:
     inclusive: bool = False
     min_episodes: int = 2
     metric: str = doc_field("correct", help="system grade; max_wall_s failures count as zero")
+    allow_paused: bool = runtime_field(
+        False,
+        help="accept a rollout paused by stop_after_tasks: only its first n_tasks_sampled tasks are"
+        " candidates; the rest are dropped as unsampled (recorded in meta)",
+    )
 
     def __post_init__(self) -> None:
         if not self.tasks or not self.episodes:
@@ -39,6 +44,8 @@ class FilterConfig:
             raise ConfigError("min_episodes must be a positive integer")
         if not self.metric:
             raise ConfigError("metric must be nonempty")
+        if type(self.allow_paused) is not bool:
+            raise ConfigError("allow_paused must be a boolean")
 
 
 async def filter(cfg: FilterConfig, run: RunDir) -> TaskSet:
@@ -57,6 +64,16 @@ async def filter(cfg: FilterConfig, run: RunDir) -> TaskSet:
     task_refs = [ref for ref in recorded.get("inputs", []) if ref["kind"] == "taskset"]
     if len(task_refs) != 1 or task_refs[0]["sha256"] != taskset.sha256():
         raise ConfigError("EpisodeSet recorded TaskSet digest does not match tasks")
+    meta = recorded.get("meta", {})
+    paused = bool(meta.get("paused"))
+    if paused and not cfg.allow_paused:
+        raise ConfigError(
+            f"EpisodeSet is a paused rollout ({meta['n_tasks_sampled']} of {meta['n_tasks']} "
+            "tasks sampled); rerun eval rollout without stop_after_tasks to finish it first, "
+            "or pass allow_paused=true to filter only the sampled tasks"
+        )
+    # A paused rollout sampled the TaskSet's first n_tasks_sampled tasks, in order.
+    sampled = int(meta["n_tasks_sampled"]) if paused else len(tasks)
     grades: dict[str, list[float]] = defaultdict(list)
     ignored_non_ok = 0
     for episode in read_episodes(manifest.parent):
@@ -91,8 +108,13 @@ async def filter(cfg: FilterConfig, run: RunDir) -> TaskSet:
         "dropped_lo": 0,
         "dropped_hi": 0,
     }
+    if paused:
+        counts["dropped_unsampled"] = 0
     kept = []
-    for task in tasks:
+    for index, task in enumerate(tasks):
+        if index >= sampled:
+            counts["dropped_unsampled"] += 1
+            continue
         values = grades[task.task_id]
         if len(values) < cfg.min_episodes:
             counts["dropped_min_episodes"] += 1
@@ -106,6 +128,20 @@ async def filter(cfg: FilterConfig, run: RunDir) -> TaskSet:
             kept.append(replace(task, meta={**task.meta, "pass_rate": pass_rate}))
     counts["kept"] = len(kept)
     path = write_tasks(run.out, kept)
+    filter_meta = {
+        "lo": cfg.lo,
+        "hi": cfg.hi,
+        "inclusive": cfg.inclusive,
+        "min_episodes": cfg.min_episodes,
+        "metric": cfg.metric,
+        "counts": counts,
+        "ignored_non_ok_episodes": ignored_non_ok,
+    }
+    if paused:
+        filter_meta["paused_rollout"] = {
+            "n_tasks_sampled": sampled,
+            "n_tasks": int(meta["n_tasks"]),
+        }
     return replace(
         taskset,
         root=run.out,
@@ -113,16 +149,5 @@ async def filter(cfg: FilterConfig, run: RunDir) -> TaskSet:
         config_hash=None,
         n=len(kept),
         inputs=(InputRef.of(taskset), InputRef.from_manifest(manifest)),
-        meta={
-            **taskset.meta,
-            "filter": {
-                "lo": cfg.lo,
-                "hi": cfg.hi,
-                "inclusive": cfg.inclusive,
-                "min_episodes": cfg.min_episodes,
-                "metric": cfg.metric,
-                "counts": counts,
-                "ignored_non_ok_episodes": ignored_non_ok,
-            },
-        },
+        meta={**taskset.meta, "filter": filter_meta},
     )

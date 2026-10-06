@@ -1,0 +1,10 @@
+# Experiment 3, individual arm on Qwen3.6-35B-A3B: each contributor gets its own 0/1/3 score, so a review costs the
+# reviewer and only later contributors can gain from it. As train_team.yaml except the reward and the name.
+run_name: sacrifice-relay-exp3-individual-a3b
+protocol: relay_n4
+batch_tasks: 8
+group_size: 4
+credit: {reward_target: {contributor: individual}}
+learners:
+  policy: {base_model: qwen3_6_35b_a3b, backend: local, rank: 32, learning_rate: 4.0e-5}
+checkpoint_every: 1

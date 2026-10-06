@@ -1,0 +1,14 @@
+# Qwen3.8-27B: the model card's thinking-mode sampling (HF Qwen/Qwen3.8-27B README:
+# temperature 1.0, top_p 0.95, top_k 20, min_p 0, presence_penalty 0, repetition_penalty 1).
+# reasoning_effort=medium is what training rendered (renderer qwen3_8_medium); without it
+# the chat template's default (xhigh) adds a reasoning instruction to the system prompt.
+# max_tokens 16384 leaves room for HiddenBench's growing prompts within max_model_len 32768.
+model_generation:
+  temperature: 1.0
+  top_p: 0.95
+  top_k: 20
+  min_p: 0.0
+  presence_penalty: 0.0
+  repetition_penalty: 1.0
+  max_tokens: 16384
+  chat_template_kwargs: {reasoning_effort: medium}

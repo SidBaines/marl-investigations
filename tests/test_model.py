@@ -67,7 +67,7 @@ from marli.registry import Registry, catalog_kinds, catalog_names
             "Qwen3_5MoeForConditionalGeneration",
             65536,
             (0.54, 1.34, 1.18),
-            "no",
+            "yes",
             True,
             "qwen3_5_xml",
         ),
@@ -154,7 +154,9 @@ def test_published_model_entries(
     assert model.tinker_id == (hf_id if prices is not None else None)
     assert model.tinker_prices == (TinkerPrices(*prices, "2026-09-23") if prices else None)
     assert for_hf_id(hf_id) == model
-    if family == "qwen3_5" and local == "unverified":
+    if name == "qwen3_6_35b_a3b":
+        assert "routed experts and router frozen" in model.notes
+    elif family == "qwen3_5" and local == "unverified":
         assert model.notes == (
             "Qwen3.5 is a vision-language architecture; "
             "local LoRA support to be verified (M2 spike)"
@@ -169,11 +171,12 @@ def test_published_model_entries(
 
 def test_all_entries_load_and_tinker_subset_excludes_retired_model() -> None:
     names = list_models()
-    assert len(names) == 9
+    assert len(names) == 10
     assert names == sorted(names)
     assert [load_model(name).name for name in names] == names
+    # Not on Tinker: the retired Qwen3-4B-Instruct and Qwen3.8-27B (local only, unverified there).
     assert [model.name for model in tinker_models()] == [
-        name for name in names if name != "qwen3_4b_instruct_2507"
+        name for name in names if name not in {"qwen3_4b_instruct_2507", "qwen3_8_27b"}
     ]
 
 
@@ -383,3 +386,25 @@ def test_lora_registry_block_is_optional() -> None:
     data = asdict(load_model("qwen3_8b"))
     del data["lora"]
     assert ModelSpec(**data).lora == {}
+
+
+def test_qwen38_registry_entry() -> None:
+    from marli.render.registry import renderer_names
+
+    model = load_model("qwen3_8_27b")
+    assert model.name == MODELS.path(model.name).stem == "qwen3_8_27b"
+    assert model.hf_id == "Qwen/Qwen3.8-27B"
+    assert model.family == "qwen3_5"
+    assert model.renderer == "qwen3_8_medium"
+    assert model.renderer in renderer_names()
+    assert {"qwen3_8", "qwen3_8_medium", "qwen3_8_low", "qwen3_8_nothink"} <= set(renderer_names())
+    assert model.architecture == "Qwen3_5ForConditionalGeneration"
+    assert model.max_ctx == 32768 and model.default_max_tokens == 8192
+    assert model.thinking is True and model.tool_format == "qwen3_5_xml"
+    assert model.local == "yes"
+    assert model.tinker_id is model.tinker_max_ctx is model.tinker_prices is None
+    assert model not in tinker_models()
+    assert "262144" in model.notes
+    assert model.lora == load_model("qwen3_5_9b").lora
+    assert len(model.lora["target_modules"]) == 12
+    assert for_hf_id(model.hf_id) == ModelSpec(**asdict(model)) == model

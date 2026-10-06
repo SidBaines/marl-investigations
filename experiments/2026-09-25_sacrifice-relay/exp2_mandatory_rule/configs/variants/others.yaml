@@ -1,0 +1,3 @@
+# Prompt variant: "Other contributors also work in this repository, each on their own task."
+# (no position, no order).
+env_config: {others_note: true}

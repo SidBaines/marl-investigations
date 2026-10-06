@@ -12,8 +12,13 @@ if TYPE_CHECKING:
 ENVS = FnRegistry("envs")
 
 
-def make_env(name: str, config: dict[str, Any], task: Task) -> Env:
+def load_builtin_envs() -> None:
+    """Register built-ins once via Python's import cache, before any named lookup."""
     from marli.envs import code_fn as _code_fn  # noqa: F401
+    from marli.envs import code_rules as _code_rules  # noqa: F401
     from marli.envs import math as _math  # noqa: F401
 
+
+def make_env(name: str, config: dict[str, Any], task: Task) -> Env:
+    load_builtin_envs()
     return ENVS.get(name)(config, task)

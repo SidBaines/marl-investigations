@@ -1,0 +1,3 @@
+# Prompt variant: symmetric CI tool descriptions ("Run CI in scored mode ... / in report mode ...,
+# Uses your one CI run" for both) instead of ci_review "spending" the CI run.
+env_config: {tool_text: neutral}

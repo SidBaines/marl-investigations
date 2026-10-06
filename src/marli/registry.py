@@ -136,6 +136,7 @@ CATALOG: dict[str, str] = {
     "models": "marli.model:MODELS",
     "tasks": "marli.tasks.source:SOURCES",
     "protocols": "marli.interact.configs:PROTOCOL_CONFIGS",
+    "external_evals": "marli.eval.external.spec:SUITES",
 }
 
 

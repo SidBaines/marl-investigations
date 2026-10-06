@@ -1689,3 +1689,67 @@ async def test_role_tools_does_not_mutate_shared_environment_override(frozen: bo
         assert resolved.spec == original.spec
         assert (await resolved(ctx)).control == {"submit": "source"}
         assert original.control is False
+
+
+@pytest.mark.parametrize(
+    "tools,nudge",
+    [
+        (("end_session",), "Please use a tool to act, or call end_session when you are done."),
+        (("write_scratchpad",), "Please use a tool to act."),
+        (("submit",), "Please use a tool to act or submit your final answer."),
+        (("return_report",), "Please use a tool or call return_report with your findings."),
+    ],
+)
+async def test_no_tool_nudge_only_names_available_actions(
+    tools: tuple[str, ...], nudge: str,
+) -> None:
+    spec = spec_for(
+        {"solver0": [Turn("thinking"), Turn("still thinking")]},
+        RuntimeProtocol(tools=tools),
+        limits=Limits(max_nudges=1, on_exhaust="none"),
+    )
+    episode, _ = await run_episode(spec)
+    assert episode.ok and len(episode.calls) == 2
+    assert nudge in spec.policies["script"].calls[1].prompt_text
+
+
+@pytest.mark.parametrize("failure", ["backend", "input", "programming", "budget", "config"])
+async def test_tool_failures_preserve_runtime_error_categories(failure: str) -> None:
+    from marli.interact.tools import ToolError
+
+    error = {
+        "backend": BackendError, "input": ToolError, "programming": RuntimeError,
+        "budget": BudgetExceededError, "config": ConfigError,
+    }[failure]
+
+    class FailingTool:
+        spec = ToolSpec("fail", "Fail in a controlled way.", {"type": "object", "properties": {}})
+        shared = True
+        control = False
+
+        async def __call__(self, ctx: ToolCtx) -> ToolResult:
+            raise error("tool failure")
+
+    class ToolEnv(ScratchEnv):
+        def tools(self, role: str) -> list[FailingTool]:
+            return [FailingTool()]
+
+    spec = spec_for(
+        {"solver0": [Turn(tool_calls=(("fail", {}),)), Turn(tool_calls=(("end_session", {}),))]},
+        RuntimeProtocol(tools=("fail", "end_session")),
+        limits=Limits(on_exhaust="none"),
+    )
+    spec.env = ToolEnv()
+    if failure in {"programming", "budget", "config"}:
+        with pytest.raises(error, match="tool failure"):
+            await run_episode(spec)
+    else:
+        episode, buffers = await run_episode(spec)
+        assert episode.ok == (failure == "input")
+        assert len(episode.calls) == (2 if failure == "input" else 1)
+        assert "tool failure" in episode.calls[0].tool_calls[0].error
+        assert spec.protocol.results[0].ended_by == ("end_agent" if failure == "input" else "error")
+        if failure == "backend":
+            assert episode.errors == ("solver0: BackendError: tool failure",)
+        assert_token_buffers(episode, buffers, spec.policies["script"])
+    assert spec.env.teardown_count == 1

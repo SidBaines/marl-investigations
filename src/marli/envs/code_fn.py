@@ -94,6 +94,34 @@ _COMPILE = (
 )
 
 
+_GRADER_NOTE = "The grader provides standard-library imports; numpy is not available."
+
+
+def problem_statement(task: Task, *, workspace_instruction: str | None = None) -> str:
+    """Share the coding interface and grader capabilities across presentations.
+
+    A standalone statement includes starter code. The code_fn tool prompt uses
+    its configured workspace instructions and public-example paths instead;
+    its starter is already presented in problem.md and solution.py.
+    """
+    problem = task.prompt
+    starter = task.meta.get("starter_code") or ""
+    if workspace_instruction is None and starter:
+        problem += f"\n\nStarter code:\n```python\n{starter}\n```\n"
+    interface = (
+        f"Functional task: define {task.answer['fn_name']} as a function or Solution method."
+        if task.answer["kind"] == "functional"
+        else "Stdin task: read standard input and print the answer."
+    )
+    examples = (
+        "\n\nUse bash to test with the public examples in examples/NN.in and examples/NN.out."
+        if workspace_instruction is not None and task.answer["public"]
+        else ""
+    )
+    instruction = _GRADER_NOTE if workspace_instruction is None else workspace_instruction
+    return f"{problem}\n\n{interface}{examples}\n\n{instruction}"
+
+
 @dataclass(frozen=True)
 class CodeFnEnvConfig:
     """Eval preserves pass_frac by default; training should set stop_on_first_failure.
@@ -113,8 +141,7 @@ class CodeFnEnvConfig:
         "The shared workspace contains problem.md and solution.py. "
         "Write your Python solution in solution.py: read stdin and "
         "print stdout for stdin tasks, or define the named function (or Solution method) "
-        "for functional tasks. The grader provides standard-library imports; "
-        "numpy is not available. "
+        f"for functional tasks. {_GRADER_NOTE} "
         "When done, call submit() to save solution.py as your final submission. "
         "Only that saved source is graded; an optional answer note is ignored."
     )
@@ -334,18 +361,7 @@ class CodeFnEnv(Env):
         return self._sandbox
 
     def task_message(self, role: str) -> str:
-        interface = (
-            f"Functional task: define {self.task.answer['fn_name']} "
-            "as a function or Solution method."
-            if self.task.answer["kind"] == "functional"
-            else "Stdin task: read standard input and print the answer."
-        )
-        examples = (
-            "\n\nUse bash to test with the public examples in examples/NN.in and examples/NN.out."
-            if self.task.answer["public"]
-            else ""
-        )
-        return f"{self.task.prompt}\n\n{interface}{examples}\n\n{self.config.instruction}"
+        return problem_statement(self.task, workspace_instruction=self.config.instruction)
 
     def tools(self, role: str) -> list[Tool]:
         return [_BashTool(self.config.bash_timeout_s), _SubmitTool()]

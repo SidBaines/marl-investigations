@@ -45,7 +45,8 @@ class TaskSet(Handle):
         kind = self.meta.get("task_kind") if self.kind == self.KIND else self.kind
         if kind not in ("math", "code"):
             raise ValueError("TaskSet kind must be 'math' or 'code'")
-        formats = ("tests",) if kind == "code" else ("integer", "latex")
+        # code_repo: a bundle of code problems per task (code_rules; `marli data repos`).
+        formats = ("tests", "code_repo") if kind == "code" else ("integer", "latex")
         if self.answer_format not in formats:
             raise ValueError(f"{kind} answer_format must be one of {formats}")
         object.__setattr__(self, "kind", kind)

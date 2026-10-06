@@ -1,0 +1,14 @@
+# Everything at once: held-out repos with held-out rule forms, reworded instructions and system prompt,
+# renamed and redescribed CI tools, the moved notes file and reworded CI replies. 4 contributors.
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4_new/taskset.json
+env_config:
+  instructions: paraphrase
+  tool_names: renamed
+  tool_text: paraphrase
+  ci_replies: paraphrase
+  notes_path: docs/handoff.txt
+protocol_config:
+  env_tools: [bash, grade_solution, inspect_checks]
+  system_prompt: >-
+    You are a programmer working in a code repository that other people also use. The first message
+    tells you what to do.

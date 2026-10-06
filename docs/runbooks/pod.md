@@ -104,6 +104,62 @@ with HTTP 200 but silently ignored it. The adapter's `manifest.json` records
 the map; learner state restore reverses it. Mapping metadata does not enable
 local training for entries still marked `local: no`.
 
+### Option 2: both GPUs in both phases
+
+The split above leaves each GPU idle for half of every synchronous step:
+vLLM samples on GPU 0 while GPU 1 waits, then the learner trains on GPU 1
+while GPU 0 waits. Time sharing keeps both busy in both phases:
+
+- **Sampling:** one vLLM server, tensor-parallel over both GPUs, capped at
+  45% of each GPU's memory. The learner's model copies stay resident beside it.
+- **Training:** vLLM sleeps (weights to CPU, KV cache freed). The learner runs
+  data-parallel, with one full base copy per GPU, on token-balanced shards of
+  the batch. The shards' LoRA gradients are summed with NCCL, so the update is
+  the one-GPU update up to float rounding.
+- **Hand-off:** each rank empties its CUDA cache. vLLM wakes, and the new
+  adapter is loaded and probe-checked as usual.
+
+Serve with sleep mode (`experiments/2026-09-25_sacrifice-relay/bench/serve/tp2_mtp2_sleep.yaml`):
+
+```yaml
+model: qwen3_8_27b
+python: /opt/vllm/bin/python
+cuda_visible_devices: "0,1"
+tensor_parallel_size: 2
+gpu_memory_utilization: 0.45
+enable_sleep_mode: true        # adds --enable-sleep-mode and VLLM_SERVER_DEV_MODE=1
+max_model_len: 32768
+max_lora_rank: 32
+max_loras: 4
+learner_ranks: [32]
+extra_args: ["--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}']
+```
+
+```bash
+uv run --no-sync marli serve vllm tp2_mtp2_sleep.yaml detach=true --out runs/serve/tp2
+```
+
+Train **without** `CUDA_VISIBLE_DEVICES`: both processes see both GPUs.
+
+```bash
+uv run --no-sync marli train rl base.yaml arm.yaml tasks=... max_usd=1 \
+  local_server_json=runs/serve/tp2/server.json \
+  'local_devices=[cuda:0,cuda:1]' local_sleep_sampler=true --out runs/train/arm
+```
+
+Rank 0 runs inside the trainer on `cuda:0`. Rank 1 is a spawned worker on
+`cuda:1`; its log is `<run>/learner-ranks/rank1.log`, and its tail appears in
+any `BackendError` it causes. Both options are
+runtime-only, so they do not change a run's identity: a run may resume with or
+without them. `metrics.jsonl` gains `backend_metrics.local.{sleep_s,wake_s}`
+per step. A failed train step and `close()` both wake the server, so it is
+never left asleep.
+
+Measured on 2×H200 with Qwen3.8-27B (see the sacrifice-relay `bench/README.md`):
+- sleep: 0.7 s after the first (14 s);
+- wake: under 1 s;
+- memory: about 115 GiB used on GPU 0 with the server awake beside the learner.
+
 ## Connect training
 
 The backend factory accepts these exact kwargs:
@@ -156,6 +212,18 @@ default. The hot-load parity check still applies. gpt-oss code-tool bodies may
 be raw code with `code` or `<|constrain|>code` headers; Harmony binds non-JSON
 bodies only when the advertised tool has exactly one string parameter.
 
+Qwen3.6-35B-A3B (Qwen3.5-MoE; `local: unverified` until a pod run passes) trains
+through `Qwen3_5MoeForCausalLM` with `experts_implementation="grouped_mm"`. Its
+256 routed experts are fused 3-D parameters, so the registry's Linear targets
+reach attention, linear attention and the shared expert only; the routed
+experts and the router stay frozen (PEFT `target_parameters` adds the expert
+update into the bf16 weight on every forward, which rounds small updates away;
+gpt-oss expert LoRA showed the 6% vLLM mismatch above). Serve it with `lora_target_modules` equal to those targets so vLLM
+does not wrap the experts either; a learner whose targets the server does not
+wrap is refused. `experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/`
+has the serve config (`configs/serve_a3b.yaml`) and a pod preflight
+(`a3b_preflight.py`: memory, logprob agreement, 32k step, hot-load).
+
 The training CLI exposes `local_server_json` and `local_adapters_dir`, and
 uses the backend defaults for adapter naming and tolerance. The latter options
 are currently available through the Python backend factory above; adding CLI
@@ -189,6 +257,108 @@ Serving runs obey the shared completed-run no-op contract. A stopped server's
 manifest is therefore historical, not a request to relaunch it. Confirm stop
 first, preserve needed logs, then launch into a **new output directory**. Never
 use `--force` on a live serving directory: that would erase its ownership record.
+
+## Dashboard
+
+`marli dashboard` is a reusable live GUI for any runs: evals, training, data
+verbs, servers and GPUs. It only observes run dirs (it never takes a run's lock;
+a run counts as running while some process holds its flock, per `/proc/locks`),
+and its snapshot holds numbers, agent ids and run metadata only: never prompts,
+tool output or answers.
+
+**Per study, a small YAML** sets the title and any charts, e.g.
+`experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/dashboard.yaml`:
+`grouped` maps a grade component to a chart title (one chart per component,
+a line per agent plus the average), `agent_labels` names the agents and
+`smooth_steps` sets the rolling mean. `split_by` names a 0/1 grade component
+(e.g. `rule_known_at_start`) that splits each agent's turns by its own value:
+per other grouped component, a pair of charts (where it is 1, where it is 0,
+sharing one y-range) with a line per `split_agents` agent plus all of them
+pooled, then the same pair counting turns. Everything is a runtime setting, so
+the same `--out` can be reused.
+
+**The explorer.** With `grouped`, each train run's detail opens with one
+configurable plot. You choose which agents to draw, whether to add an average
+line and over which agents (it pools their turns, sum over sum, rather than
+averaging their lines), a `split_by` filter (all rollouts, where 1, where 0),
+and a metric for each y-axis (the right one is dashed and optional). Metrics are
+the grouped components (per agent, so the filter applies) or any whole-run
+curve, such as team grades, reward, KL or the no-signal share; the agent and
+filter choices do not apply to those. Lines pool the last `smooth_steps` steps,
+or show each step. Choices are kept per browser and survive refreshes. The data
+is `train.explore` in `snapshot.json`: per completed step, sums and counts by
+agent, side of `split_by` and grouped component, from the rollouts (numbers and
+agent ids only).
+
+**Run it where the run dirs are** (a pod, the dev box, or a laptop with
+synced copies) and leave it running; it refreshes every `watch_s` (default
+`refresh_s`, 60 s) and the open page picks up each new snapshot by itself:
+
+```bash
+uv run --no-sync marli dashboard <study>/dashboard.yaml 'roots=[<study>/out]' \
+  serve_port=8765 --out runs/dashboard
+# -> "dashboard live at http://127.0.0.1:8765/" (also in runs/dashboard/serve.json)
+```
+
+Ways to open it:
+- **Same machine, or an SSH tunnel** (`ssh -L 8765:127.0.0.1:8765 <host>`):
+  open `http://127.0.0.1:8765/`. On loopback no key is needed.
+- **A RunPod pod's HTTPS proxy, from any browser or phone:** bind every
+  interface on a port the pod exposes as `/http` (our pods expose `8888`; stop
+  Jupyter first if it holds it), e.g. `serve_host=0.0.0.0 serve_port=8888`, then
+  open `https://<pod-id>-8888.proxy.runpod.net/?key=<key>`. Off loopback every
+  request needs the access key: the logged URL carries it once, the server
+  swaps it for an HttpOnly cookie and drops it from the address bar. Set
+  `MARLI_DASHBOARD_KEY` to keep one key (and bookmark) across restarts;
+  otherwise each start makes a new random key. The key never enters a config
+  or manifest, only `serve.json` (mode 0600) and the log.
+
+Only the page and `snapshot.json` are served. `annotations=<file.json>` puts
+off-pod facts at the top (pod id, $/hr, spend). Without `serve_port`, the verb
+writes `snapshot.json`, `index.html` (an Artifact fragment) and
+`standalone.html` once, or every `watch_s` seconds. Episode files are folded
+incrementally: `cache.json` in the out dir keeps each file's offset. SIGINT or
+SIGTERM stops watching or serving and records the manifest.
+
+## Continue truncated episodes
+
+`eval continue` extends agents that ran out of budget in a saved `eval rollout`
+run, without re-sampling what already happened. It replays each selected
+episode's recorded calls exactly: tool calls run again for real to rebuild the
+sandbox, but the agent sees the recorded results. The agent that hit a limit
+then keeps generating under the new limits, and every agent after it runs
+live. The result is distributed as if the source had used the new limits from
+the start, because prompts never state the budget.
+
+Only lockstep `single`, `relay` and `multi_session` runs are supported. The
+output is a complete EpisodeSet with the same episode ids; untruncated and
+not-ok episodes are copied verbatim. `continuations.jsonl` records each
+episode's cut, replayed calls, tool-result mismatches and any divergence.
+
+The study's filter run, with the budget raised to 20,480 tokens (run from the
+checkout root, with the filter's vLLM server up):
+
+```bash
+S=experiments/2026-09-25_sacrifice-relay
+uv run --no-sync marli eval continue episodes=$S/out/filter_rollout \
+  limits.agent.max_gen_tokens=20480 limits.episode.max_gen_tokens=20480 \
+  'policies.q.ref=vllm:@'"$PWD/$S"'/out/serve/server.json#qwen3_8_27b' \
+  policies.q.renderer=qwen3_8_medium policies.q.model=qwen3_8_27b \
+  concurrency=160 max_usd=1 --out $S/out/filter_rollout_20k
+```
+
+The source must be complete (not paused). `policies` defaults to the source's,
+so the `policies.q.*` lines are needed only when the server path changed; the
+model and renderer must match the source's.
+
+For relay runs, raise `limits.episode.max_gen_tokens` to at least
+`n_agents × agent`. Relay adjusts limits and rejects a smaller episode budget.
+
+A change that would alter a replayed call is refused or detected: limits
+quoted in a system prompt, the session count, or a larger `call.max_tokens`
+where an earlier completion was cut at the cap. `on_divergence=fail` (the
+default) marks such an episode not-ok and does not retry it; `live` switches
+it to live sampling and flags it.
 
 ## Checkpoints off-pod and teardown
 

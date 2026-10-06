@@ -1,0 +1,2 @@
+# Prompt variant: tools + others + checks together.
+env_config: {tool_text: neutral, others_note: true, checks_note: true}

@@ -3,8 +3,8 @@ type: concept
 title: "Unanswered episodes: read the answered rate before accuracy"
 description: A low answered rate means accuracy is measuring a harness or budget-design failure rather than reasoning; the known cases are the multi-session nudge-strike bug (fixed in 76aa955) and debate's per-round call cap.
 resource: src/marli/interact/agent.py
-tags: [evaluation, harness, measurement, bugs, multi-session, debate]
-timestamp: 2026-09-24
+tags: [evaluation, harness, measurement, bugs, multi-session, debate, agentic-coding]
+timestamp: 2026-10-01
 ---
 
 # Unanswered episodes: read the answered rate before accuracy
@@ -69,6 +69,24 @@ AIME25 and 0.067 on HMMT25, with accuracy 0.133 [0.053, 0.297] and 0.033
 thinking models, not evidence against debate. [pilot] See
 [budget splitting](budget-splitting-truncation.md) and the
 [debate entity](../entities/protocol-debate.md).
+
+## Case 3: coding contributors who never reach CI (budget; the coding analogue)
+
+In the [code_rules relay](../entities/env-code-rules.md), a contributor who
+runs out of tokens before its one CI run scores 0, just like an unanswered
+math episode. The **reached-CI rate** is the number to read first. Regime:
+[Qwen3.8-27B](../entities/qwen3-8-27b.md) on the
+[local backend](../entities/local-backend.md), 12,288 tokens per contributor,
+at most 6,144 per call
+([experiment 1](../../sources/sacrifice-relay-experiment-1.md),
+[benchmark](../../sources/sacrifice-relay-throughput-bench.md)).
+
+- **Untrained:** 37.5% of 64 contributors never ran CI. [pilot]
+- **Under RL** (team reward, 30 steps, one seed): 61.4% reached CI in steps
+  0–9 and 70.2% in steps 20–29. That rise, not better code, drove most of the
+  team-score gain. [partial]
+
+See [token budget binding](token-budget-binding.md).
 
 ## Tensions
 

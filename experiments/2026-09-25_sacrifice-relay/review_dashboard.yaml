@@ -1,0 +1,23 @@
+# Review dashboard for the finished sacrifice-relay training runs (experiment 1's overnight trial and
+# experiment 2's runs), one page with a section per run (marli dashboard; every key is a runtime setting):
+#   uv run --no-sync marli dashboard <this file> "roots=[out/trial_team,exp2_mandatory_rule/out/train_team_checks,...]" \
+#     serve_port=8765 --out runs/review_dashboard
+# Same charts as exp2_mandatory_rule/dashboard.yaml, plus two that matter for experiment 1, where following the rule
+# was optional: a contributor scored 1 for passing the base tests and 3 for passing them with the rule followed
+# (experiment 2: 1 only for both). Both of those are counted only on ci_submit (0 otherwise), like score.
+# Per-position rates are out of all contributors at that position.
+title: Sacrifice relay, experiments 1 and 2 (finished runs)
+grouped:
+  ran_ci: Reached CI (either mode)
+  probed: Chose review
+  submitted: Chose submit
+  score: "Score (experiment 1: 0, 1 or 3; experiment 2: 0 or 1). The average line is the team score"
+  rule_known_at_start: Started knowing the rule
+  rule_met: Submitted with the rule followed
+  base_pass: Submitted passing the base tests
+agent_labels: {contrib0: 1st, contrib1: 2nd, contrib2: 3rd, contrib3: 4th}
+smooth_steps: 5
+# Split by whether the contributor started knowing the rule, for contributors 2-4 (the 1st never does).
+split_by: rule_known_at_start
+split_labels: [Started knowing the rule, Did not]
+split_agents: [contrib1, contrib2, contrib3]

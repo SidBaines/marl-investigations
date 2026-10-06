@@ -1,0 +1,9 @@
+# Held-out candidates, step 1 of 3 (`run.sh candidates`, on the dev box): a draw of 1,600 DeepCoder train
+# problems without LiveCodeBench (deepcoder_no_lcb), shuffled with seed 0 as experiment 1's candidates were,
+# minus experiment 1's 800 candidates by normalised text (run.sh passes exclude=; EXCLUDE=... overrides).
+# Step 2, overlap.py check, flags every drawn problem that repeats a used one or an earlier drawn one
+# (text, tests, source ids, meaning); 1,600 leaves room for the ~18% it removed on 2026-10-05.
+source: deepcoder_no_lcb
+max_n: 1600
+shuffle: true
+seed: 0

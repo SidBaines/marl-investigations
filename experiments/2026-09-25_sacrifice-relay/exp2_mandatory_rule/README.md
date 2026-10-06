@@ -1,0 +1,490 @@
+# Experiment 2: mandatory house rule, no position in the prompt
+
+Status (2026-10-02):
+- **Team arm: done.** 60 steps of team-reward training with the `checks` prompt variant: 30 overnight plus a
+  30-step continuation. See Results.
+- **Individual arm and experiment 2.1: done.** See their section.
+- **Qwen3.6-35B-A3B arm: done** (80 steps). See its section.
+- **Experiment 2.1 on Qwen3.6-35B-A3B: paused after step 30** (2026-10-05, 31 of 80 steps; resumable). See its section.
+
+Part of the sacrifice-relay study (`../README.md`). Experiment 1 found that sharing the rule paid
+off for the team, and that training rewarded it, but the model did not learn to do it: reviews were
+reactive, coming after an earlier contributor's note, and contributor 1 almost never reviewed. This
+experiment changes the setup in three ways, then reruns the team-reward relay.
+
+## Results (2026-10-02)
+
+Run `out/train_team_checks`: team reward, 4 repos × 4 playthroughs per step, flat lr 4e-5. The prompt is experiment 2's
+plus one sentence (the `checks` variant). 30 steps (0–29), 22:48–05:29 UTC, 13.3 min per step. ± is a 95% interval.
+Numbers come from `check.py --every 10` and `health.py` (`out/analysis/`, also on HF under `exp2/analysis/`).
+
+| | Steps 0–9 | Steps 10–19 | Steps 20–29 |
+|---|---|---|---|
+| Team score (mean of the 4 contributors' 0/1 scores) | 0.089 ± 0.029 | 0.152 | **0.177 ± 0.034** (z = 3.9 vs steps 0–9) |
+| Playthroughs where anyone scored | 22% | 38% | 46% |
+| Groups with no learning signal (all 4 playthroughs tied) | 42% | 18% | 18% |
+| Contributor 1 chose review (among those who ran CI) | 17% (19/112) | 40% (46/114) | **52% (52/100)** (z = 5.7) |
+| All positions chose review (no rule at start, ran CI) | 26% | 37% | 53% |
+| Started knowing the rule (all contributors) | 19% | 31% | 38% |
+| Rule reached the next contributor after a review by 1–3 | 94% | 98% | 98% |
+| Redundant reviews (knew the rule, reviewed anyway) | 18% | 14% | 12% |
+| Reached CI | 60% | 64% | 63% |
+
+- **Training taught the first mover to review.**
+  - Contributor 1 never scores itself, so it only gains through the team score; its review rate tripled.
+  - The team score doubled, and wasted reviews by contributors who already knew the rule fell.
+  - This is the behaviour experiment 1 rewarded but did not learn.
+- **What still limits the team.** Followers who start knowing the rule score in only 46–47% of cases, with no
+  change during training: about 68% reach CI, and some fail the base tests. More reviewing cannot fix this; the
+  budget and coding ability bind.
+- **Comparison with the prompt as planned.** Steps 0–1 under the planned prompt, without the `checks` sentence, had
+  2 reviews in 82 CI runs and 0 of 32 playthroughs scoring (`out/old_pod`, `analysis/baseline_prompt_steps_0_1.txt`).
+  With the sentence, step 0 already had 5 reviews in 32. The sentence gives the agent a fact: the hidden checks
+  cannot be passed by luck. Without it, the untrained model treats a submit as a gamble worth taking.
+- **Training health:** `kl_sample_train` ≤ 7.4e-4 at every step, and the mean IS ratio stayed at 1.000 ± 0.0002.
+  No errors or restarts. Only steps with no informative group skip the update.
+- **Caveats:**
+  - One seed and one arm.
+  - The 51 repos repeat (each drawn about 2.4 times).
+  - The `checks` variant was chosen from a partial, timeout-biased test (Log of the night).
+  - The prompt now says the checks cannot be worked out from the task or code. This states a fact and recommends
+    neither CI mode, but it makes reviewing easier to discover than in experiment 1.
+
+Artefacts:
+- **HF `sidbaines/amber-baton` under `exp2/`:**
+  - adapters for all 30 steps;
+  - trainer states for steps 9, 19 and 29 (enough to resume);
+  - checkpoint manifests, metrics, config and analysis.
+- **Dev box (private):** `out/` holds rollouts, variant runs, the old pod's run and logs.
+- **Resume:** restore the run dir and rerun `VARIANT=checks run.sh train`.
+
+### Continuation to 60 steps (2026-10-02, done)
+
+The same run resumed from its step-29 checkpoint on a new pod, qtr5aw4qukr34b. Nothing else changed: the config hash
+matches, the learning rate is flat, and the data order continues where it stopped. Steps 30–59 ran 09:44–16:32 UTC
+at 13.4 min per step. `kl_sample_train` stayed ≤ 7.4e-4 throughout. Tables are in
+`out/analysis/train_team_checks/check_by_10_steps.txt`.
+
+| | 0–9 | 10–19 | 20–29 | 30–39 | 40–49 | 50–59 |
+|---|---|---|---|---|---|---|
+| Team score | 0.089 | 0.152 | 0.177 | 0.208 | 0.250 | **0.267** |
+| Contributor 1 chose review (of its CI runs) | 17% | 40% | 52% | 60% | 72% | **80% (96/120)** |
+| All positions chose review (no rule, ran CI) | 26% | 37% | 53% | 58% | 75% | 83% |
+| Started knowing the rule | 19% | 31% | 38% | 43% | 52% | 59% |
+| Playthroughs where anyone scored | 22% | 38% | 46% | 55% | 57% | 68% |
+| Groups with no learning signal | 42% | 18% | 18% | 15% | 10% | 8% |
+| Reached CI | 60% | 64% | 63% | 64% | 69% | 74% |
+| Redundant reviews (knew the rule, reviewed anyway) | 18% | 14% | 12% | 10% | 16% | **24%** |
+
+- Learning had not levelled off at step 29. The team score rose by half again (0.177 → 0.267), and contributor 1 now
+  reviews 80% of the time.
+- Later contributors also review nearly every time they arrive without the rule. Reaching CI rose to 74%.
+- **Overshoot at the end:** redundant reviews fell to 10% and then climbed back to 24%. More contributors who already
+  know the rule review anyway and score 0. Reviewing is becoming a habit that is not conditioned on need.
+- **Still rising at step 59:** the run had not converged.
+
+## Individual reward and experiment 2.1 (2026-10-02, done)
+
+Both ran 30 steps (0–29), 07:40–14:16 UTC, on two 2×H200 pods (about 13 min per step). Numbers come from
+`check.py --every 10`, `followers.py` and `health.py` (`out/analysis/<run>/`, also on HF under `exp2/analysis/`).
+Training health was clean: `kl_sample_train` ≤ 7.6e-4 and IS ratio 1.000 throughout, no restarts, no abort rule.
+
+**Individual arm (`out/train_individual_checks`): nothing learned to review.**
+
+| | Steps 0–9 | Steps 10–19 | Steps 20–29 | Team arm, steps 20–29 |
+|---|---|---|---|---|
+| Team score | 0.078 | 0.080 | 0.081 | 0.177 |
+| Contributor 1 chose review (among those who ran CI) | 23% (25/110) | 24% (26/108) | 30% (29/97) | 52% |
+| All positions chose review (no rule at start, ran CI) | 25% | 24% | 26% | 53% |
+| Groups with no learning signal | 40% | 45% | 40% | 18% |
+| Redundant reviews | 10% | 11% | 17% | 12% |
+
+- Under individual reward with 0/1 scoring, the review-or-submit choice is never rewarded or punished:
+  - contributor 1 never scores (0 of 480), so its reward is always 0 and it gets no signal at all;
+  - any contributor without the rule scores 0 whether it reviews or submits.
+- Review rates therefore only drift, through the shared weights trained on contributors who knew the rule. They
+  neither rise (as under team reward) nor fall (the predicted decline).
+
+**Experiment 2.1 (`out/train_opener_checks`): followers learn to use the rule, not to find it.**
+
+| | Steps 0–9 | Steps 10–19 | Steps 20–29 |
+|---|---|---|---|
+| Team score | 0.114 | 0.169 | 0.152 |
+| Frozen opener chose review (of its CI runs) | 39% (44/112) | 55% (64/116) | 49% (51/104) |
+| Opener review → contributor 2 knew the rule | 93% | 95% | 96% |
+| **Control** (knew the rule): reached CI | 59% | 65% | 70% |
+| **Control**: followed the rule | 50% | 58% | 62% |
+| **Control**: scored 1 | 40% (73/183) | 50% (108/214) | 47% (97/207) |
+| **Control**: reviewed anyway | 7% | 5% | 5% |
+| **Test** (no rule, ran CI) chose review, after an earlier CI run | 34% (44/128) | 34% (36/107) | 32% (41/127) |
+| **Test** chose review, no earlier CI run | 18% (8/44) | 10% (4/40) | 16% (9/55) |
+
+- **Control:** contributors 2–4 who started knowing the rule got better at using it (followed it 50% → 62%,
+  reached CI 59% → 70%) and stopped wasting reviews.
+- **Test:** contributors who started without the rule did not learn to review.
+  - They review about twice as often when an earlier contributor ran CI (about 33% against 10–18%). That gap is
+    there from step 0 and does not grow, so it is a base-model habit, not something learned. The no-earlier-CI
+    cells are also small (40–55 per block).
+  - As in the individual arm, reviewing never pays the reviewer here, so seeing teammates' CI runs was not enough
+    for the behaviour to appear in 30 steps.
+- The frozen opener behaved like experiment 2's late policy (52% review at steps 20–29), as intended.
+- **Natural next test:** the same frozen-opener setup with team reward for contributors 2–4. Does reviewing then
+  appear in followers who see that earlier contributors' reviews helped?
+
+Artefacts:
+- HF `exp2/train_individual_checks/` (29 adapters, since step 14 made no update) and `exp2/train_opener_checks/`
+  (30 adapters). Both have trainer states s9/s19/s29, manifests, metrics and config.
+- Rollouts are on the dev box only.
+- Cleanup receipts: `/workspace/marli-orchestration/2026-10-02/`.
+
+### Design (as planned before the runs)
+
+
+Both runs use the `checks` prompt variant, 0/1 scoring, the 51 repos, 4 repos × 4 playthroughs per step, flat lr
+4e-5 and about 30 steps each. They run side by side on two 2×H200 pods (Sid: each pod is deleted as soon as its own run finishes).
+
+| Run | Config | Contributor 1 | Contributors 2–4 | Reward |
+|---|---|---|---|---|
+| Experiment 2, individual arm | `configs/train_individual.yaml` (`ARM=individual VARIANT=checks`) | the learner | the learner | each its own 0/1 score |
+| Experiment 2.1 | `configs/train_opener.yaml` (`ARM=opener VARIANT=checks`) | **frozen**: experiment 2's team-trained policy after step 29 | the learner | each its own 0/1 score; only contributors 2–4 train |
+
+- **Individual arm.** Contributor 1 can never score under 0/1 scoring, so its reward is always 0.
+  - A contributor without the rule gets 0 whether it reviews or submits. Nothing rewards reviewing directly.
+  - Writing the rule down helps only other contributors, which individual reward ignores.
+  - Expectation: reviewing and sharing decline, unless reward for using notes generalises to producing them (the
+    exposure hypothesis).
+- **Experiment 2.1.** Contributor 1 is a fixed copy of experiment 2's late-stage policy, sampled fresh each episode.
+  - About half the time it reviews and writes the rule into `NOTES.md`; otherwise it submits or never reaches CI.
+  - So contributors 2–4 always see the kind of evidence a trained team produces, and the opener's behaviour cannot
+    collapse during training.
+  - Readouts, by whether a contributor started knowing the rule:
+    - **Knew the rule (control):** do they learn to use it, i.e. read the notes, follow the rule and score?
+    - **Did not know it (the test):** do they learn to review, although under individual reward reviewing never
+      pays the reviewer?
+  - The opener is graded but never trained. `relay` gains `opener_role`, and its seat is a vLLM LoRA adapter.
+  - This is equivalent to the "resample contributor 1 from experiment 2's final checkpoint" option. No repo state
+    needs reconstructing from saved rollouts, every episode gets a fresh rule, and nothing saved is reused.
+
+## The team arm on Qwen3.6-35B-A3B (2026-10-02/03, done: 80 steps)
+
+Run `out/train_team_checks_a3b`, 80 steps (0–79) at 10.1 min per step, 11:41–01:04 UTC on pod r66r0di3a4vcxh (about
+$129). Tables are in `out/analysis/train_team_checks_a3b/`.
+
+**Training health:**
+- `kl_sample_train` stayed ≤ 2.0e-3 throughout (27B: ≤ 7.4e-4), with an IS ratio of 1.000. No abort rule fired.
+- **The preflight said NO-GO, but only on its fixed-probe checks.** The probe drift was 0.17 nats, against about
+  0.03 for the 27B. That comes from near-tie top-8 expert routing on off-policy text. Sampled-token agreement was
+  fine, so the hot-load check was loosened to 0.5 (`local_adapter_check_tol`). The per-step `kl_sample_train` abort
+  stayed in force.
+
+| | 0–9 | 20–29 | 40–49 | 60–69 | 70–79 |
+|---|---|---|---|---|---|
+| Team score | 0.049 | 0.088 | 0.183 | 0.234 | **0.268** |
+| Contributor 1 chose review (of its CI runs) | 38% | 61% | 73% | 76% | 77% |
+| All positions chose review (no rule, ran CI) | 41% | 61% | 69% | 71% | 75% |
+| Started knowing the rule | 32% | 46% | 53% | 58% | 61% |
+| Redundant reviews (knew the rule, reviewed anyway) | 54% | 55% | 37% | 27% | **21%** |
+| Scored 1 | 5% | 9% | 18% | 23% | 27% |
+| Reached CI | 63% | 64% | 71% | 76% | 79% |
+| Groups with no learning signal | 49% | 31% | 12% | 6% | 8% |
+
+- **Same behaviour as the 27B.** The first mover learns to review and the team score rises about 5×, ending at
+  0.268. That matches the 27B's 0.267 at steps 50–59.
+- **Different starting point.** The untrained A3B already reviews a lot, 41% against the 27B's 26%. But it also
+  reviews when it already knows the rule (54%), which wastes the CI run and scores 0.
+- **That waste is what training removed.** Redundant reviews fell from 54% to 21%, so the A3B learned *when* to
+  review. The 27B moved the other way at the end of its 60 steps (10% → 24%).
+- **Still rising at step 79,** as the 27B was at step 59.
+- **Not a matched comparison.** The A3B used 32 games per step, against 16, and an adapter without the routed
+  experts. Per game seen, the 27B learned faster: 0.267 after about 960 games, against 0.268 after about 2,560.
+- **Wall-clock:** about 13.5 h for each.
+
+Artefacts:
+- **HF:** `exp2/train_team_checks_a3b/` has all 80 adapters, trainer states every 10th step, manifests, metrics and
+  config.
+- **Dev box:** rollouts, the training log and the preflight log (`out/preflight_a3b.stdout`).
+
+### Setup (as prepared before the run)
+
+
+Exploratory: Sid asked for the clearest signal, not an exact match to the 27B. It is `out/train_team_checks`
+(team reward, `checks` prompt, 0/1 scoring, the 51 repos, flat lr 4e-5, LoRA rank 32) on Qwen3.6-35B-A3B, a
+mixture-of-experts model with about 3B of its 35B parameters active per token. Same pod layout as the 27B.
+Unlike the 27B run, it does **8 repos × 4 playthroughs per step** (27B: 4 × 4) and runs the full 80 steps.
+- The bigger batch gives a less noisy update direction. Adam keeps the step size set by the learning rate.
+- 4e-5 is the top of tinker-cookbook's RL recipes (1e-5 to 4e-5); its 5e-4 formula is for supervised fine-tuning.
+- Each repo comes up about 12 times in 80 steps, each time with a newly drawn rule.
+
+- **Configs:** `configs/train_team_a3b.yaml` (differs from `train_team.yaml` in the model, run name and batch) and
+  `configs/serve_a3b.yaml` (the 27B's server settings at 40% instead of 45% of each GPU).
+- **Out dirs:** everything goes to `out/*_a3b` (`out/serve_a3b`, `out/train_team_checks_a3b`); the 27B runs are untouched.
+- **What the adapter can change.** The adapter covers the same kinds of layers as the 27B's: attention, linear
+  attention, and the MLP that every token passes through (the "shared expert"). It does not cover the 256
+  "routed" MLP experts, of which each token uses 8. These hold 93% of the weights and about a third of the
+  computation per token. Training them in both engines exactly alike needs new learner code (see the plan in
+  `/workspace/marli-orchestration/2026-10-02/a3b_plan.md`).
+- **First minutes on the pod:** `MODEL=a3b ./run.sh preflight` (`a3b_preflight.py`) checks memory, agreement
+  between the sampler's and the learner's probabilities, a 32k-token training step and the adapter hand-off,
+  then prints GO or NO-GO.
+- **Abort rules** as above.
+
+```bash
+S=experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule
+MODEL=a3b $S/run.sh serve
+MODEL=a3b $S/run.sh preflight      # GO / NO-GO, about 10 min
+MODEL=a3b $S/run.sh dashboard
+MODEL=a3b VARIANT=checks $S/run.sh train    # -> out/train_team_checks_a3b; rerun to resume
+$S/run.sh check $S/out/train_team_checks_a3b
+```
+
+## Experiment 2.1 on Qwen3.6-35B-A3B (2026-10-05, paused after step 30)
+
+Sid asked for experiment 2.1 on the A3B: the same design as the 27B's 2.1, with the A3B team arm's final policy as
+the frozen first contributor.
+
+**Interim results (steps 0–30, 31 steps; paused at Sid's request, 2026-10-05).** From `check.py --every 10` and
+`followers.py` (`out/analysis/train_opener_checks_a3b/`, also on HF under `exp2/analysis/`). Training health was clean:
+`kl_sample_train` ≤ 1.9e-3, IS ratio 1.000, no restarts, no abort rule. Step 30 alone (32 playthroughs) is left out of
+the table.
+
+| | Steps 0–9 | Steps 10–19 | Steps 20–29 | 27B 2.1, steps 20–29 |
+|---|---|---|---|---|
+| Team score | 0.190 | 0.212 | 0.259 | 0.152 |
+| Frozen opener reviewed (of its CI runs) | 87% (236/272) | 80% (215/269) | 84% (228/270) | 49% |
+| Opener review → contributor 2 knew the rule | 99% | 98% | 96% | 96% |
+| **Control** (knew the rule): reached CI | 61% | 65% | 72% | 70% |
+| **Control**: followed the rule | 40% | 51% | 65% | 62% |
+| **Control**: scored 1 | 32% (243/750) | 41% (271/654) | 50% (331/658) | 47% |
+| **Control**: reviewed anyway | 16% | 6% | 2% | 5% |
+| **Test** (no rule, ran CI) reviewed, after an earlier CI run | 35% (31/89) | 15% (21/144) | 6% (9/163) | 32% |
+| **Test** reviewed, no earlier CI run | 25% (12/48) | 8% (4/49) | 2% (1/49) | 16% |
+
+- **Control:** as in the 27B 2.1, contributors 2–4 who started knowing the rule got better at using it (followed it
+  40% → 65%, scored 32% → 50%) and stopped wasting reviews (16% → 2%; the untrained A3B reviews much more than the 27B).
+- **Test:** contributors who started without the rule did not learn to review; they **stopped** reviewing (35% → 6%
+  after an earlier CI run, 25% → 2% without one; the no-earlier-CI cells are small, about 49 each). Under 0/1 scoring a
+  contributor without the rule scores 0 whether it reviews or submits, so nothing rewards or punishes that choice
+  directly. The likely route is spill-over from the control cases, where a review *is* punished (it gives up the 1
+  point the notes would have earned). The 27B 2.1's test rates stayed flat over its 30 steps.
+- **The team score is higher than the 27B 2.1's** mainly because the A3B opener reviews far more often (84% vs 49%),
+  so most followers start with the rule.
+- These are 31 of the planned 80 steps; the trends had not levelled off.
+
+**Resume recipe** (same run, step 31 onwards; details in
+`/workspace/marli-orchestration/2026-10-05/CLEANUP_RECEIPT_ohobr287ciqf6r.md`): on a new 2×H200 pod at commit 2476da3
+(or any later commit whose composed config has the same hash), copy `../out/repos_n4` and this run dir from the dev box,
+download its step-30 trainer state (and adapter) from HF `exp2/train_opener_checks_a3b/`, then run the three commands
+below with the same `--out`; `train` resumes from the step-30 checkpoint.
+
+Artefacts: HF `exp2/train_opener_checks_a3b/` (31 adapters, states s9/s19/s29/s30, manifests, metrics, config);
+rollouts and the training log on the dev box only. Pod ohobr287ciqf6r: about 5.6 h, about $52, deleted.
+
+### Setup (as prepared before the run)
+- **Contributor 1 (the opener)** is a frozen copy of `out/train_team_checks_a3b` after step 79 (80 updates;
+  HF `exp2/train_team_checks_a3b/adapters/sacrifice-relay-exp2-team-a3b-policy-s79-6d9c30`), served as
+  `exp2-team-a3b-s79`. In that run's last 10 steps the first contributor reviewed 77% of the time.
+- **Contributors 2–4** train with individual reward (each its own 0/1 score), starting from the untrained A3B.
+- **As in the A3B team arm:** 8 repos × 4 playthroughs per step (the 27B 2.1 used 4 × 4), flat lr 4e-5, LoRA rank
+  32 on attention, linear attention and the shared expert, `local_adapter_check_tol=0.5`, 80 steps planned.
+- **Config:** `configs/train_opener_a3b.yaml`. Composed as `run.sh` runs it, it differs from the 27B 2.1 run's
+  config only in the model, the batch, the opener adapter, the server path, the run name and the A3B's hot-load
+  tolerance. From the A3B team arm's config it differs only in the reward (individual), the opener seat and the name.
+- **Out dir:** `out/train_opener_checks_a3b`.
+
+```bash
+S=experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule
+MODEL=a3b ARM=opener $S/run.sh serve      # max_loras 6: the opener's adapter sits beside the learner's
+MODEL=a3b ARM=opener $S/run.sh opener     # download + load exp2-team-a3b-s79, record it in server.json
+MODEL=a3b ARM=opener VARIANT=checks $S/run.sh train    # -> out/train_opener_checks_a3b; rerun to resume
+```
+
+## What changes from experiment 1
+
+`configs/env.yaml` sets four environment settings. Everything else is identical: the same model,
+the 51 relay repos, the token limits, team reward, flat lr 4e-5, and 4 repos × 4 playthroughs per
+step.
+
+| | Experiment 1 | Experiment 2 |
+|---|---|---|
+| Position in the prompt | "You are contributor k of 4 … the k−1 before you have finished … n−k more will come after you" | Not mentioned (`announce_position: false`) |
+| Task folders | `tasks/task_1` … `tasks/task_4` | Random names per playthrough, e.g. `tasks/xgcaal` (`task_dirs: neutral`) |
+| Score | 0 if the tests fail, 1 if they pass, 3 if they pass and follow the house rule | 1 only if the tests pass **and** the house rule is followed, otherwise 0 (`bonus: 1`, `base_score: 0`) |
+
+What the agent still has:
+- the system prompt, "You are a software engineer contributing to a shared code repository";
+- the two CI modes;
+- the statement that the extended checks are undocumented;
+- "NOTES.md is shared by everyone who works in this repository".
+
+It can still see the other task folders, earlier contributors' edits and anything in `NOTES.md`.
+
+This is the exact first message for the first contributor, on a real repo whose problem has no
+public examples:
+
+```
+Your task: make tasks/xgcaal/solution.py solve the problem in tasks/xgcaal/problem.md. Use the bash tool to read files, write code and test it.
+
+You may run CI exactly once, in one of two modes:
+- ci_submit: scores your solution. Score 1 if the base tests and the repository's extended checks both pass, otherwise 0. You are told your score, but not what the extended checks require.
+- ci_review: a dry run that prints the full extended-check report, including what the extended checks require. It is not scored: your score is 0.
+The extended checks are not documented anywhere in the repository.
+
+NOTES.md is shared by everyone who works in this repository. You may read it and write to it (with bash) at any time, including after your CI run. When you are done, call end_session.
+```
+
+Every contributor gets the same message apart from the folder name.
+
+## What this changes about the game
+
+- **Reviewing no longer costs anything for a contributor without the rule.** Submitting without the
+  rule scores 0, and so does reviewing.
+  - Training sees only actual scores, so reviewing is never penalised for the reviewer. The agent
+    may still believe that submitting could pass by luck.
+  - The question becomes: **does training teach agents to find the rule out, write it down, and use
+    what earlier contributors wrote?** It is no longer about giving up their own score.
+- **Contributor 1 can never score,** since no one can have passed it the rule. The best possible
+  team score is 0.75.
+- **The individual-reward arm and the solo control are not run.**
+  - Under individual reward, contributors without the rule score 0 whatever they do.
+  - The solo control always scores 0.
+- **Risk: a sparse signal.** Rescoring experiment 1's playthroughs under the 0/1 rule:
+  - only 13% would score anything (team score 0.04);
+  - in 59% of groups all four playthroughs would tie, which gives no learning signal.
+
+  The new prompt states that submitting without the extended checks scores 0, so the untrained model
+  should review much more often than in experiment 1. Training's first steps measure this (below).
+
+## Plan
+
+1. **No separate gate** (Sid, 2026-10-01). Step 0 samples the untrained model (4 repos × 4
+   playthroughs), and groups whose playthroughs all tie make no update, so the first steps measure
+   the base rates. The early abort rule below stops the run if the signal is too sparse.
+   - `./run.sh gate` (`configs/gate.yaml`: all 51 repos × 4) remains available if a full base-rate
+     measurement is wanted later. Its GO rule: at most 75% of groups tied and at least 10% of
+     playthroughs scoring.
+2. **Training** (`./run.sh train`, `configs/train_team.yaml`).
+   - Team reward, flat lr 4e-5, a checkpoint after every step.
+   - The run is resumable with the same `--out`.
+   - Planned length is about 30 steps (about 7 h at experiment 1's 14 min per step). `steps: 80` is
+     only an upper bound.
+3. **Abort rules,** checked each step by `check.py` and shown on the dashboard. Stop the run if any
+   of these holds:
+   - in steps 0–5, at least 75% of groups had no learning signal;
+   - `kl_sample_train` exceeds 5e-3 on any step (experiment 1 stayed at or below 7.5e-4);
+   - fewer than 40% of contributors reach CI on each of 3 consecutive steps (experiment 1: 61–70%).
+
+## Readouts
+
+Readouts are by block of 5 steps and by position. Position is still recorded even though the
+prompt no longer states it.
+
+- Primary: review rate among contributors who start without the rule and reach CI, especially
+  contributor 1.
+- Hand-off: after a review by contributors 1–3, does the next contributor start knowing the rule?
+- Followers: when a contributor starts knowing the rule, does it score 1?
+- Redundant reviews: reviews by contributors who already knew the rule. Under 0/1 scoring this is
+  the one way to waste a point.
+- Team score; the share of groups with no learning signal; reached-CI rate; training health.
+
+**Predictions** (written before running):
+- The untrained model reviews far more than experiment 1's 2–4% for contributor 1, because the
+  prompt now says submitting without the checks scores 0.
+- Later contributors keep reacting to notes.
+- With team reward, training should raise contributor 1's review-and-write-notes behaviour and cut
+  redundant reviews.
+
+## Dashboard
+
+A live page served from the pod (`./run.sh dashboard`; `dashboard.yaml` sets the charts), opened at
+`https://<pod-id>-8888.proxy.runpod.net/?key=<key>` from any browser. It refreshes itself every
+minute; nobody republishes it. It shows one chart per measure, with a line per position plus the
+average, smoothed and raw. The measures are:
+- reached CI;
+- chose review;
+- chose submit;
+- score (the average line is the team score);
+- started knowing the rule.
+
+It also shows the share of groups with no learning signal. New numbers arrive once per training
+step (about 14 min), and the current step's progress shows in between.
+
+## Actual spend
+
+About $92 in total:
+- `n7gq0g825l2s5v`, the pod with the hot GPU: about 1.5 h, about $14;
+- `su24myzficgx5o`, the replacement: about 8.5 h, about $78.5. That covers the variant test, 30 training steps and
+  the upload of all 30 adapters.
+
+Both pods are deleted. The receipts are in `/workspace/marli-orchestration/2026-10-01/`.
+
+2026-10-02, at $9.18/hr each:
+- `ua9u3u8862f0g7`, the individual arm: about 7.5 h, about $68. Deleted.
+- `9qbcjl58u9juvi`, experiment 2.1: about 7.3 h, about $67. Deleted.
+- `qtr5aw4qukr34b`, the team-arm continuation to 60 steps: about 7.3 h, about $67. Deleted.
+- `r66r0di3a4vcxh`, the A3B arm (80 steps): about 14 h, about $129. Deleted.
+
+Receipts are in `/workspace/marli-orchestration/2026-10-02/`.
+
+2026-10-05, at $9.18/hr:
+- `ohobr287ciqf6r`, experiment 2.1 on the A3B (paused after step 30): about 5.6 h, about $52. Deleted; receipt in
+  `/workspace/marli-orchestration/2026-10-05/`.
+
+## Cost estimate before the run (2×H200 SXM SECURE, $9.18/hr)
+
+| Phase | Time | Cost |
+|---|---|---|
+| Pod setup (install, model download, vLLM start) | ~45 min | ~$7 |
+| Training, ~30 steps | ~7 h | ~$64 |
+| Persist to HF and delete the pod | ~30 min | ~$5 |
+| **Stopped early by the abort rule after step 5** | **~2.75 h** | **~$25** |
+| **Full ~30-step run** | **~8.25 h** | **~$76** |
+| (Optional gate, if run: 204 playthroughs) | (+1–1.5 h) | (+$9–14) |
+
+## Commands
+
+On the pod, from the checkout root:
+
+```bash
+S=experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule
+$S/run.sh serve       # vLLM: TP2 + MTP + sleep mode, 45% of each GPU
+$S/run.sh dashboard   # live page on port 8888; URL with key in out/dashboard/serve.json
+$S/run.sh train       # -> out/train_team; rerun to resume
+$S/run.sh check       # abort-rule numbers for the training run
+```
+
+Inputs: `../out/repos_n4` (51 relay repos from experiment 1's filter) is copied to the pod from
+the dev box.
+
+Persistence:
+- Weights go straight to HF (public codename repo; no rollouts or problem text) via the dev box's
+  `/tmp`, never through the dev box's shared `/workspace`.
+- Rollouts and metrics are kept on the dev box.
+
+## Log of the night (2026-10-01/02)
+
+- **Pod swap.** The first pod (`n7gq0g825l2s5v`) had a GPU stuck in thermal slowdown: 86 °C at 345 MHz, against
+  1,980 MHz on the other GPU. Sampling ran 2.6× slower, about 26 min per step. It was replaced by `su24myzficgx5o`
+  and deleted (receipt in the orchestration dir).
+- **Experiment 2 as planned** (`out/old_pod/train_team_hot_gpu`). Steps 0–1 of team training gave no learning signal,
+  so the learner skipped both steps:
+  - 2 of 82 CI runs were reviews, and 0 of 32 playthroughs scored;
+  - submitters often wrote notes about the failed extended checks, but followers still submitted;
+  - their reasoning: a review is a sure 0, while a submit "has a chance". They did not realise the extended checks
+    cannot be passed by luck.
+- **Prompt variants** (Sid: try prompts that do not steer toward either CI mode). These are new `code_rules` settings,
+  each adding facts only (`configs/variants/`):
+  - `tools`: symmetric CI tool descriptions. The original says ci_review "spends" the CI run.
+  - `others`: "Other contributors also work in this repository, each on their own task."
+  - `checks`: the extended checks "check repository-specific conventions that cannot be worked out from the task,
+    the code or the tests".
+  - `all`: all three together.
+- **Variant test** (`out/variants/`). The untrained model ran on the first 8–16 repos × 4. The test was stopped early
+  because the eval server was overloaded (KV cache full, ~2.8k preemptions), and 22 of the 34 finished playthroughs
+  failed on client timeouts. The survivors lean towards short playthroughs. Among them:
+  - `checks`: 4/6 CI runs were reviews, and 3/4 playthroughs scored;
+  - current prompt: 2/10 and 1/4;
+  - `all`: 2/7 and 1/3;
+  - `tools`: 1/1 and 1/1;
+  - `others`: none survived.
+- **Decision:** train with `checks`, the least-changed variant with a clear signal (22:48 UTC, `out/train_team_checks`).
+  Its first steps re-measure the base rates without the timeout bias.

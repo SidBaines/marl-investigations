@@ -1,0 +1,11 @@
+# FAIRGAME volunteer's dilemma (upstream runner, pinned) on the 27b; neutral personalities.
+suite: fairgame_volunteer
+baseline: base
+cells:
+  - {label: base, results: experiments/2026-10-05_coop-evals/out/volunteer_27b/base, seats: [qwen3_8_27b, qwen3_8_27b, qwen3_8_27b], focal: qwen3_8_27b}
+  - {label: team_s29, results: experiments/2026-10-05_coop-evals/out/volunteer_27b/team_s29, seats: [27b_team_s29, 27b_team_s29, 27b_team_s29], focal: 27b_team_s29}
+  - {label: team_s59, results: experiments/2026-10-05_coop-evals/out/volunteer_27b/team_s59, seats: [27b_team_s59, 27b_team_s59, 27b_team_s59], focal: 27b_team_s59}
+  - {label: indiv_s29, results: experiments/2026-10-05_coop-evals/out/volunteer_27b/indiv_s29, seats: [27b_indiv_s29, 27b_indiv_s29, 27b_indiv_s29], focal: 27b_indiv_s29}
+  - {label: exp21_s29, results: experiments/2026-10-05_coop-evals/out/volunteer_27b/exp21_s29, seats: [27b_exp21_s29, 27b_exp21_s29, 27b_exp21_s29], focal: 27b_exp21_s29}
+  - {label: mixed_team1, results: experiments/2026-10-05_coop-evals/out/volunteer_27b/mixed_team1, seats: [27b_team_s59, qwen3_8_27b, qwen3_8_27b], focal: 27b_team_s59}
+  - {label: mixed_base1, results: experiments/2026-10-05_coop-evals/out/volunteer_27b/mixed_base1, seats: [qwen3_8_27b, 27b_team_s59, 27b_team_s59], focal: qwen3_8_27b}

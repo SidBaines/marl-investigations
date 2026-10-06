@@ -1,0 +1,30 @@
+kind: upstream
+description: >-
+  HiddenBench hidden-profile group decisions: 4 agents (one model per seat), shared facts
+  plus one private fact each, an initial vote, 15 discussion rounds and a final vote.
+  The correct option is only identifiable when private facts are pooled; the Full
+  Profile control gives every agent every fact. Upstream harness at a pinned commit,
+  run by the study's run.sh with the marli patch (one model per seat; extra request
+  fields; a failed scenario is recorded instead of aborting the run).
+citation: >-
+  Yuxuan Li, Aoi Naito and Hirokazu Shirado. Systematic Failures in Collective Reasoning
+  under Distributed Information in Multi-Agent LLMs. ICML 2026. arXiv:2505.11556.
+license: MIT (code and data). Tasks are public; never commit transcripts.
+source:
+  repo: https://github.com/Yassellee/HiddenBench_ICML
+  commit: 3be6ca16973e4fb751ffc0dfb7eb11f2d28335d1
+# The paper fixes rounds (15), sessions per task (10) and the average rule as the
+# default accuracy; it sets no sampling parameters (provider defaults).
+generation: {}
+thinking: "on"
+reader: marli.eval.external.readers:hiddenbench
+metrics:
+  - {name: post_average, kind: share, pair: sample, label: "after discussion, share of agents correct (paper default)"}
+  - {name: pre_average, kind: share, pair: sample, label: "before discussion, share of agents correct"}
+  - {name: post_majority, kind: binary, pair: sample, label: "after discussion, majority correct"}
+  - {name: pre_majority, kind: binary, pair: sample, label: "before discussion, majority correct"}
+  - {name: post_correct, kind: binary, pair: sample, label: "per seat: final vote correct"}
+  - {name: pre_correct, kind: binary, pair: sample, label: "per seat: initial vote correct"}
+notes: >-
+  Paper: 30.1% hidden vs 80.7% full (average rule, 15 models). Conditions are the profile
+  (hidden, full) and per-seat rows (hidden/seat0 ...).

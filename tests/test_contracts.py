@@ -28,6 +28,8 @@ HEAVY = (
     "peft",
     "math_verify",
     "wandb",
+    "inspect_ai",
+    "litellm",
 )
 
 

@@ -1,0 +1,6 @@
+# N=4 contributors in turn; each is rewarded with its own score. 4 repos x G=4 = 64 decisions/step.
+run_name: sacrifice-relay-individual
+protocol: relay_n4
+batch_tasks: 4
+group_size: 4
+credit: {reward_target: {contributor: individual}}

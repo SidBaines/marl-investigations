@@ -289,3 +289,35 @@ async def test_empty_rollout_and_failed_episode_summary(
     assert result.handle.summary()["n_failed"] == 1
     empty = await run_verb("eval rollout", replace(cfg, max_tasks=0), out=tmp_path / "empty")
     assert empty.handle.n == 0 and empty.handle.file("episodes").read_text() == ""
+
+
+async def test_pause_after_k_tasks_then_resume_keeps_sampled_episodes(tmp_path: Path) -> None:
+    taskset = make_taskset(tmp_path / "tasks", 4)
+    cfg = rollout_config(taskset, episodes_per_task=2, concurrency=3)
+    out = tmp_path / "rollout"
+    paused = await run_verb("eval rollout", replace(cfg, stop_after_tasks=1), out=out)
+    assert paused.status is RunStatus.FRESH
+    assert paused.handle.n == 2 and paused.handle.meta["paused"]
+    assert (paused.handle.meta["n_tasks_sampled"], paused.handle.meta["n_tasks"]) == (1, 4)
+    assert any("paused after 1 of 4 tasks" in warning for warning in paused.warnings)
+    first = (out / "episodes.jsonl").read_bytes()
+    assert {row["task_id"] for row in json_rows(out / "episodes.jsonl")} == {"t0"}
+    # The same or a smaller pause point is already satisfied; a larger one extends the run.
+    for stop in (1, 0):
+        again = await run_verb("eval rollout", replace(cfg, stop_after_tasks=stop), out=out)
+        assert again.status is RunStatus.COMPLETE and again.handle.n == 2
+    more = await run_verb("eval rollout", replace(cfg, stop_after_tasks=2), out=out)
+    assert more.status is not RunStatus.COMPLETE and more.handle.n == 4
+    assert more.config_hash == paused.config_hash
+    rest = await run_verb("eval rollout", cfg, out=out)
+    assert rest.status is not RunStatus.COMPLETE
+    rows = json_rows(out / "episodes.jsonl")
+    assert (out / "episodes.jsonl").read_bytes().startswith(first)
+    assert len(rows) == len({row["episode_id"] for row in rows}) == 8
+    assert not rest.handle.meta["paused"] and rest.handle.meta["n_tasks_sampled"] == 4
+    assert (await run_verb("eval rollout", cfg, out=out)).status is RunStatus.COMPLETE
+
+
+def test_invalid_stop_after_tasks(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="stop_after_tasks"):
+        rollout_config(make_taskset(tmp_path / "tasks"), stop_after_tasks=-1).__post_init__()

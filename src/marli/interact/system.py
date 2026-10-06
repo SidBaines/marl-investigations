@@ -72,6 +72,8 @@ class RoleSpec:
     permissions: Permissions | None = None
     # Publish visible ACT replies via the same staged workspace path as tools.
     publish_final_text: bool = False
+    # The env supplies a per-agent grade even without a built-in submit tool.
+    graded: bool = False
 
 
 @dataclass(frozen=True)
@@ -170,6 +172,7 @@ BUILTIN_PROTOCOL_MODULES: tuple[str, ...] = (
     "swarm",
     "presets",
     "coordinator",
+    "relay",
 )
 
 
@@ -270,6 +273,7 @@ class EpisodeSystem(SystemIO):
             task_id=self.task.task_id,
             episode_idx=self.spec.episode_idx,
             sampling=self.spec.sampling.get(role, SamplingOverrides()),
+            replay=getattr(self.spec, "replay", None),
         )
         self.ledger.register(agent_id, kind=role_spec.limits_key, parent=parent)
         self.scheduler.register(agent_id, seat_key)

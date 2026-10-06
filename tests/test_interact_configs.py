@@ -82,3 +82,19 @@ async def test_code_vote_presets_fail_before_starting_agents(name: str, n_agents
     with pytest.raises(ConfigError, match="vote.*code_fn"):
         await protocol.run(io)
     start.assert_not_awaited()
+
+
+@pytest.mark.parametrize("n_agents", [1, 3, 4, 5])
+def test_relay_presets_resolve_contributor_roles(n_agents: int) -> None:
+    from marli.interact.protocols.relay import RelayConfig, RelayProtocol
+
+    name, config, plain = resolve_protocol(f"relay_n{n_agents}")
+    assert name == "relay" and isinstance(config, RelayConfig)
+    assert config.n_agents == n_agents and plain["n_agents"] == n_agents
+    assert config.env_tools == ("bash", "ci_submit", "ci_review")
+    protocol = build_protocol(f"relay_n{n_agents}")
+    assert isinstance(protocol, RelayProtocol)
+    [role] = protocol.roles()
+    assert role.role == "contributor" and role.count == n_agents and role.graded
+    entry = PROTOCOL_CONFIGS.load(f"relay_n{n_agents}")
+    assert "code_rules" in entry.notes and "2026-09-25_sacrifice-relay" in entry.notes

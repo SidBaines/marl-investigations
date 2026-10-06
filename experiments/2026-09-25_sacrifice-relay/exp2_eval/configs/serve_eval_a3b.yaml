@@ -1,0 +1,15 @@
+# vLLM for the A3B transfer eval (MODEL=a3b ./run.sh serve): one engine per GPU (data parallel) + MTP
+# at 90% of each GPU, like the 27B's ../../bench/serve/dp2_mtp2.yaml, with the A3B arm's LoRA module
+# list (../../exp2_mandatory_rule/configs/serve_a3b.yaml): vLLM wraps only attention, linear attention and
+# the shared expert, exactly what the A3B adapters train. max_loras 6: up to 4 adapters in flight at once,
+# plus the learner_ranks reservation the serve config requires.
+model: qwen3_6_35b_a3b
+python: /opt/vllm/bin/python
+cuda_visible_devices: "0,1"
+gpu_memory_utilization: 0.9
+max_model_len: 32768
+max_lora_rank: 32
+max_loras: 6
+learner_ranks: [32]
+lora_target_modules: [q_proj, k_proj, v_proj, o_proj, in_proj_qkv, in_proj_z, in_proj_a, in_proj_b, out_proj, gate_proj, up_proj, down_proj]
+extra_args: ["--data-parallel-size", "2", "--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}']

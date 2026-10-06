@@ -1,0 +1,8 @@
+# Pre-training gate: base rates in the solo control.
+env: code_rules
+env_config: {bonus: 3.0, notes: visible, ci_runs: 1, code: {stop_on_first_failure: true, max_grade_s: 60}}
+protocol: relay_n1
+seating: {contributor: q}
+episodes_per_task: 1
+limits:
+  episode: {max_gen_tokens: 12288, max_ticks: 64, max_wall_s: 3600}

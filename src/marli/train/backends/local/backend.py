@@ -4,6 +4,12 @@ One backend owns one shared training base. Publication is serialized across its
 learners: load the new snapshot, switch the current policy, then evict an old
 snapshot. Versioned names protect the prefix cache by default; inplace names
 are an opt-in trade-off. Exported directories survive unloading and shutdown.
+
+Time sharing (``sleep_sampler``): the base may sit on the same GPUs as the
+server (optionally data-parallel over several, ``devices``). vLLM sleeps before
+the first train step after sampling (weights to CPU, KV cache freed) and wakes
+before the next adapter is loaded and probe-checked. The server is never left
+asleep: close and failed steps wake it.
 """
 
 from __future__ import annotations
@@ -13,10 +19,12 @@ import logging
 import os
 import re
 import socket
+from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import replace
 from math import isfinite
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -25,10 +33,11 @@ import httpx
 from marli.budget import SpendGuard
 from marli.errors import BackendError, ConfigError
 from marli.model import ModelSpec
-from marli.policy.vllm import VLLMPolicy
+from marli.policy.vllm import VLLMPolicy, http_client
 from marli.render.registry import get_renderer
 from marli.serve.vllm import Server
-from marli.train.backends.base import SamplerSnapshot
+from marli.train.backends.base import SamplerSnapshot, StepResult
+from marli.train.backends.local.parallel import validate_devices
 from marli.train.checkpoint import Checkpoint
 from marli.train.types import LearnerSpec
 
@@ -36,6 +45,7 @@ log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from marli.train.backends.local.learner import LocalLearner, LocalLearnerPool
+    from marli.train.types import TrainDatum
 
 
 class _SamplerMixin:
@@ -109,6 +119,9 @@ class LocalBackend:
         *,
         adapters_dir: str,
         device: str = "cuda",
+        devices: Sequence[str] | None = None,
+        sleep_sampler: bool = False,
+        sleep_timeout_s: float = 600.0,
         spend: SpendGuard | None = None,
         adapter_check_tol: float = 0.05,
         adapter_names: str = "versioned",
@@ -118,12 +131,30 @@ class LocalBackend:
             raise ConfigError("adapter_check_tol must be finite and positive")
         if adapter_names not in {"versioned", "inplace"}:
             raise ConfigError("adapter_names must be 'versioned' or 'inplace'")
+        if type(sleep_sampler) is not bool:
+            raise ConfigError("sleep_sampler must be a boolean")
+        if not isfinite(sleep_timeout_s) or sleep_timeout_s <= 0:
+            raise ConfigError("sleep_timeout_s must be finite and positive")
+        # One device, or several for a data-parallel base (the first is rank 0).
+        self.devices = validate_devices(devices) if devices is not None else (device,)
+        device = self.devices[0]
         self.adapter_check_tol = adapter_check_tol
         self.adapter_names = adapter_names
         self.server_json = Path(server_json).resolve()
         server = Server.load(self.server_json)
         if not server.models or not server.enable_lora or server.max_loras < 2:
             raise ConfigError("local training requires a LoRA server with max_loras >= 2")
+        if sleep_sampler and not server.enable_sleep_mode:
+            raise ConfigError(
+                "sleep_sampler requires a server started with enable_sleep_mode=true "
+                f"({self.server_json} does not record it)"
+            )
+        self.sleep_sampler = sleep_sampler
+        self.sleep_timeout_s = sleep_timeout_s
+        self._asleep = False
+        self._training = 0
+        self._sleep_state = asyncio.Condition()
+        self._step_metrics: dict[str, float] = {}
         self.base_url = server.base_url.rstrip("/")
         self.base_name = server.models[0]
         self.adapters_dir = Path(adapters_dir).resolve()
@@ -136,7 +167,7 @@ class LocalBackend:
         self.spend = spend
         self.pool: LocalLearnerPool | None = None
         self.learners: dict[str, LocalLearner] = {}
-        self.client = httpx.AsyncClient(timeout=600, trust_env=False)
+        self.client = http_client(600, trust_env=False)
         self._lock = asyncio.Lock()
         self._owned: dict[str, str] = {}
         self._owner = uuid4().hex
@@ -155,6 +186,15 @@ class LocalBackend:
             raise ConfigError("local learners must share one base model per run")
         if spec.rank > server.max_lora_rank:
             raise ConfigError("learner rank exceeds server max_lora_rank")
+        if server.lora_target_modules:
+            # vLLM silently drops adapter weights for modules it did not wrap.
+            targets = model.lora.get("target_modules", [])
+            missing = sorted(set(targets) - set(server.lora_target_modules))
+            if not targets or missing:
+                raise ConfigError(
+                    f"server LoRA is restricted to {server.lora_target_modules}; the learner "
+                    f"would also train {missing or 'every nn.Linear (no registry targets)'}"
+                )
         if len(self.learners) + 2 > server.max_loras:
             raise ConfigError("max_loras must reserve one slot beyond the learner count")
         # Like Tinker: a checkpoint manifest restores its recorded sampler version
@@ -179,6 +219,20 @@ class LocalBackend:
         from marli.train.backends.local.learner import LocalLearner, LocalLearnerPool
 
         class ServingLearner(_SamplerMixin, LocalLearner):
+            async def train_step(
+                self, datums: Sequence[TrainDatum], *, learning_rate: float | None = None
+            ) -> StepResult:
+                await self._backend._enter_training()
+                failed = True
+                try:
+                    result = await LocalLearner.train_step(
+                        self, datums, learning_rate=learning_rate
+                    )
+                    failed = False
+                    return result
+                finally:
+                    await self._backend._leave_training(failed)
+
             async def save_state(self, name: str) -> str:
                 path = Path(name)
                 if not path.is_absolute():
@@ -187,7 +241,16 @@ class LocalBackend:
 
         torch.manual_seed(seed)
         if self.pool is None:
-            self.pool = LocalLearnerPool(model, device=self.device)
+            if len(self.devices) > 1:
+                from marli.train.backends.local.parallel import PoolRecipe
+
+                self.pool = LocalLearnerPool.data_parallel(
+                    PoolRecipe(model),
+                    self.devices,
+                    log_dir=self.state_dir.parent / "learner-ranks",
+                )
+            else:
+                self.pool = LocalLearnerPool(model, device=self.device)
         learner = ServingLearner(name, spec, self.pool)
         learner._backend = self
         self.learners[name] = learner
@@ -195,6 +258,97 @@ class LocalBackend:
             await learner.load_state(state)
             await self._publish(learner, f"{self._owner}-{name}-init", version=version)
         return learner
+
+    # ------------------------------------------------------------ time sharing
+
+    def _metric(self, key: str, seconds: float) -> None:
+        self._step_metrics[key] = self._step_metrics.get(key, 0.0) + seconds
+
+    def pop_step_metrics(self) -> dict[str, float]:
+        """Seconds spent putting the server to sleep and waking it since the last call."""
+        metrics, self._step_metrics = self._step_metrics, {}
+        return metrics
+
+    async def _control(
+        self, method: str, path: str, params: dict[str, str] | None = None
+    ) -> httpx.Response:
+        # vLLM's sleep endpoints live at the server root, not under /v1.
+        root = self.base_url.removesuffix("/v1")
+        try:
+            response = await self.client.request(method, root + path, params=params)
+        except httpx.TransportError as exc:
+            raise BackendError(f"vLLM {path}: {exc}") from exc
+        if response.status_code == 404:
+            raise ConfigError(
+                f"vLLM {path} is not served: start the server with enable_sleep_mode=true "
+                "(it also sets VLLM_SERVER_DEV_MODE=1)"
+            )
+        if 400 <= response.status_code < 500:
+            raise ConfigError(f"vLLM {path}: HTTP {response.status_code}: {response.text[:500]}")
+        if not response.is_success:
+            raise BackendError(f"vLLM {path}: HTTP {response.status_code}: {response.text[:500]}")
+        return response
+
+    async def _await_sleeping(self, target: bool) -> None:
+        deadline = perf_counter() + self.sleep_timeout_s
+        while True:
+            response = await self._control("GET", "/is_sleeping")
+            try:
+                state = response.json()["is_sleeping"]
+            except (ValueError, KeyError, TypeError) as exc:
+                raise BackendError(
+                    f"vLLM /is_sleeping: invalid reply {response.text[:200]}"
+                ) from exc
+            if state is target:
+                return
+            if perf_counter() > deadline:
+                raise BackendError(
+                    f"vLLM did not {'sleep' if target else 'wake'} within {self.sleep_timeout_s:g}s"
+                )
+            await asyncio.sleep(0.2)
+
+    async def _wake(self) -> None:
+        start = perf_counter()
+        await self._control("POST", "/wake_up")
+        await self._await_sleeping(False)
+        self._asleep = False
+        self._metric("wake_s", perf_counter() - start)
+
+    async def _enter_training(self) -> None:
+        """Count a train step in; the first one after sampling puts the server to sleep."""
+        async with self._sleep_state:
+            self._training += 1
+            if not self.sleep_sampler or self._asleep:
+                return
+            try:
+                start = perf_counter()
+                # mode=wait: nothing should be in flight in the sync loop; never abort it.
+                await self._control("POST", "/sleep", {"level": "1", "mode": "wait"})
+                await self._await_sleeping(True)
+            except BaseException:
+                self._training -= 1
+                self._sleep_state.notify_all()
+                raise
+            self._asleep = True
+            self._metric("sleep_s", perf_counter() - start)
+
+    async def _leave_training(self, failed: bool) -> None:
+        async with self._sleep_state:
+            self._training -= 1
+            self._sleep_state.notify_all()
+            if failed and self._training == 0 and self._asleep:
+                # Never leave the server asleep after a failed step.
+                try:
+                    await self._wake()
+                except (BackendError, ConfigError) as exc:
+                    log.warning("could not wake vLLM after a failed train step: %s", exc)
+
+    async def _ensure_awake(self) -> None:
+        """Wake the server once every train step has finished (before loading adapters)."""
+        async with self._sleep_state:
+            await self._sleep_state.wait_for(lambda: self._training == 0)
+            if self._asleep:
+                await self._wake()
 
     async def _request(self, endpoint: str, body: dict[str, object]) -> httpx.Response:
         root = self.base_url if self.base_url.endswith("/v1") else self.base_url + "/v1"
@@ -283,6 +437,7 @@ class LocalBackend:
         if name in {".", ".."} or re.fullmatch(r"[A-Za-z0-9_.-]+", name) is None:
             raise ConfigError("sampler name must contain only letters, digits, _.-")
         async with self._lock:
+            await self._ensure_awake()
             version = learner.version + 1 if version is None else version
             server = Server.load(self.server_json)
             used = server.meta.get("used_adapter_names", [])
@@ -401,8 +556,15 @@ class LocalBackend:
                 raise errors[0]
 
     async def close(self) -> None:
-        errors = []
+        errors: list[Exception] = []
         try:
+            if self._asleep and self._training == 0:
+                try:
+                    await self._wake()
+                except (BackendError, ConfigError) as exc:
+                    errors.append(exc)
+            elif self._asleep:
+                log.warning("closing with a train step in flight; vLLM stays asleep")
             for learner in self.learners.values():
                 try:
                     await learner.close()
@@ -411,6 +573,10 @@ class LocalBackend:
             if errors:
                 raise errors[0]
             self.learners.clear()
-            self.pool = None
         finally:
-            await self.client.aclose()
+            try:
+                if self.pool is not None and hasattr(self.pool, "close"):
+                    self.pool.close()  # stops data-parallel workers
+                self.pool = None
+            finally:
+                await self.client.aclose()

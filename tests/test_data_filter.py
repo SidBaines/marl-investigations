@@ -355,3 +355,53 @@ async def test_wall_clock_failures_count_as_zero_and_last_attempt_wins(
     (task,) = read_tasks(result.handle)
     assert task.task_id == "mixed" and task.meta["pass_rate"] == 0.5
     assert result.handle.meta["filter"]["ignored_non_ok_episodes"] == 0
+
+
+async def test_paused_rollout_is_rejected(tmp_path: Path, taskset: TaskSet, rollouts: Path) -> None:
+    manifest = rollouts / "episodes.json"
+    recorded = json.loads(manifest.read_text())
+    recorded["meta"] = {"paused": True, "n_tasks_sampled": 2, "n_tasks": 6}
+    manifest.write_text(json.dumps(recorded) + "\n")
+    with pytest.raises(ConfigError, match="paused rollout \\(2 of 6 tasks"):
+        await run_verb(
+            "data filter",
+            FilterConfig(tasks=str(taskset.root), episodes=str(rollouts)),
+            out=tmp_path / "out",
+        )
+
+
+async def test_paused_rollout_with_allow_paused_filters_only_the_sampled_tasks(
+    tmp_path: Path, taskset: TaskSet, rollouts: Path
+) -> None:
+    # The fixture's first three tasks (mixed, zero, one) were "sampled"; few, absent and fractional
+    # were not, so fractional (in range when complete) is dropped as unsampled.
+    manifest = rollouts / "episodes.json"
+    recorded = json.loads(manifest.read_text())
+    recorded["meta"] = {"paused": True, "n_tasks_sampled": 3, "n_tasks": 6}
+    manifest.write_text(json.dumps(recorded) + "\n")
+    result = await run_verb(
+        "data filter",
+        FilterConfig(tasks=str(taskset.root), episodes=str(rollouts), allow_paused=True),
+        out=tmp_path / "out",
+    )
+    handle = TaskSet.load(result.manifest)
+    assert [task.task_id for task in read_tasks(handle)] == ["mixed"]
+    assert handle.meta["filter"]["counts"] == {
+        "input": 6,
+        "kept": 1,
+        "dropped_min_episodes": 0,
+        "dropped_lo": 1,
+        "dropped_hi": 1,
+        "dropped_unsampled": 3,
+    }
+    assert handle.meta["filter"]["paused_rollout"] == {"n_tasks_sampled": 3, "n_tasks": 6}
+
+
+def test_allow_paused_is_a_runtime_boolean(taskset: TaskSet, rollouts: Path) -> None:
+    with pytest.raises(ConfigError, match="allow_paused must be a boolean"):
+        FilterConfig(tasks=str(taskset.root), episodes=str(rollouts), allow_paused="yes")
+    plain = FilterConfig(tasks=str(taskset.root), episodes=str(rollouts))
+    allowed = replace(plain, allow_paused=True)
+    from marli.config import config_hash
+
+    assert config_hash(plain) == config_hash(allowed)

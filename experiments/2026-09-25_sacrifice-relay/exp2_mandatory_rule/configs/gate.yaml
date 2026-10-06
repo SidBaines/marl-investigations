@@ -1,0 +1,4 @@
+# Base-rate check before training: the untrained model on all 51 relay repos, 4 playthroughs each (the
+# training group size), so the share of repos where all 4 playthroughs tie (no learning signal) is measured
+# exactly as training would see it. 204 playthroughs.
+episodes_per_task: 4

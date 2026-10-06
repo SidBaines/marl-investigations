@@ -883,3 +883,275 @@ async def test_wrong_restored_version_fails_before_sampling(
     with pytest.raises(AssertionError, match="restored version 999, expected 1"):
         await run_verb("train rl", cfg, out=out)
     assert not (out / "rollouts/step_00001").exists()
+
+
+@ENVS.register("rl_relay_slots")
+def relay_env_factory(config: dict[str, Any], task: Task) -> Any:
+    from test_interact_relay import SlottedEnv
+
+    return SlottedEnv()
+
+
+def relay_policy() -> ScriptedPolicy:
+    renderer = FakeRenderer()
+
+    def turn(ctx: ScriptCtx) -> Turn:
+        slot = int(ctx.meta.agent_id.removeprefix("contrib"))
+        index = ctx.meta.call_index
+        episode_idx = int(ctx.meta.episode_id.rsplit("/e", 1)[1])
+        if slot == 0:
+            if index == 0:
+                return Turn(tool_calls=(("ci_review", {}),))
+            if index == 1:
+                return Turn(tool_calls=(("bash", {"content": "shared rule"}),))
+        else:
+            if index == 0:
+                assert "shared rule" not in ctx.prompt_text
+                return Turn(tool_calls=(("bash", {}),))
+            if index == 1:
+                assert "shared rule" in ctx.prompt_text
+                return Turn(tool_calls=(("ci_submit", {"score": 3 if episode_idx == 0 else 1}),))
+        assert index == 2
+        return Turn(tool_calls=(("end_session", {}),))
+
+    return ScriptedPolicy("relay", renderer, from_callable(turn, renderer))
+
+
+@pytest.mark.parametrize("target", ["individual", "team"])
+async def test_relay_two_training_steps_rewards_and_grade_metrics(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    from marli.train.types import CreditStats, SegmentCredit
+
+    fake_setup.factory = "test_train_loop:relay_policy"
+    cfg = config(
+        make_taskset(tmp_path / "tasks"),
+        protocol="relay_n4",
+        env="rl_relay_slots",
+        learners={"shared": LearnerSpec(base_model="qwen3_8b", backend="fake")},
+        seating={"contributor": "learner:shared"},
+        credit=CreditConfig(reward_key="score", reward_target={"contributor": target}),
+    )
+    captured: list[list[SegmentCredit]] = []
+    original = loop.assign_credit
+
+    def credit(
+        episodes: Sequence[Episode], cfg: CreditConfig, ctx: loop.CreditContext,
+        *, rae_state: dict[str, float],
+    ) -> tuple[list[SegmentCredit], CreditStats, dict[str, float]]:
+        result = original(episodes, cfg, ctx, rae_state=rae_state)
+        captured.append(result[0])
+        return result
+
+    monkeypatch.setattr(loop, "assign_credit", credit)
+    out = tmp_path / "train"
+    result = await run_verb("train rl", cfg, out=out)
+    assert result.handle.step == 1
+    learner = fake_setup.backends[0].learners["shared"]
+    assert learner.version == learner.weights == len(learner.steps) == 2
+    assert len(captured) == 2
+    for step, (credits, datums) in enumerate(zip(captured, learner.steps, strict=True)):
+        assert len(credits) == len(datums) == 8
+        by_agent = {(credit.episode_id, credit.agent_id): credit for credit in credits}
+        for credit in credits:
+            first_episode = credit.episode_id.endswith("/e0")
+            own = 0 if credit.agent_id == "contrib0" else (3 if first_episode else 1)
+            team = 2.25 if first_episode else 0.75
+            assert credit.reward == (team if target == "team" else own)
+            assert credit.advantage == credit.reward - (0.75 if first_episode else 2.25)
+        for datum in datums:
+            assert datum.policy_version == step and datum.session_idx == 0
+            expected = by_agent[datum.episode_id, datum.agent_id].advantage
+            assert all(
+                advantage == (expected if mask else 0)
+                for advantage, mask in zip(datum.advantages, datum.mask, strict=True)
+            )
+        saved = list(read_episodes(out / f"rollouts/step_{step:05d}", with_tokens=True))
+        assert len(saved) == 2 and all(episode.ok for episode, _ in saved)
+        assert all(len(episode.segments) == 4 for episode, _ in saved)
+    metrics = rows(out / "metrics.jsonl")
+    assert len(metrics) == 2
+    for metric in metrics:
+        assert metric["grades"] == {
+            "contrib0": {"score": 0, "probed": 1, "notes_had_rule": 0, "n": 2},
+            **{
+                f"contrib{k}": {"score": 2, "probed": 0, "notes_had_rule": 1, "n": 2}
+                for k in range(1, 4)
+            },
+            "_system": {"score": 1.5, "probed": 0.25, "notes_had_rule": 0.75, "n": 2},
+        }
+        assert metric["accuracy"] == 1.5 and metric["n_agents"] == 4
+        assert metric["reward_mean"] == {"contributor": 1.5}
+        assert metric["calls"] == 12 and metric["datums"]["shared/n"] == 8
+
+
+def test_grade_metrics_use_successful_episodes_and_observed_components() -> None:
+    from test_train_credit import Seat, episode
+
+    first = episode(0, 1, [Seat("a", own=1), Seat("b", own=0)])
+    second = episode(1, 0, [Seat("a", own=0), Seat("ungraded")])
+    failed = episode(2, 99, [Seat("a", own=99), Seat("failed_only", own=99)], ok=False)
+    first.grades["a"].update({"probed": 1, "diagnostic": "text"})
+    second.grades["a"]["probed"] = 0
+    first.grades["_system"]["sparse"] = 6
+    assert loop._grade_metrics([first, second, failed]) == {
+        "a": {"correct": 0.5, "probed": 0.5, "n": 2},
+        "b": {"correct": 0, "n": 1},
+        "ungraded": {"n": 1},
+        "_system": {"correct": 0.5, "sparse": 6, "n": 2},
+    }
+    assert loop._grade_metrics([failed]) == {}
+
+
+from test_envs_sandbox import sandbox_host as sandbox_host  # noqa: E402
+
+
+def code_rules_policy() -> ScriptedPolicy:
+    import re
+    import shlex
+
+    from _marli_code_fixtures import SUM_SOLUTION
+
+    renderer = FakeRenderer()
+
+    def turn(ctx: ScriptCtx) -> Turn:
+        slot = int(ctx.meta.agent_id.removeprefix("contrib"))
+        index = ctx.meta.call_index
+        first_episode = ctx.meta.episode_id.endswith("/e0")
+        if slot == 0 and first_episode:
+            if index == 0:
+                return Turn(tool_calls=(("ci_review", {}),))
+            if index == 1:
+                header = re.search(r"# [\w-]+: [A-Z]{3}-\d{4}", ctx.prompt_text).group()
+                command = f"printf '%s' {shlex.quote(header)} > NOTES.md"
+                return Turn(tool_calls=(("bash", {"command": command}),))
+        else:
+            if index == 0:
+                return Turn(tool_calls=(("bash", {"command": "cat NOTES.md"}),))
+            if index == 1:
+                match = re.search(r"# [\w-]+: [A-Z]{3}-\d{4}", ctx.prompt_text)
+                source = (match.group() + "\n" if match else "") + SUM_SOLUTION
+                command = f"printf '%s' {shlex.quote(source)} > tasks/task_{slot + 1}/solution.py"
+                return Turn(tool_calls=(("bash", {"command": command}),))
+            if index == 2:
+                return Turn(tool_calls=(("ci_submit", {}),))
+        return Turn(tool_calls=(("end_session", {}),))
+
+    return ScriptedPolicy("code_rules", renderer, from_callable(turn, renderer))
+
+
+@pytest.mark.parametrize(
+    "target,fail_grading", [("team", False), ("individual", False), ("team", True)]
+)
+@pytest.mark.usefixtures("sandbox_host")
+def test_cli_train_code_rules_relay_and_failed_episode_guard(
+    tmp_path: Path, fake_setup: FakeSetup, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], target: str, fail_grading: bool,
+) -> None:
+    from test_envs_code_rules import repo_task
+
+    from marli.cli.main import main
+    from marli.envs.code_fn import CodeFnEnv
+
+    task_root = tmp_path / "tasks"
+    write_tasks(task_root, [repo_task(family="header")])
+    taskset = TaskSet(
+        root=task_root, tasks="tasks.jsonl", source="synthetic", split="train",
+        kind="code", n=1, answer_format="code_repo", commit_text=True,
+    )
+    taskset.save()
+    fake_setup.factory = "test_train_loop:code_rules_policy"
+    if fail_grading:
+        original_grade = CodeFnEnv.grade
+
+        async def fail(self: CodeFnEnv, source: str | None) -> dict[str, float]:
+            if source is not None and source.startswith("# "):
+                raise RuntimeError("grader uid pool exhausted")
+            return await original_grade(self, source)
+
+        monkeypatch.setattr(CodeFnEnv, "grade", fail)
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(json.dumps({
+        "tasks": str(taskset.manifest_path), "env": "code_rules", "protocol": "relay_n4",
+        "learners": {"shared": {"base_model": "qwen3_8b", "backend": "fake"}},
+        "seating": {"contributor": "learner:shared"},
+        "credit": {"reward_key": "score", "reward_target": {"contributor": target}},
+        "batch_tasks": 1, "group_size": 2, "steps": 1, "checkpoint_every": 1,
+        "concurrency": 1, "max_usd": 1, "max_failed_frac": 0,
+    }))
+    out = tmp_path / "train"
+    exit_code = main(["train", "rl", str(config_path), "--out", str(out)])
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 1
+    result = json.loads(lines[0])
+    saved = list(read_episodes(out / "rollouts/step_00000", with_tokens=True))
+    assert len(saved) == 2 and all(len(ep.agents) == 4 for ep, _ in saved)
+    learner = fake_setup.backends[0].learners["shared"]
+    if fail_grading:
+        assert exit_code == 5 and not result["ok"]
+        assert "max_failed_frac=0" in result["message"]
+        assert not learner.steps
+        failed = [ep for ep, _ in saved if not ep.ok]
+        assert len(failed) == 1 and "grader uid pool exhausted" in str(failed[0].errors)
+    else:
+        assert exit_code == 0 and result["ok"] and result["kind"] == "checkpoint"
+        assert Checkpoint.load(result["manifest"]).step == 0
+        assert len(learner.steps) == learner.weights == 1
+        assert all(ep.ok and len(ep.segments) == 4 for ep, _ in saved)
+        first, second = sorted((ep for ep, _ in saved), key=lambda ep: ep.episode_idx)
+        assert first.grades["_system"]["score"] == 2.25
+        assert second.grades["_system"]["score"] == 1
+        assert first.grades["_system"]["rule_known_at_start"] == 0.75
+        assert first.grades["_system"]["rule_known_at_ci"] == 0.75
+        assert first.grades["_system"]["ran_ci"] == 1
+        metrics = rows(out / "metrics.jsonl")
+        assert len(metrics) == 1 and metrics[0]["grades"]["_system"]["score"] == 1.625
+
+
+@pytest.mark.usefixtures("sandbox_host")
+def test_cli_train_relay_frozen_opener_trains_only_later_contributors(
+    tmp_path: Path, fake_setup: FakeSetup, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A frozen opener plays slot 0; only contributors 1-3 emit datums (individual reward)."""
+    from test_envs_code_rules import repo_task
+
+    from marli.cli.main import main
+
+    task_root = tmp_path / "tasks"
+    write_tasks(task_root, [repo_task(family="header")])
+    taskset = TaskSet(
+        root=task_root, tasks="tasks.jsonl", source="synthetic", split="train",
+        kind="code", n=1, answer_format="code_repo", commit_text=True,
+    )
+    taskset.save()
+    fake_setup.factory = "test_train_loop:code_rules_policy"
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(json.dumps({
+        "tasks": str(taskset.manifest_path), "env": "code_rules", "protocol": "relay_n4",
+        "protocol_config": {"opener_role": "opener"},
+        "learners": {"shared": {"base_model": "qwen3_8b", "backend": "fake"}},
+        "seating": {
+            "opener": "scripted:test_train_loop:code_rules_policy",
+            "contributor": "learner:shared",
+        },
+        "credit": {"reward_key": "score", "reward_target": {"contributor": "individual"}},
+        "batch_tasks": 1, "group_size": 2, "steps": 1, "checkpoint_every": 1,
+        "concurrency": 1, "max_usd": 1, "max_failed_frac": 0,
+    }))
+    out = tmp_path / "train"
+    assert main(["train", "rl", str(config_path), "--out", str(out)]) == 0
+    result = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert result["ok"]
+    saved = list(read_episodes(out / "rollouts/step_00000", with_tokens=True))
+    assert len(saved) == 2
+    for episode, _ in saved:
+        roles = {agent.agent_id: agent.role for agent in episode.agents}
+        assert roles == {"contrib0": "opener", "contrib1": "contributor",
+                         "contrib2": "contributor", "contrib3": "contributor"}
+        opener_calls = [c for c in episode.calls if c.agent_id == "contrib0"]
+        assert opener_calls and all(c.policy_version is None for c in opener_calls)
+        assert set(episode.grades) == {"_system", "contrib0", "contrib1", "contrib2", "contrib3"}
+    learner = fake_setup.backends[0].learners["shared"]
+    datums = [d for step in learner.steps for d in step]
+    assert datums and {d.role for d in datums} == {"contributor"}
+    assert "contrib0" not in {d.agent_id for d in datums}

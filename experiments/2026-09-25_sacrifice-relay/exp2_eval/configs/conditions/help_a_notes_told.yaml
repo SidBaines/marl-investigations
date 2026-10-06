@@ -1,0 +1,4 @@
+# Help request, option (b): help_a_notes plus the closing-summary sentence ("Before you call end_session,
+# briefly tell the user what you did."). THIS CHANGES THE PROMPT. Paired with help_control_told.
+tasks: experiments/2026-09-25_sacrifice-relay/exp2_eval/out/repos_n4/taskset.json
+env_config: {help_note: budget, help_place: notes, closing_summary: true}

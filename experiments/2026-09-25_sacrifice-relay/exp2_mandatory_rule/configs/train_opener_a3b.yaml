@@ -1,0 +1,18 @@
+# Experiment 2.1 on Qwen3.6-35B-A3B (MODEL=a3b ARM=opener VARIANT=checks ./run.sh train): as train_opener.yaml,
+# but contributor 1 is a FROZEN copy of the A3B team arm's final policy (train_team_checks_a3b after step 79,
+# i.e. 80 updates), loaded into this pod's server as `exp2-team-a3b-s79` (MODEL=a3b ARM=opener ./run.sh opener).
+# Contributors 2-4 train with individual reward. Batch as the A3B team arm (8 repos x 4 playthroughs per step;
+# the 27B 2.1 used 4 x 4), flat lr 4e-5, LoRA rank 32 on the registry targets (routed experts and router frozen).
+# steps is an upper bound (80, run in full).
+run_name: sacrifice-relay-exp2.1-opener-a3b
+protocol: relay_n4
+protocol_config: {opener_role: opener}
+seating:
+  opener: "vllm:@experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/out/serve_a3b/server.json#exp2-team-a3b-s79"
+  contributor: "learner:policy"
+batch_tasks: 8
+group_size: 4
+credit: {reward_target: {contributor: individual}}
+learners:
+  policy: {base_model: qwen3_6_35b_a3b, backend: local, rank: 32, learning_rate: 4.0e-5}
+checkpoint_every: 1

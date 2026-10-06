@@ -32,7 +32,7 @@ from marli import runlog
 from marli.budget import SpendGuard, tinker_cost
 from marli.config import to_dict
 from marli.envs.base import Task
-from marli.envs.registry import ENVS, make_env
+from marli.envs.registry import ENVS, load_builtin_envs, make_env
 from marli.errors import BackendError, BudgetExceededError, ConfigError, HashMismatchError
 from marli.eval.policies import PolicySpec, build_policies, resolve_spec
 from marli.eval.policies import SamplingOverrides as FrozenSampling
@@ -65,6 +65,27 @@ class DataCursor:
     index: int = 0
 
 
+def _grade_metrics(episodes: Sequence[Episode]) -> dict[str, dict[str, float | int]]:
+    """Average observed numeric components; n counts successful episodes per agent."""
+    grades: dict[str, list[dict[str, float]]] = {}
+    for episode in episodes:
+        if episode.ok:
+            for key in [*(agent.agent_id for agent in episode.agents), "_system"]:
+                grades.setdefault(key, []).append(episode.grades.get(key, {}))
+    result: dict[str, dict[str, float | int]] = {}
+    for key, rows in grades.items():
+        components: dict[str, list[float]] = {}
+        for row in rows:
+            for component, value in row.items():
+                if isinstance(value, (int, float)):
+                    components.setdefault(component, []).append(value)
+        result[key] = {
+            **{component: fmean(values) for component, values in components.items()},
+            "n": len(rows),
+        }
+    return result
+
+
 def take_tasks(
     tasks: Sequence[Task], cursor: DataCursor, count: int, *, seed: int
 ) -> tuple[list[Task], DataCursor]:
@@ -88,8 +109,7 @@ def _preflight(
     cfg: TrainRLConfig,
 ) -> tuple[CreditContext, dict[str, ModelSpec], dict[str, PolicySpec]]:
     cfg.__post_init__()
-    from marli.envs import math as _math  # noqa: F401
-
+    load_builtin_envs()
     ENVS.get(cfg.env)
     name, _, protocol_config = resolve_protocol(cfg.protocol, cfg.protocol_config)
     roles = {role.role: role for role in build_protocol(cfg.protocol, cfg.protocol_config).roles()}
@@ -147,6 +167,22 @@ def _preflight(
         if cfg.limits.ctx.max_ctx > model.max_ctx:
             raise ConfigError(f"learner {name!r}: ctx.max_ctx exceeds model max_ctx")
     return ctx, models, frozen
+
+
+def local_backend_kwargs(cfg: TrainRLConfig, run: RunDir) -> dict[str, Any]:
+    """Keyword arguments for the local backend; placement options only when set."""
+    kwargs: dict[str, Any] = {
+        "server_json": cfg.local_server_json,
+        "adapters_dir": cfg.local_adapters_dir or str(run.path("adapters")),
+        "state_dir": str(run.path("states")),
+    }
+    if cfg.local_devices is not None:
+        kwargs["devices"] = list(cfg.local_devices)
+    if cfg.local_sleep_sampler:
+        kwargs["sleep_sampler"] = True
+    if cfg.local_adapter_check_tol != 0.05:
+        kwargs["adapter_check_tol"] = float(cfg.local_adapter_check_tol)
+    return kwargs
 
 
 def _rebase(checkpoint: Checkpoint, root: Path) -> Checkpoint:
@@ -422,11 +458,7 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                 if spec.backend == "fake":
                     kwargs = {"state_dir": run.path("states")}
                 elif spec.backend == "local":
-                    kwargs = {
-                        "server_json": cfg.local_server_json,
-                        "adapters_dir": cfg.local_adapters_dir or str(run.path("adapters")),
-                        "state_dir": str(run.path("states")),
-                    }
+                    kwargs = local_backend_kwargs(cfg, run)
                 backends[spec.backend] = make_backend(
                     spec.backend, spend=spend, base_url=cfg.base_url, **kwargs
                 )
@@ -495,6 +527,7 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                         f"max_failed_frac={cfg.max_failed_frac}"
                     )
             episode_metrics = {
+                "grades": _grade_metrics(episodes),
                 "accuracy": fmean(
                     e.grades.get("_system", {}).get(cfg.credit.reward_key, 0.0) for e in episodes
                 ),
@@ -556,6 +589,12 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                     raise snapshot
                 samplers[snapshot.learner] = snapshot
             train_seconds = perf_counter() - train_start
+            # e.g. the local backend's vLLM sleep/wake seconds when it time-shares GPUs
+            backend_metrics = {
+                name: metrics
+                for name, backend in backends.items()
+                if (pop := getattr(backend, "pop_step_metrics", None)) and (metrics := pop())
+            }
             completed, cursor, rae_state = step, next_cursor, next_rae
             safe_to_save = True
             run.append_row(
@@ -566,6 +605,7 @@ async def train_rl(cfg: TrainRLConfig, run: RunDir) -> Checkpoint:
                     **episode_metrics,
                     "sample_seconds": sample_seconds,
                     "train_seconds": train_seconds,
+                    **({"backend_metrics": backend_metrics} if backend_metrics else {}),
                     "learner_versions": {
                         name: learner.version for name, learner in learners.items()
                     },

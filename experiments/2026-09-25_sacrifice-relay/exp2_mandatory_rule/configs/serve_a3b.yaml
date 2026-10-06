@@ -1,0 +1,19 @@
+# vLLM for experiment 2 on Qwen3.6-35B-A3B (MODEL=a3b ./run.sh serve): the 27B's option-2 layout
+# (../../bench/serve/tp2_mtp2_sleep.yaml: TP2 over both GPUs, MTP with 2 draft tokens, sleep mode), with:
+# - lora_target_modules = the registry's learner targets, so vLLM wraps only attention, linear
+#   attention and the shared expert. Without it vLLM would also wrap the 256 routed experts and the
+#   router (zero adapter weights, but extra LoRA buffers and the slower MoE-LoRA kernel on every step).
+# - gpu_memory_utilization 0.40, not 0.45: the learner's resident copy is ~65 GiB per GPU (27B: ~52).
+#   The cache still holds >> 16 relay agents x 24.6k tokens (only 10 of 40 layers keep a KV cache).
+model: qwen3_6_35b_a3b
+python: /opt/vllm/bin/python
+cuda_visible_devices: "0,1"
+tensor_parallel_size: 2
+gpu_memory_utilization: 0.40
+max_model_len: 32768
+max_lora_rank: 32
+max_loras: 4
+learner_ranks: [32]
+lora_target_modules: [q_proj, k_proj, v_proj, o_proj, in_proj_qkv, in_proj_z, in_proj_a, in_proj_b, out_proj, gate_proj, up_proj, down_proj]
+extra_args: ["--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}']
+enable_sleep_mode: true

@@ -1,10 +1,10 @@
 ---
 type: concept
 title: Zero-variance groups at small G
-description: With a group baseline and small groups, most groups have identical rewards, so advantages are zero and the group is dropped; at B=2×G=2 the Tinker RL smoke's multi-session runs barely stepped and could not compare credit schemes.
+description: "With a group baseline and small groups, many groups have identical rewards, so advantages are zero and the group is dropped; at B=2×G=2 the Tinker RL smoke barely stepped, and in the sacrifice relay's sparse 0/1 scoring 42–49% of G=4 groups carried no signal at first, falling to 8% as team training succeeded, while the individual arm stayed at 40–45% [partial]."
 resource: src/marli/train/credit.py
-tags: [training, rl, credit-assignment, grpo, group-size, diagnostics]
-timestamp: 2026-09-24
+tags: [training, rl, credit-assignment, grpo, group-size, diagnostics, sparse-reward]
+timestamp: 2026-10-05
 ---
 
 # Zero-variance groups at small G
@@ -37,6 +37,56 @@ baseline and `norm=mean`. Source: [smoke README](../../sources/tinker-rl-smoke.m
   datums.
 - So the smoke **cannot compare credit schemes**. The README says a pilot needs
   B≥8 and G≥4 per step.
+
+## Team reward on the relay: the drop logic checked [partial]
+
+In the sacrifice-relay trial ([Qwen3.8-27B](../entities/qwen3-8-27b.md) on the
+[local backend](../entities/local-backend.md), [relay](../entities/protocol-relay.md)
+N=4, team reward, 4 repos × G=4, 30 steps, one seed), `payoff.py`
+recomputed every advantage from the saved rollouts. It used the same rule:
+team score minus the leave-one-out group mean, with zero-variance groups
+dropped. The result matched the logged mean |advantage| exactly. This is an
+independent check of the credit pipeline under team reward
+([experiment 1](../../sources/sacrifice-relay-experiment-1.md)).
+
+- The share of groups dropped was not reported. [open]
+- Groups that survive can still carry too little signal for a rare choice.
+  There were 3–4 sacrifices per step, each sharing one advantage with every
+  token of its playthrough. That is a different way for a behaviour's gradient
+  to vanish (see [rewarded but not learned](rewarded-choice-not-learned.md)).
+- The study filtered problems to those solved in 1–3 of 4 attempts
+  ([DeepCoder](../entities/deepcoder.md)). The source gives no reason, but the
+  filter also keeps group rewards varied.
+
+## Sparse 0/1 scoring on the relay: the share of silent groups [partial]
+
+Experiment 2 made the score sparse: 1 only if the tests pass *and* the hidden
+rule is followed. That made zero-variance groups the main risk. Rescoring
+experiment 1's games under that rule predicted that 59% of groups would tie.
+The run had an abort rule for ≥ 75% tied groups over steps 0–5.
+
+The setting: G=4 playthroughs per repo, team or individual reward, the
+leave-one-out baseline, one seed. Source:
+[study report §3](../../sources/sacrifice-relay-experiments-1-3-and-evals.md);
+`experiments/2026-09-25_sacrifice-relay/exp2_mandatory_rule/README.md`.
+
+| Run | Groups with no learning signal, by 10-step block |
+|---|---|
+| Exp 2 team, [Qwen3.8-27B](../entities/qwen3-8-27b.md), 4 repos per step | 42%, 18%, 18%, 15%, 10%, 8% (steps 0–59) |
+| Exp 2 team, [Qwen3.6-35B-A3B](../entities/qwen3-6-35b-a3b.md), 8 repos per step | 49% (0–9), 31% (20–29), 12% (40–49), 6% (60–69), 8% (70–79) |
+| Exp 2 individual, 27B | 40%, 45%, 40% (steps 0–29) |
+
+- **The share falls when training works.** Once some playthroughs score, the
+  ties break, and the signal gets richer as the policy improves. [partial]
+- **Under individual reward it does not.** At step 14 every group tied, so
+  the run made no update; that arm has 29 adapters for 30 steps. Contributor 1
+  never scored (0 of 480), so all of its groups were silent. [partial]
+- **The prompt sentence that raised the base review rate** (see
+  [rewarded but not learned](rewarded-choice-not-learned.md)) kept the
+  early share below the abort line. Under experiment 2's planned prompt,
+  steps 0–1 had no learning signal at all, and the learner skipped both.
+  [partial]
+- For experiment 1 the share of dropped groups is still not reported. [open]
 
 ## Bugs this exposed (fixed in M3-5-fix, 70d7cd1)
 

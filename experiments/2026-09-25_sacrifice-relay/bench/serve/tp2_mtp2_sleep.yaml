@@ -1,0 +1,14 @@
+# Option 2 (time-shared GPUs): vLLM split across both GPUs (tensor parallel), MTP, sleep mode, and
+# at most 45% of each GPU so the learner's resident model copy (~52 GiB/GPU measured) fits beside it.
+# enable_sleep_mode also sets VLLM_SERVER_DEV_MODE=1, which the sleep/wake endpoints need.
+model: qwen3_8_27b
+python: /opt/vllm/bin/python
+cuda_visible_devices: "0,1"
+tensor_parallel_size: 2
+gpu_memory_utilization: 0.45
+max_model_len: 32768
+max_lora_rank: 32
+max_loras: 4
+learner_ranks: [32]
+extra_args: ["--speculative-config", '{"method": "mtp", "num_speculative_tokens": 2}']
+enable_sleep_mode: true

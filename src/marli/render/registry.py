@@ -47,10 +47,20 @@ def _qwen(name: str, hf_id: str | None) -> DeltaRenderer:
     from marli.render.hf import HFTemplateRenderer
     from marli.render.qwen import qwen_profile
 
-    xml = name.startswith("qwen3_5")
-    hf_id = hf_id or ("Qwen/Qwen3.5-4B" if xml else "Qwen/Qwen3-8B")
+    qwen38 = name.startswith("qwen3_8")
+    xml = qwen38 or name.startswith("qwen3_5")
+    default_hf_id = (
+        "Qwen/Qwen3.8-27B" if qwen38 else ("Qwen/Qwen3.5-4B" if xml else "Qwen/Qwen3-8B")
+    )
+    hf_id = hf_id or default_hf_id
     tokenizer = _tokenizer(hf_id)
-    profile = qwen_profile(tokenizer, xml=xml, thinking=not name.endswith("_nothink"))
+    effort = {"qwen3_8_medium": "medium", "qwen3_8_low": "low"}.get(name, "xhigh")
+    profile = qwen_profile(
+        tokenizer,
+        xml=xml,
+        thinking=not name.endswith("_nothink"),
+        reasoning_effort=effort if qwen38 else None,
+    )
     return HFTemplateRenderer(tokenizer, name, profile, tokenizer_sha=_tokenizer_sha(hf_id))
 
 
@@ -58,6 +68,10 @@ _FACTORIES: dict[str, Callable[[str | None], DeltaRenderer]] = {
     "fake": _fake,
     "qwen3_5": partial(_qwen, "qwen3_5"),
     "qwen3_5_nothink": partial(_qwen, "qwen3_5_nothink"),
+    "qwen3_8": partial(_qwen, "qwen3_8"),
+    "qwen3_8_medium": partial(_qwen, "qwen3_8_medium"),
+    "qwen3_8_low": partial(_qwen, "qwen3_8_low"),
+    "qwen3_8_nothink": partial(_qwen, "qwen3_8_nothink"),
     "qwen3": partial(_qwen, "qwen3"),
     "qwen3_nothink": partial(_qwen, "qwen3_nothink"),
     "gpt_oss_low": partial(_harmony, "gpt_oss_low"),

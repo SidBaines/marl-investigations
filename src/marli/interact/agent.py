@@ -99,6 +99,7 @@ from marli.errors import BackendError, ConfigError
 from marli.interact.context import ContextManager
 from marli.interact.limits import Allocation, Ledger, Limits
 from marli.interact.records import Recorder
+from marli.interact.replay import ReplayDivergence, ReplayPlan, normalize_result
 from marli.interact.scheduler import Scheduler, Ticket
 from marli.interact.system import AgentResult, RoleSpec, SystemIO
 from marli.interact.tools import TOOLS, Tool, ToolCtx, ToolResult, run_tool, truncate_output
@@ -120,6 +121,7 @@ from marli.policy.base import (
     CallMeta,
     ChatPolicy,
     Policy,
+    Sample,
     SamplingSpec,
     TokenPolicy,
     check_trainable_sampling,
@@ -217,6 +219,7 @@ class AgentRuntime:
         task_id: str,
         episode_idx: int,
         sampling: SamplingOverrides,
+        replay: ReplayPlan | None = None,
     ) -> None:
         self.info = info
         self.policy = policy
@@ -235,6 +238,8 @@ class AgentRuntime:
         self.task_id = task_id
         self.episode_idx = episode_idx
         self.sampling = sampling
+        # eval continue: recorded calls replay exactly up to the episode's cut (replay.py).
+        self.replay = replay
         tool_ctx = ToolCtx(
             agent_id=info.agent_id,
             role=info.role,
@@ -255,6 +260,8 @@ class AgentRuntime:
                 )
         elif policy.trainable:
             raise ConfigError("trainable chat policy is not supported")
+        if replay is not None and renderer is None:
+            raise ConfigError("episode continuation requires token policies")
         if policy.trainable:
             check_trainable_sampling(self._sampling_spec(1), policy_id=info.policy_id)
         self.system_prompt = role.system_prompt.format(
@@ -589,7 +596,7 @@ class AgentRuntime:
                 allocation,
                 forced=False,
             )
-            if parsed is None or self._apply_control(control):
+            if self.error is not None or parsed is None or self._apply_control(control):
                 return
             if parsed.tool_calls:
                 self._n_nudges = 0
@@ -626,14 +633,15 @@ class AgentRuntime:
                 # tools; it only gets the nudge message, not a strike.
                 if parsed.termination != Termination.LENGTH:
                     self._n_nudges += 1
-                self._nudges = [
-                    Msg(
-                        "user",
-                        "Please use a tool or call return_report with your findings."
-                        if "return_report" in self.tools
-                        else "Please use a tool to act or submit your final answer.",
-                    )
-                ]
+                if "return_report" in self.tools:
+                    nudge = "Please use a tool or call return_report with your findings."
+                elif "submit" in self.tools:
+                    nudge = "Please use a tool to act or submit your final answer."
+                elif "end_session" in self.tools:
+                    nudge = "Please use a tool to act, or call end_session when you are done."
+                else:
+                    nudge = "Please use a tool to act."
+                self._nudges = [Msg("user", nudge)]
 
     def _apply_control(self, control: dict[str, Any]) -> bool:
         if "submit" in control:
@@ -759,8 +767,13 @@ class AgentRuntime:
         text = ""
         parsed: ParsedTurn | None = None
         cancelled: asyncio.CancelledError | None = None
+        replayed: Call | None = None
         try:
-            if self.renderer:
+            if self.renderer and self.replay is not None:
+                sample, seed, replayed = await self._continue_sample(
+                    allocation, seed, meta, purpose, prompt_len
+                )
+            elif self.renderer:
                 sample = await cast(TokenPolicy, self.policy).sample(
                     tuple(self._buffer()),
                     self._sampling_spec(allocation.max_tokens),
@@ -815,7 +828,11 @@ class AgentRuntime:
             call_id=call_id,
             error=self.error,
         )
-        timing = Timing(started, self.recorder.clock.now() - started)
+        timing = (
+            replayed.timing
+            if replayed is not None
+            else Timing(started, self.recorder.clock.now() - started)
+        )
         tool_records: list[ToolCallRecord] = []
         control: dict[str, Any] = {}
         try:
@@ -827,6 +844,7 @@ class AgentRuntime:
                     publish_seq=seq
                     if purpose == Purpose.ACT and self.role.publish_final_text and parsed.content
                     else None,
+                    recorded=replayed.tool_calls if replayed is not None else None,
                 )
         finally:
             self.recorder.add_call(
@@ -859,6 +877,104 @@ class AgentRuntime:
             raise cancelled
         return parsed, control
 
+    async def _continue_sample(
+        self,
+        allocation: Allocation,
+        seed: int,
+        meta: CallMeta,
+        purpose: Purpose,
+        prompt_len: int,
+    ) -> tuple[Sample, int, Call | None]:
+        """Replay, extend or live-sample one call; return (sample, seed used, replayed)."""
+        assert self.replay is not None and self.renderer is not None
+        plan, policy = self.replay, cast(TokenPolicy, self.policy)
+        directive = plan.directive(self.info.agent_id, self._call_index)
+        if directive.call is not None:
+            recorded = directive.call
+            ids = recorded.completion_ids
+            stopped = bool(ids) and ids[-1] in self.renderer.stop_token_ids
+            cut = directive.kind == "cut"
+            problem = plan.check(
+                recorded,
+                prompt_len=prompt_len,
+                purpose=purpose,
+                max_tokens=allocation.max_tokens,
+                stopped=stopped,
+                cut=cut,
+            )
+            if problem is not None:
+                plan.diverge(problem)  # raises unless on_divergence="live"
+            else:
+                plan.consume(self.info.agent_id)
+                if not (cut and not stopped and allocation.max_tokens > len(ids)):
+                    return (
+                        Sample(
+                            ids,
+                            recorded.logprobs,
+                            Termination.STOP if stopped else Termination.LENGTH,
+                            recorded.policy_version,
+                            recorded.usage,
+                        ),
+                        recorded.seed,
+                        recorded,
+                    )
+                # The recorded completion was cut by the old budget: keep sampling it.
+                live_seed = plan.live_seed(seed)
+                more = await policy.sample(
+                    tuple(self._buffer()) + ids,
+                    self._sampling_spec(allocation.max_tokens - len(ids)),
+                    seed=live_seed,
+                    meta=replace(meta, continued_tokens=len(ids)),
+                )
+                plan.extended = True
+                plan.extended_tokens += len(more.completion_ids)
+                return (
+                    Sample(
+                        ids + more.completion_ids,
+                        (recorded.logprobs or ()) + (more.logprobs or ()),
+                        more.termination,
+                        more.policy_version,
+                        replace(
+                            more.usage,
+                            prompt_tokens=recorded.usage.prompt_tokens,
+                            completion_tokens=recorded.usage.completion_tokens
+                            + more.usage.completion_tokens,
+                            cost_usd=recorded.usage.cost_usd + more.usage.cost_usd,
+                        ),
+                    ),
+                    live_seed,
+                    None,
+                )
+        live_seed = plan.live_seed(seed)
+        sample = await policy.sample(
+            tuple(self._buffer()),
+            self._sampling_spec(allocation.max_tokens),
+            seed=live_seed,
+            meta=meta,
+        )
+        return sample, live_seed, None
+
+    def _replayed_result(
+        self,
+        call_id: str,
+        index: int,
+        call: Any,
+        live: ToolResult,
+        recorded: Sequence[ToolCallRecord],
+    ) -> ToolResult:
+        """The recorded result text; the live run only rebuilt the workspace state."""
+        assert self.replay is not None
+        if index >= len(recorded) or recorded[index].name != call.name:
+            self.replay.diverge(
+                f"{call_id}: tool call {index} ({call.name}) does not match the recording"
+            )
+            return live
+        self.replay.tool_calls_replayed += 1
+        shown = truncate_output(live.content, self.limits.tool_output_chars)
+        if normalize_result(shown) != normalize_result(recorded[index].result):
+            self.replay.tool_mismatches += 1
+        return ToolResult(recorded[index].result, recorded[index].error, control=live.control)
+
     async def _execute_tools(
         self,
         parsed: ParsedTurn,
@@ -866,6 +982,7 @@ class AgentRuntime:
         call_id: str,
         *,
         publish_seq: int | None = None,
+        recorded: Sequence[ToolCallRecord] | None = None,
     ) -> tuple[list[ToolCallRecord], dict[str, Any]]:
         records: list[ToolCallRecord] = []
         control: dict[str, Any] = {}
@@ -923,8 +1040,23 @@ class AgentRuntime:
                             self.scheduler.tool_phase(self.info.agent_id)
                         )
                         shared = True
-                    result = await run_tool(tool, ctx, cast(dict[str, Any], call.arguments))
-                    stopped = tool.control and result.error is None
+                    try:
+                        result = await run_tool(tool, ctx, cast(dict[str, Any], call.arguments))
+                    except BackendError as exc:
+                        self.error = f"{self.info.agent_id}: {type(exc).__name__}: {exc}"
+                        self.ended_by = "error"
+                        result = ToolResult(f"error: {self.error}", self.error)
+                if recorded is not None and self.error is None:
+                    try:
+                        result = self._replayed_result(call_id, index, call, result, recorded)
+                    except ReplayDivergence as exc:
+                        self.error = f"{self.info.agent_id}: ReplayDivergence: {exc}"
+                        self.ended_by = "error"
+                        result = ToolResult(f"error: {self.error}", self.error)
+                if tool is not None and not stopped:
+                    stopped = self.error is not None or (tool.control and result.error is None)
+                elif self.error is not None:
+                    stopped = True
                 writes = [
                     write
                     for write in self.workspace.log()[before:]
@@ -975,6 +1107,19 @@ class AgentRuntime:
                     index=index,
                     error=result.error,
                 )
+            if (
+                recorded is not None
+                and self.error is None
+                and len(parsed.tool_calls) != len(recorded)
+            ):
+                assert self.replay is not None
+                try:
+                    self.replay.diverge(
+                        f"{call_id}: {len(parsed.tool_calls)} tool calls, recorded {len(recorded)}"
+                    )
+                except ReplayDivergence as exc:
+                    self.error = f"{self.info.agent_id}: ReplayDivergence: {exc}"
+                    self.ended_by = "error"
             if publish_seq is not None:
                 if not shared:
                     await phase.enter_async_context(self.scheduler.tool_phase(self.info.agent_id))

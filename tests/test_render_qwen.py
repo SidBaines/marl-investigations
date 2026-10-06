@@ -74,10 +74,20 @@ def offline() -> Iterator[None]:
         yield
 
 
-@pytest.fixture(scope="module", params=NAMES)
+# Each profile on its default tokenizer, plus qwen3_5 on Qwen3.6-35B-A3B's own template (a
+# Qwen3.5 template with a preserve_thinking switch, which the renderer leaves off).
+RENDERERS = [(name, None) for name in NAMES] + [("qwen3_5", "Qwen/Qwen3.6-35B-A3B")]
+
+
+@pytest.fixture(
+    scope="module",
+    params=RENDERERS,
+    ids=[name if hf_id is None else f"{name}-{hf_id.split('/')[1]}" for name, hf_id in RENDERERS],
+)
 def renderer(request: pytest.FixtureRequest) -> HFTemplateRenderer:
+    name, hf_id = request.param
     try:
-        result = get_renderer(request.param)
+        result = get_renderer(name, hf_id=hf_id)
     except OSError as exc:
         pytest.skip(f"Cached tokenizer unavailable offline: {exc}")
     assert isinstance(result, HFTemplateRenderer)
@@ -419,7 +429,7 @@ def test_forced_prefix_uses_first_required_and_explicit_parameter(
 
 
 def test_lineage_tool_state_is_not_shared(renderer: HFTemplateRenderer) -> None:
-    other = get_renderer(renderer.name)
+    other = get_renderer(renderer.name, hf_id=renderer.tokenizer.name_or_path)
     assert other is not renderer and other.tokenizer is renderer.tokenizer
     renderer.initial(SYSTEM, TOOLS, [USER])
     other.initial(SYSTEM, (), [USER])
@@ -460,7 +470,8 @@ def subprocess_env() -> dict[str, str]:
 def test_tokenizer_sha_stable(renderer: HFTemplateRenderer) -> None:
     assert len(renderer.tokenizer_sha) == 16
     int(renderer.tokenizer_sha, 16)
-    assert renderer.tokenizer_sha == get_renderer(renderer.name).tokenizer_sha
+    same = get_renderer(renderer.name, hf_id=renderer.tokenizer.name_or_path)
+    assert renderer.tokenizer_sha == same.tokenizer_sha
 
 
 def test_tokenizer_sha_across_processes() -> None:

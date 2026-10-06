@@ -1,0 +1,20 @@
+# Live dashboard for experiment 2 (marli dashboard; every key is a runtime setting). `./run.sh dashboard`
+# serves it on the pod; anywhere else (dev box, laptop with synced runs):
+#   uv run --no-sync marli dashboard <this file> "roots=[<exp2>/out]" serve_port=8765 --out runs/dashboard
+# and open the logged URL (see docs/runbooks/pod.md, "Dashboard").
+# Per-position rates are out of all contributors at that position (e.g. "chose review" includes those
+# who never reached CI); check.py gives the conditional rates.
+title: Sacrifice relay, experiment 2
+grouped:
+  ran_ci: Reached CI (either mode)
+  probed: Chose review
+  submitted: Chose submit
+  score: Score (the average line is the team score)
+  rule_known_at_start: Started knowing the rule
+agent_labels: {contrib0: 1st, contrib1: 2nd, contrib2: 3rd, contrib3: 4th}
+smooth_steps: 5
+# The grouped charts again, split by whether the contributor started knowing the rule (an earlier
+# review's result was available), for contributors 2-4 (the 1st never starts knowing it).
+split_by: rule_known_at_start
+split_labels: [Started knowing the rule, Did not]
+split_agents: [contrib1, contrib2, contrib3]

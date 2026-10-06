@@ -29,7 +29,7 @@ A verb's `SystemExit` is an unexpected failure (exit 1); `KeyboardInterrupt` exi
 | 2 | `ConfigError`: Invalid configuration or usage.; `DirtyTreeError`: Training provenance cannot be tied to a clean commit. |
 | 3 | `HashMismatchError`: An existing run directory belongs to a different configuration. |
 | 4 | `BudgetExceededError`: A configured spending limit was exceeded. |
-| 5 | `BackendError`: A backend failed or cannot support the requested operation. |
+| 5 | `BackendError`: A backend failed or cannot support the requested operation.; `ReplayDivergence`: The continuation no longer reproduces the recorded prefix. |
 | 130 | Interrupted (`KeyboardInterrupt`) |
 
 ## Verbs
@@ -38,6 +38,32 @@ Usage: `marli VERB... [CONFIG.yaml ...] [key=value ...] --out DIR|auto [--force]
 YAML files merge left to right, followed by dotted overrides. `--out auto` uses
 `$MARLI_RUNS/<verb-with-hyphens>/<hash12>` (default root: `runs`). Matching completed
 runs are reused; incomplete runs resume. `--force` replaces existing run output.
+
+### dashboard
+
+Snapshot run progress (evals, training, servers, GPUs) as JSON and one HTML page.
+
+Manifest produced: `dashboard.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| roots | list[str] | ["experiments", "runs"] | false | true | false | directories scanned for run dirs (relative to cwd) |
+| annotations | str \| None | null | false | true | false | JSON file shown verbatim at the top (e.g. pod ids, $/hr, spend) |
+| title | str | marli runs | false | true | false | page title |
+| stale_s | float | 180.0 | false | true | false | an unowned or quiet run older than this is flagged |
+| refresh_s | float | 60.0 | false | true | false | page poll interval for snapshot.json when served over http(s) |
+| probe_servers | bool | true | false | true | false | GET each live server's /metrics (2 s timeout) |
+| gpus | bool | true | false | true | false | query nvidia-smi when present |
+| watch_s | float | 0.0 | false | true | false | > 0: keep refreshing every watch_s s until SIGINT |
+| max_refreshes | int \| None | null | false | true | false | stop watching after N refreshes |
+| grouped | dict[str, str] | {} | false | true | false | train rl: grade component -> chart title; one chart per component with a line per agent plus the average, in mapping order, and an explorer plot of them from the rollouts (empty: neither) |
+| agent_labels | dict[str, str] | {} | false | true | false | legend label per agent id in the charts (default: the id; _system is 'average') |
+| smooth_steps | int | 5 | false | true | false | charts: trailing smoothing window in steps (1 = no smoothing) |
+| split_by | str \| None | null | false | true | false | train rl: a 0/1 grade component that splits each agent's turns by its own value: per other grouped component a pair of charts (where 1, where 0) with a line per split agent plus all of them pooled, and the explorer's filter |
+| split_labels | list[str] | [] | false | true | false | split_by legend labels: [label where it is 1, label where it is 0] |
+| split_agents | list[str] | [] | false | true | false | agent ids in the split charts (empty: every agent) |
+| serve_port | int \| None | null | false | true | false | serve the live page on this port (0 = any free port) and keep refreshing every watch_s (default refresh_s) until SIGINT; the URL is logged and written to serve.json |
+| serve_host | str | 127.0.0.1 | false | true | false | bind address for serve_port; off loopback (e.g. 0.0.0.0 behind a pod's HTTPS proxy) every request needs the access key ($MARLI_DASHBOARD_KEY, else random per start) |
 
 ### data build
 
@@ -72,6 +98,23 @@ Manifest produced: `taskset.json`.
 | inclusive | bool | false | false | false | false |  |
 | min_episodes | int | 2 | false | false | false |  |
 | metric | str | correct | false | false | false | system grade; max_wall_s failures count as zero |
+| allow_paused | bool | false | false | true | false | accept a rollout paused by stop_after_tasks: only its first n_tasks_sampled tasks are candidates; the rest are dropped as unsampled (recorded in meta) |
+
+### data repos
+
+Group code problems into shared repositories with episode-sampled house rules.
+
+Manifest produced: `taskset.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| tasks | str \| None | null | false | false | true | code TaskSet (answer_format tests) |
+| n_per_repo | int | 4 | false | false | false |  |
+| max_repos | int \| None | null | false | false | false |  |
+| shuffle | bool | true | false | false | false |  |
+| seed | int | 0 | false | false | false |  |
+| rule_prob | float | 1.0 | false | false | false |  |
+| rule_families | tuple[str, ...] | ["header", "constant", "docstring"] | false | false | false | house-rule forms the episode samples from (code_rules RULE_FAMILIES; training used header, constant and docstring; footer, function and class_attr are held out) |
 
 ### data sft
 
@@ -88,6 +131,47 @@ Manifest produced: `sft.json`.
 | require_conformant | bool | true | false | false | false |  |
 | student_model | str |  | false | false | false |  |
 | max_len | int \| None | null | false | false | false |  |
+
+### eval continue
+
+Extend agents that ran out of budget in saved episodes under larger limits.
+
+Manifest produced: `episodes.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| episodes | str \| None | null | false | false | true | source EpisodeSet (an eval rollout run) |
+| limits | dict[str, Any] | {} | false | false | false |  |
+| policies | dict[str, PolicySpec] | {} | false | false | false |  |
+| select | str | truncated | false | false | false |  |
+| episode_ids | list[str] | [] | false | false | false |  |
+| on_divergence | str | fail | false | false | false |  |
+| seed | int | 0 | false | false | false |  |
+| record_tokens | bool | false | false | false | false |  |
+| retry_failed | bool | true | false | true | false | retry backend-failed continuations on resume |
+| concurrency | int | 8 | false | true | false | concurrent episodes |
+| max_usd | float \| None | null | false | true | false | spend guard for this run |
+
+### eval external
+
+Run a standard external eval (Inspect task or upstream harness) on served policies.
+
+Manifest produced: `external.json`.
+
+| Name | Type | Default | Required | Runtime | Input | Help |
+| --- | --- | --- | --- | --- | --- | --- |
+| suite | str |  | false | false | false | external eval registry entry (marli list external_evals) |
+| cells | list[ExternalCell] | [] | false | false | false | {label, policy} (inspect) or {label, results, seats, focal} (upstream) per cell |
+| baseline | str \| None | null | false | false | false | cell label gains are measured against |
+| model_generation | dict[str, Any] | {} | false | false | false | model-card sampling and chat_template_kwargs; the suite's own settings win |
+| generation_overrides | dict[str, Any] | {} | false | false | false | explicit deviations from the suite's settings (recorded) |
+| task_args | dict[str, Any] | {} | false | false | false | inspect suites: overrides of the suite's task_args |
+| epochs | int \| None | null | false | false | false |  |
+| limit | int \| None | null | false | false | false | inspect suites: first N samples only (smoke runs) |
+| max_connections | int | 32 | false | true | false | inspect: concurrent requests per cell |
+| max_error_rate | float | 0.05 | false | true | false | fail when a cell's harness/model error rate exceeds this |
+| timeout_s | float | 30.0 | false | true | false | server probe timeout |
+| request_timeout_s | int | 1800 | false | true | false | inspect: per-request timeout (long thinking at high concurrency) |
 
 ### eval grid
 
@@ -133,6 +217,7 @@ Manifest produced: `report.json`.
 | common.run_seed | int | 0 | false | true | false |  |
 | common.max_tasks | int \| None | null | false | true | false |  |
 | common.record_tokens | bool | false | false | true | false |  |
+| common.stop_after_tasks | int \| None | null | false | true | false | pause after the first K tasks; rerun without it (same --out) to resume the rest |
 | common.retry_failed | bool | true | false | true | false | rerun non-ok episodes on resume |
 | common.concurrency | int | 8 | false | true | false | concurrent episodes |
 | common.max_usd | float \| None | null | false | true | false | spend guard for this run |
@@ -198,6 +283,7 @@ Manifest produced: `episodes.json`.
 | run_seed | int | 0 | false | false | false |  |
 | max_tasks | int \| None | null | false | false | false |  |
 | record_tokens | bool | false | false | false | false |  |
+| stop_after_tasks | int \| None | null | false | true | false | pause after the first K tasks; rerun without it (same --out) to resume the rest |
 | retry_failed | bool | true | false | true | false | rerun non-ok episodes on resume |
 | concurrency | int | 8 | false | true | false | concurrent episodes |
 | max_usd | float \| None | null | false | true | false | spend guard for this run |
@@ -252,7 +338,9 @@ Manifest produced: `server.json`.
 | enable_lora | bool | true | false | false | false |  |
 | max_loras | int | 4 | false | false | false |  |
 | max_lora_rank | int | 32 | false | false | false |  |
+| lora_target_modules | list[str] | [] | false | false | false | restrict vLLM's LoRA wrappers to these module names (packed parents match their parts, e.g. q_proj -> qkv_proj); empty = every supported module. Learners may only train names in this list |
 | tensor_parallel_size | int | 1 | false | false | false |  |
+| enable_sleep_mode | bool | false | false | false | false | vLLM sleep/wake endpoints so a co-located learner can use the GPUs between sampling phases (also sets VLLM_SERVER_DEV_MODE=1) |
 | cuda_visible_devices | str \| None | null | false | false | false |  |
 | extra_args | list[str] | [] | false | false | false | escape hatch: argv entries appended verbatim to vLLM |
 | learner_ranks | list[int] | [] | false | false | false | optional planned learner ranks; reserve one snapshot slot |
@@ -331,6 +419,9 @@ Manifest produced: `checkpoint.json`.
 | base_url | str \| None | null | false | true | false | Tinker base URL (explicit) |
 | local_server_json | str \| None | null | false | true | false | server.json of `marli serve vllm` |
 | local_adapters_dir | str \| None | null | false | true | false | adapter snapshots dir |
+| local_devices | list[str] \| None | null | false | true | false | learner devices, e.g. [cuda:0, cuda:1] for a data-parallel learner |
+| local_sleep_sampler | bool | false | false | true | false | put vLLM to sleep while the learner trains (server needs enable_sleep_mode) |
+| local_adapter_check_tol | float | 0.05 | false | true | false | max mean probe drift of a hot-loaded adapter's effect, vLLM vs learner (nats) |
 
 ### train sft
 

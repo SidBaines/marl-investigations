@@ -312,6 +312,26 @@ async def test_validate_before_loading_heavy_stack(local: tuple) -> None:
         await new_learner(backend, "z")
 
 
+async def test_restricted_server_lora_must_cover_learner_targets(local: tuple) -> None:
+    backend, _, _ = local
+    model = replace(load_model("qwen3_5_4b"), renderer="fake")
+    targets = model.lora["target_modules"]
+    server = Server.load(backend.server_json)
+    replace(server, lora_target_modules=targets[:-1]).save()
+    with pytest.raises(ConfigError, match=f"would also train \\['{targets[-1]}'\\]"):
+        await new_learner(backend)
+    with pytest.raises(ConfigError, match="every nn.Linear"):
+        await backend.create_learner(
+            "x",
+            LearnerSpec(base_model=model.name, backend="local", rank=16),
+            model=replace(model, lora={}),
+            seed=0,
+        )
+    assert backend.pool is None
+    replace(server, lora_target_modules=[*targets, "lm_head"]).save()
+    await new_learner(backend)
+
+
 async def test_registry_and_names_survive_backend_close(local: tuple) -> None:
     backend, _, _ = local
     with pytest.raises(ConfigError, match="requires server_json and adapters_dir"):

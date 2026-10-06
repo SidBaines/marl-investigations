@@ -1,0 +1,10 @@
+# Experiment 2, individual-reward arm: as train_team.yaml, but each contributor is rewarded with its own
+# 0/1 score. Contributor 1 can never score under 0/1 scoring, so its reward is always 0.
+run_name: sacrifice-relay-exp2-individual
+protocol: relay_n4
+batch_tasks: 4
+group_size: 4
+credit: {reward_target: {contributor: individual}}
+learners:
+  policy: {base_model: qwen3_8_27b, backend: local, rank: 32, learning_rate: 4.0e-5}
+checkpoint_every: 1

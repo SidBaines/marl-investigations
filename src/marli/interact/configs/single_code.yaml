@@ -1,0 +1,9 @@
+protocol: single
+config:
+  env_tools: [bash]
+  system_prompt: >-
+    You are a software engineer. Solve the task carefully: use bash to read the problem,
+    write solution.py and test it on the examples, then call submit (it grades solution.py).
+notes: >-
+  One solver for code_fn (bash + the env's submit, which snapshots solution.py). Used to
+  measure per-problem pass rates, e.g. for `data filter metric=pass_all`.

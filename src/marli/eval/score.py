@@ -73,6 +73,9 @@ async def score(cfg: ScoreConfig, run: RunDir) -> Scores:
         needs_env = cfg.regrade or (groupable and len(episodes) > 1)
         try:
             if needs_env:
+                # Scoring never uses hidden per-episode env state (a regraded submission
+                # carries everything its grade needs), but setup() may require a seed.
+                env.begin_episode(0)
                 await env.setup()
             for episode in episodes:
                 answer = episode.outcome.final_answer

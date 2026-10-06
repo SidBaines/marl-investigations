@@ -1,0 +1,11 @@
+# Shared by the pre-training evals (filter, gate). The policy ref is set on the command line:
+#   policies.q.ref="vllm:@<out/serve/server.json>#qwen3_8_27b"
+policies:
+  q: {ref: "vllm:@server.json#qwen3_8_27b", renderer: qwen3_8_medium, model: qwen3_8_27b}
+schedule: lockstep
+concurrency: 64
+limits:
+  call: {max_tokens: 6144}
+  agent: {max_gen_tokens: 12288, max_calls: 30, final_reserve: 0}
+  ctx: {max_ctx: 24576}
+  on_exhaust: none

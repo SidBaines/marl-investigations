@@ -905,6 +905,57 @@ async def test_stale_sweep_preserves_live_and_unmarked_directories(sandbox_host:
         await new.close()
 
 
+async def test_stale_sweep_tolerates_directory_removed_concurrently(
+    sandbox_host: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stale = SubprocessSandbox()
+    await stale.start()
+    stale_path = stale.workdir
+    stale._release_uid()
+    stale._started = False
+    original = sandbox_module._uid_pids
+
+    def closed_meanwhile(uid: int) -> list[int]:
+        # Another process's close() finished its rmtree after we read the marker.
+        if stale_path.exists():
+            shutil.rmtree(stale_path)
+        return original(uid)
+
+    monkeypatch.setattr(sandbox_module, "_uid_pids", closed_meanwhile)
+    new = SubprocessSandbox()
+    try:
+        await new.start()
+        assert not stale_path.exists() and new.workdir.exists()
+    finally:
+        monkeypatch.setattr(sandbox_module, "_uid_pids", original)
+        await new.close()
+
+
+async def test_concurrent_commands_do_not_starve_the_default_executor(
+    sandbox_host: Path,
+) -> None:
+    # Each command's resource watchdog used to hold an executor thread until the
+    # command's cleanup finished, while that cleanup awaited to_thread: with more
+    # concurrent commands than executor threads, every episode froze.
+    import concurrent.futures
+
+    asyncio.get_running_loop().set_default_executor(
+        concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    )
+    boxes = [SubprocessSandbox() for _ in range(4)]
+    for box in boxes:
+        await box.start()
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(box.exec("sleep 0.3; echo ok", timeout_s=10) for box in boxes)),
+            timeout=20,
+        )
+        assert [(r.exit_code, r.stdout.strip()) for r in results] == [(0, "ok")] * 4
+    finally:
+        for box in boxes:
+            await box.close()
+
+
 async def test_proc_scans_do_not_block_event_loop(
     sandbox: SubprocessSandbox, monkeypatch: pytest.MonkeyPatch
 ) -> None:

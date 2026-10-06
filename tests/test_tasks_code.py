@@ -486,6 +486,37 @@ async def test_deepcoder_build_excludes_normalized_lcb_text_before_truncation(
     assert built.handle.inputs == (InputRef.of(excluded.handle),)
 
 
+async def test_deepcoder_no_lcb_never_reads_livecodebench_and_excludes_used_problems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    read: list[str | None] = []
+
+    def loader(hf_id: str, subset: str | None, **kwargs: Any) -> list[dict[str, Any]]:
+        read.append(subset)
+        return [
+            {**deepcoder_row(subset or "taco"), "problem": "Synthetic: add two integers."},
+            {**deepcoder_row(subset or "taco"), "problem": f"Synthetic: {subset} unique."},
+        ]
+
+    monkeypatch.setattr(build_module, "load_tasks", partial(load_tasks, loader=loader))
+    used = await run_verb(
+        "data build", BuildConfig(source="deepcoder", max_n=2), out=tmp_path / "used"
+    )
+    assert read == ["primeintellect", "taco", "lcbv5"]
+    read.clear()
+    held = await run_verb(
+        "data build",
+        BuildConfig(source="deepcoder_no_lcb", exclude=str(used.manifest)),
+        out=tmp_path / "held",
+    )
+    assert read == ["primeintellect", "taco"]
+    # The shared problem and primeintellect's were used; lcbv5's is never read.
+    assert [task.task_id for task in read_tasks(held.handle)] == ["deepcoder_no_lcb/taco/1"]
+    assert held.handle.meta["counts"] == {
+        "loaded": 3, "kept": 1, "dropped_exact": 2, "dropped_ngram": 0
+    }
+
+
 def test_prime_function_call_mapping_preserves_argument_and_result_types() -> None:
     task = normalize_code_row(
         SOURCES.load("deepcoder"), prime_function_row(), row_index=0, split="train"

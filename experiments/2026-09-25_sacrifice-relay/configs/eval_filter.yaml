@@ -1,0 +1,9 @@
+# Per-problem pass@4 of the untrained model: one agent, plain code_fn (no house rule).
+env: code_fn
+env_config: {stop_on_first_failure: true, max_grade_s: 60}
+protocol: single_code
+seating: {solver: q}
+episodes_per_task: 4
+concurrency: 128
+limits:
+  episode: {max_gen_tokens: 12288, max_ticks: 64, max_wall_s: 3600}

@@ -40,6 +40,9 @@ class RolloutConfig:
     run_seed: int = 0
     max_tasks: int | None = None
     record_tokens: bool = False
+    stop_after_tasks: int | None = runtime_field(
+        None, help="pause after the first K tasks; rerun without it (same --out) to resume the rest"
+    )
     retry_failed: bool = runtime_field(True, help="rerun non-ok episodes on resume")
     concurrency: int = runtime_field(8, help="concurrent episodes")
     max_usd: float | None = runtime_field(None, help="spend guard for this run")
@@ -48,8 +51,10 @@ class RolloutConfig:
         for name in ("episodes_per_task", "concurrency"):
             if type(getattr(self, name)) is not int or getattr(self, name) < 1:
                 raise ConfigError(f"{name} must be a positive integer")
-        if self.max_tasks is not None and (type(self.max_tasks) is not int or self.max_tasks < 0):
-            raise ConfigError("max_tasks must be a non-negative integer or None")
+        for name in ("max_tasks", "stop_after_tasks"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < 0):
+                raise ConfigError(f"{name} must be a non-negative integer or None")
         if self.schedule not in {"lockstep", "async"}:
             raise ConfigError("schedule must be lockstep or async")
         self.limits.__post_init__()
@@ -81,8 +86,18 @@ class EpisodeSet(Handle):
 
 
 def should_resume(handle: EpisodeSet, cfg: RolloutConfig) -> bool:
-    """Completed sampling remains retryable while transient failures remain."""
-    return cfg.retry_failed and handle.n_failed > 0
+    """Reopen to retry transient failures, or to sample past a paused run's stopping point.
+
+    Episode identity never depends on stop_after_tasks, so a resumed run keeps
+    every episode sampled before the pause.
+    """
+    if cfg.retry_failed and handle.n_failed > 0:
+        return True
+    sampled, total = handle.meta.get("n_tasks_sampled"), handle.meta.get("n_tasks")
+    if sampled is None or total is None:
+        return False
+    wanted = total if cfg.stop_after_tasks is None else min(cfg.stop_after_tasks, total)
+    return wanted > sampled
 
 
 async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
@@ -92,6 +107,8 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
     tasks = read_tasks(taskset)[: cfg.max_tasks]
     if len({task.task_id for task in tasks}) != len(tasks):
         raise ConfigError("TaskSet task_id values must be unique")
+    planned = tasks[: cfg.stop_after_tasks]
+    paused = len(planned) < len(tasks)
     name, _, protocol_config = resolve_protocol(cfg.protocol, cfg.protocol_config)
     protocol = build_protocol(cfg.protocol, cfg.protocol_config)
     effective_limits = protocol.adjust_limits(cfg.limits)
@@ -131,11 +148,11 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
         role: SamplingOverrides(**to_dict(cfg.policies[policy].sampling))
         for role, policy in cfg.seating.items()
     }
-    total = len(tasks) * cfg.episodes_per_task
+    total = len(planned) * cfg.episodes_per_task
     backend = ",".join(sorted({parse_ref(spec.ref).kind for spec in cfg.policies.values()}))
     pending = iter(
         (task, index)
-        for task in tasks
+        for task in planned
         for index in range(cfg.episodes_per_task)
         if episode_id(task.task_id, run.config_hash, index) not in done
     )
@@ -215,8 +232,14 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
         raise stopped
     saved = compact(run, record_tokens=cfg.record_tokens)
     failures = sum(not row["ok"] for row in saved)
-    if failures:
-        warnings.warn(f"rollout has {failures} failed episodes; resume to retry", stacklevel=2)
+    notes = [f"rollout has {failures} failed episodes; resume to retry"] if failures else []
+    if paused:
+        notes.append(
+            f"rollout paused after {len(planned)} of {len(tasks)} tasks; rerun without "
+            "stop_after_tasks (same --out) to resume the rest"
+        )
+    for note in notes:
+        warnings.warn(note, stacklevel=2)
     usage: dict[str, float] = {
         key: 0.0
         for key in ("prompt_tokens", "completion_tokens", "cached_prompt_tokens", "cost_usd")
@@ -246,8 +269,9 @@ async def rollout(cfg: RolloutConfig, run: RunDir) -> EpisodeSet:
             "seating": cfg.seating,
             "policy_specs": resolved_specs,
             "limits": to_dict(effective_limits),
-            "warnings": [f"rollout has {failures} failed episodes; resume to retry"]
-            if failures
-            else [],
+            "n_tasks": len(tasks),
+            "n_tasks_sampled": len(planned),
+            "paused": paused,
+            "warnings": notes,
         },
     )
